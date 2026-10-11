@@ -23,6 +23,7 @@ from kivy.properties import BooleanProperty, NumericProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.filechooser import FileChooserListView
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.spinner import Spinner
@@ -42,6 +43,8 @@ TOOL_STYLUS = 2
 TOOL_ERASER = 4
 MIN_SCALE = 0.45
 MAX_SCALE = 6.0
+PAGE_GAP = 28.0
+SOURCE_STYLUS = 0x4002
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
 COLOR_BLACK: Rgba = (0.0, 0.0, 0.0, 1.0)
@@ -55,10 +58,9 @@ SAVE_REQUEST = 4102
 SPEN_KEYCODES = {110, 139, 188, 189, 308, 309}
 
 SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
-    (".notes", "application/json", "Companion (*.notes)"),
-    (".json", "application/json", "JSON (*.json)"),
     (".pdf", "application/pdf", "PDF (*.pdf)"),
     (".sdocx", "application/octet-stream", "Samsung Notes (*.sdocx)"),
+    (".json", "application/json", "JSON (*.json)"),
     (".png", "image/png", "PNG image (*.png)"),
 )
 
@@ -190,7 +192,7 @@ class SPenAnnotationCanvas(Widget):
         self._live_color: Rgba = COLOR_BLACK
         self._live_width: float = 2.5
         self._live_dashed: bool = False
-        self._bg_texture: Any = None
+        self._page_textures: List[Any] = []
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -202,6 +204,7 @@ class SPenAnnotationCanvas(Widget):
             view_pan_y=self._on_view,
             page_width=self._on_view,
             page_height=self._on_view,
+            page_count=self._on_view,
         )
         Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
 
@@ -214,24 +217,49 @@ class SPenAnnotationCanvas(Widget):
     def _on_view(self, *_args: Any) -> None:
         self.redraw_all()
 
-    def set_background_image(self, path: str) -> None:
-        image = CoreImage(path)
-        self._bg_texture = image.texture
+    def set_page_images(self, paths: Sequence[str]) -> None:
+        textures: List[Any] = []
+        for path in paths:
+            try:
+                textures.append(CoreImage(path).texture)
+            except Exception:
+                continue
+        self._page_textures = textures
         app = App.get_running_app()
-        app.page_width = float(image.texture.size[0])
-        app.page_height = float(image.texture.size[1])
+        if textures:
+            app.page_width = float(textures[0].size[0])
+            app.page_height = float(textures[0].size[1])
+            app.page_count = max(1, len(textures))
         self.redraw_all()
+
+    def set_blank_notebook(self, count: int, width: float, height: float) -> None:
+        self._page_textures = []
+        app = App.get_running_app()
+        app.page_width = max(1.0, float(width))
+        app.page_height = max(1.0, float(height))
+        app.page_count = max(1, int(count))
+        self.redraw_all()
+
+    def _notebook_height(self, page_h: float) -> float:
+        count = max(1, int(App.get_running_app().page_count))
+        return count * page_h + (count - 1) * PAGE_GAP
+
+    def _page_origin_y(self, index: int, page_h: float) -> float:
+        count = max(1, int(App.get_running_app().page_count))
+        return (count - 1 - index) * (page_h + PAGE_GAP)
 
     def _page_metrics(self) -> Tuple[float, float, float, float, float, float, float]:
         app = App.get_running_app()
         page_w = max(1.0, float(app.page_width))
         page_h = max(1.0, float(app.page_height))
+        notebook_h = self._notebook_height(page_h)
         width, height = float(self.width), float(self.height)
-        fit = min(width / page_w, height / page_h)
+        fit = width / page_w if page_w else 1.0
         scale = fit * float(app.view_scale)
-        disp_w, disp_h = page_w * scale, page_h * scale
+        disp_w = page_w * scale
+        disp_h = notebook_h * scale
         origin_x = self.x + (width - disp_w) / 2.0 + float(app.view_pan_x)
-        origin_y = self.y + (height - disp_h) / 2.0 + float(app.view_pan_y)
+        origin_y = self.y + height - disp_h + float(app.view_pan_y)
         return origin_x, origin_y, disp_w, disp_h, scale, page_w, page_h
 
     def to_doc(self, x: float, y: float) -> Point:
@@ -248,11 +276,20 @@ class SPenAnnotationCanvas(Widget):
         if button == "right" or getattr(app, "spen_button_held", False):
             return "eraser"
         if not is_android():
+            if getattr(touch, "is_touch", False) and str(getattr(touch, "device", "")).startswith("wm_touch"):
+                return "finger"
             return "stylus"
         tool = int(getattr(app, "tool_type", 0) or 0)
-        if tool == TOOL_ERASER:
+        down_tool = int(getattr(app, "down_tool_type", tool) or 0)
+        source = int(getattr(app, "input_source", 0) or 0)
+        if tool == TOOL_ERASER or down_tool == TOOL_ERASER:
             return "eraser"
-        if tool == TOOL_STYLUS:
+        stylus = (
+            tool == TOOL_STYLUS
+            or down_tool == TOOL_STYLUS
+            or bool(source & SOURCE_STYLUS)
+        )
+        if stylus and not bool(getattr(app, "has_finger_pointer", False)):
             return "stylus"
         return "finger"
 
@@ -291,16 +328,27 @@ class SPenAnnotationCanvas(Widget):
 
     def redraw_all(self) -> None:
         origin_x, origin_y, _dw, _dh, scale, page_w, page_h = self._page_metrics()
+        count = max(1, int(App.get_running_app().page_count))
         self.canvas.clear()
         with self.canvas:
             PushMatrix()
             Translate(origin_x, origin_y)
             Scale(scale, scale, 1)
-            Color(*PAGE_WHITE)
-            Rectangle(pos=(0, 0), size=(page_w, page_h))
-            if self.show_document_image and self._bg_texture is not None:
-                Color(1, 1, 1, 1)
-                Rectangle(texture=self._bg_texture, pos=(0, 0), size=(page_w, page_h))
+            for index in range(count):
+                page_y = self._page_origin_y(index, page_h)
+                Color(*PAGE_WHITE)
+                Rectangle(pos=(0, page_y), size=(page_w, page_h))
+                if (
+                    self.show_document_image
+                    and index < len(self._page_textures)
+                    and self._page_textures[index] is not None
+                ):
+                    Color(1, 1, 1, 1)
+                    Rectangle(
+                        texture=self._page_textures[index],
+                        pos=(0, page_y),
+                        size=(page_w, page_h),
+                    )
             for record in self.strokes:
                 self._draw_record(record)
             if len(self.current_stroke) >= 2:
@@ -368,8 +416,9 @@ class SPenAnnotationCanvas(Widget):
         app.view_scale = new_scale
         doc_x, doc_y = app._pinch_doc
         _ox, _oy, _dw, _dh, scale, page_w, page_h = self._page_metrics()
+        notebook_h = self._notebook_height(page_h)
         fit_x = self.x + (self.width - page_w * scale) / 2.0
-        fit_y = self.y + (self.height - page_h * scale) / 2.0
+        fit_y = self.y + self.height - notebook_h * scale
         app.view_pan_x = mid[0] - fit_x - doc_x * scale
         app.view_pan_y = mid[1] - fit_y - doc_y * scale
 
@@ -468,17 +517,14 @@ class SPenAnnotationCanvas(Widget):
         self.redraw_all()
 
 
-class RootLayout(BoxLayout):
-    """Light-themed shell: toolbar, PDF canvas, collapsible notes panel."""
+class RootLayout(FloatLayout):
+    """Notebook workspace with an overlay toolbar that stays above the document."""
 
     notes_expanded = BooleanProperty(True)
+    toolbar_visible = BooleanProperty(True)
 
     def __init__(self, **kwargs: Any) -> None:
-        kwargs.setdefault("orientation", "vertical")
-        kwargs.setdefault("spacing", dp(6))
-        kwargs.setdefault("padding", dp(6))
         super().__init__(**kwargs)
-
         self.pdf_canvas = SPenAnnotationCanvas(show_document_image=True)
         self.notes_canvas = SPenAnnotationCanvas(show_document_image=False)
         self.side_panel = self._build_side_panel()
@@ -491,18 +537,48 @@ class RootLayout(BoxLayout):
             valign="middle",
         )
         self.tool_buttons: Dict[str, Button] = {}
-        self.page_label = Label(
-            text="אין PDF פתוח",
-            size_hint_x=0.4,
-            color=(0.2, 0.2, 0.22, 1),
+        self.workspace = BoxLayout(orientation="horizontal", spacing=dp(6), padding=dp(6))
+        self.workspace.add_widget(self.side_panel)
+        self.workspace.add_widget(self.pdf_canvas)
+        self.chrome = BoxLayout(
+            orientation="vertical",
+            size_hint=(1, None),
+            height=dp(72),
+            pos_hint={"x": 0, "top": 1},
+            padding=(dp(6), dp(4)),
+            spacing=dp(2),
         )
-        self.add_widget(self._build_toolbar())
-        self.add_widget(self._build_page_bar())
-        self.add_widget(self._build_workspace())
-        self.add_widget(self.status_label)
+        with self.chrome.canvas.before:
+            Color(0.95, 0.95, 0.96, 0.97)
+            self._chrome_bg = Rectangle()
+        self.chrome.bind(
+            pos=lambda *_args: setattr(self._chrome_bg, "pos", self.chrome.pos),
+            size=lambda *_args: setattr(self._chrome_bg, "size", self.chrome.size),
+        )
+        self.chrome.add_widget(self._build_toolbar())
+        self.chrome.add_widget(self.status_label)
+        self.restore_btn = Button(
+            text="▲ כלים",
+            size_hint=(None, None),
+            size=(dp(92), dp(32)),
+            pos_hint={"center_x": 0.5, "top": 1},
+            color=(0.12, 0.12, 0.14, 1),
+            background_color=BTN_IDLE,
+            opacity=0,
+            disabled=True,
+        )
+        self.restore_btn.bind(on_release=self.show_toolbar)
+        self.add_widget(self.workspace)
+        self.add_widget(self.chrome)
+        self.add_widget(self.restore_btn)
         self.refresh_tool_styles()
+        self.bind(size=self._fit_workspace, pos=self._fit_workspace)
         Window.bind(size=lambda *_args: self.apply_orientation())
         Clock.schedule_once(lambda _dt: self.apply_orientation(), 0)
+
+    def _fit_workspace(self, *_args: Any) -> None:
+        self.workspace.size = self.size
+        self.workspace.pos = self.pos
 
     def set_status(self, message: str) -> None:
         self.status_label.text = message
@@ -517,7 +593,6 @@ class RootLayout(BoxLayout):
         )
         actions: Sequence[Tuple[str, str, Any]] = (
             ("open", "Open PDF", app.open_pdf),
-            ("save", "Save .notes", app.save_document),
             ("save_as", "Save As", app.save_document_as),
             ("black", "Black", app.set_color_black),
             ("red", "Red", app.set_color_red),
@@ -531,7 +606,32 @@ class RootLayout(BoxLayout):
             button.bind(on_release=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
+        hide_btn = Button(
+            text="▾",
+            size_hint_x=None,
+            width=dp(40),
+            color=(0.12, 0.12, 0.14, 1),
+        )
+        hide_btn.bind(on_release=self.hide_toolbar)
+        toolbar.add_widget(hide_btn)
+        self.tool_buttons["hide"] = hide_btn
         return toolbar
+
+    def hide_toolbar(self, *_args: Any) -> None:
+        self.toolbar_visible = False
+        self.chrome.opacity = 0
+        self.chrome.disabled = True
+        self.chrome.height = 0
+        self.restore_btn.opacity = 1
+        self.restore_btn.disabled = False
+
+    def show_toolbar(self, *_args: Any) -> None:
+        self.toolbar_visible = True
+        self.chrome.opacity = 1
+        self.chrome.disabled = False
+        self.chrome.height = dp(72)
+        self.restore_btn.opacity = 0
+        self.restore_btn.disabled = True
 
     def refresh_tool_styles(self) -> None:
         app = App.get_running_app()
@@ -543,13 +643,16 @@ class RootLayout(BoxLayout):
             "eraser": bool(app.is_eraser),
         }
         for key, button in self.tool_buttons.items():
+            if key in {"open", "save_as", "toggle", "hide"}:
+                button.background_color = BTN_IDLE
+                continue
             active = mapping.get(key, False)
             button.background_color = BTN_ACTIVE if active else BTN_IDLE
 
     def _build_side_panel(self) -> BoxLayout:
         panel = BoxLayout(
             orientation="vertical",
-            size_hint_x=0.32,
+            size_hint_x=0.38,
             spacing=dp(4),
             padding=dp(4),
         )
@@ -565,51 +668,18 @@ class RootLayout(BoxLayout):
         panel.add_widget(self.notes_canvas)
         return panel
 
-    def _build_page_bar(self) -> BoxLayout:
-        app = App.get_running_app()
-        bar = BoxLayout(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=dp(36),
-            spacing=dp(6),
-        )
-        prev_btn = Button(text="עמוד קודם", size_hint_x=0.3)
-        next_btn = Button(text="עמוד הבא", size_hint_x=0.3)
-        prev_btn.bind(on_release=app.prev_pdf_page)
-        next_btn.bind(on_release=app.next_pdf_page)
-        bar.add_widget(prev_btn)
-        bar.add_widget(self.page_label)
-        bar.add_widget(next_btn)
-        return bar
-
-    def _build_workspace(self) -> BoxLayout:
-        self.workspace = BoxLayout(orientation="horizontal", spacing=dp(6))
-        self.workspace.add_widget(self.pdf_canvas)
-        self.workspace.add_widget(self.side_panel)
-        return self.workspace
-
     def apply_orientation(self, *_args: Any) -> None:
-        """Stack the notes panel under the PDF in portrait; side-by-side in landscape."""
-        portrait = Window.height > Window.width
-        self.workspace.orientation = "vertical" if portrait else "horizontal"
+        self.workspace.orientation = "horizontal"
         if not self.notes_expanded:
             self.side_panel.opacity = 0
             self.side_panel.disabled = True
-            if portrait:
-                self.side_panel.size_hint = (1, 0)
-                self.pdf_canvas.size_hint = (1, 1)
-            else:
-                self.side_panel.size_hint = (0, 1)
-                self.pdf_canvas.size_hint = (1, 1)
+            self.side_panel.size_hint = (0, 1)
+            self.pdf_canvas.size_hint = (1, 1)
             return
         self.side_panel.opacity = 1
         self.side_panel.disabled = False
-        if portrait:
-            self.pdf_canvas.size_hint = (1, 0.72)
-            self.side_panel.size_hint = (1, 0.28)
-        else:
-            self.pdf_canvas.size_hint = (0.68, 1)
-            self.side_panel.size_hint = (0.32, 1)
+        self.side_panel.size_hint = (0.38, 1)
+        self.pdf_canvas.size_hint = (0.62, 1)
 
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
@@ -617,9 +687,9 @@ class RootLayout(BoxLayout):
 
     def set_page_status(self, index: int, count: int) -> None:
         if count <= 0:
-            self.page_label.text = "אין PDF פתוח"
+            self.set_status("אין PDF פתוח")
             return
-        self.page_label.text = f"עמוד {index + 1} מתוך {count}"
+        self.set_status(f"מחברת נגללת · {count} עמודים")
 
 
 class SamsungNotesCompanionApp(App):
@@ -630,6 +700,7 @@ class SamsungNotesCompanionApp(App):
     view_pan_y = NumericProperty(0.0)
     page_width = NumericProperty(800.0)
     page_height = NumericProperty(1100.0)
+    page_count = NumericProperty(1)
     tool_type = NumericProperty(0)
 
     def build(self) -> RootLayout:
@@ -640,6 +711,9 @@ class SamsungNotesCompanionApp(App):
         self.is_dashed: bool = False
         self.spen_button_held: bool = False
         self.pointer_count = 1
+        self.down_tool_type = 0
+        self.input_source = 0
+        self.has_finger_pointer = False
         self._fingers: Dict[Any, Tuple[float, float]] = {}
         self.pdf_path: Optional[str] = None
         self._pdf_page_index: int = 0
@@ -704,13 +778,24 @@ class SamsungNotesCompanionApp(App):
         self._attach_spen_listeners()
 
     def _update_spen_from_motion(self, event: Any) -> None:
+        action_down = 0
+        action_pointer_down = 5
         try:
             state = int(event.getButtonState())
-            tool = int(event.getToolType(0))
-            self.pointer_count = int(event.getPointerCount())
+            action = int(event.getActionMasked())
+            index = int(event.getActionIndex())
+            count = int(event.getPointerCount())
+            tool = int(event.getToolType(index))
+            source = int(event.getSource())
+            tools = [int(event.getToolType(i)) for i in range(count)]
         except Exception:
             return
+        self.pointer_count = count
+        self.input_source = source
+        self.has_finger_pointer = TOOL_FINGER in tools
         self.tool_type = tool
+        if action in (action_down, action_pointer_down):
+            self.down_tool_type = tool
         stylus_bits = 0x02 | 0x20 | 0x40
         self.spen_button_held = bool(state & stylus_bits) or tool == TOOL_ERASER
 
@@ -883,11 +968,50 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             return None
 
+    def _stacked_to_pages(
+        self, strokes: Sequence[StrokeRecord]
+    ) -> Dict[int, List[StrokeRecord]]:
+        count = max(1, int(self.page_count or self._pdf_page_count or 1))
+        page_h = max(1.0, float(self.page_height))
+        span = page_h + PAGE_GAP
+        pages: Dict[int, List[StrokeRecord]] = {index: [] for index in range(count)}
+        for record in strokes:
+            points = record.get("points") or []
+            if not points:
+                continue
+            from_bottom = int(float(points[0][1]) // span)
+            from_bottom = max(0, min(count - 1, from_bottom))
+            page = count - 1 - from_bottom
+            origin_y = from_bottom * span
+            clone = dict(record)
+            clone["points"] = [
+                [float(point[0]), float(point[1]) - origin_y] for point in points
+            ]
+            pages.setdefault(page, []).append(clone)
+        return pages
+
+    def _pages_to_stacked(
+        self, pages: Dict[int, List[StrokeRecord]]
+    ) -> List[StrokeRecord]:
+        count = max(1, int(self.page_count or self._pdf_page_count or 1))
+        page_h = max(1.0, float(self.page_height))
+        stacked: List[StrokeRecord] = []
+        for index, records in pages.items():
+            origin_y = (count - 1 - int(index)) * (page_h + PAGE_GAP)
+            for record in records:
+                clone = dict(record)
+                clone["points"] = [
+                    [float(point[0]), float(point[1]) + origin_y]
+                    for point in (record.get("points") or [])
+                ]
+                stacked.append(clone)
+        return stacked
+
     def _stash_current_page_strokes(self) -> None:
-        self._page_strokes[self._pdf_page_index] = (
+        self._page_strokes = self._stacked_to_pages(
             self.root_layout.pdf_canvas.serialized_strokes()
         )
-        self._notes_strokes[self._pdf_page_index] = (
+        self._notes_strokes = self._stacked_to_pages(
             self.root_layout.notes_canvas.serialized_strokes()
         )
 
@@ -896,34 +1020,31 @@ class SamsungNotesCompanionApp(App):
         self.view_pan_x = 0.0
         self.view_pan_y = 0.0
 
-    def _show_pdf_page(self, index: int, uri: Any = None) -> None:
+    def _load_notebook(self, uri: Any = None) -> None:
         if self._pdf_page_count <= 0:
             return
-        index = max(0, min(index, self._pdf_page_count - 1))
-        self._stash_current_page_strokes()
-        self._pdf_page_index = index
-        preview = self._render_pdf_page(index, uri)
-        if preview:
-            self.root_layout.pdf_canvas.set_background_image(preview)
+        self.page_count = int(self._pdf_page_count)
+        paths: List[str] = []
+        for index in range(self._pdf_page_count):
+            preview = self._render_pdf_page(index, uri)
+            if preview:
+                paths.append(preview)
+        if paths:
+            self.root_layout.pdf_canvas.set_page_images(paths)
+        else:
+            self.root_layout.pdf_canvas.set_blank_notebook(
+                self._pdf_page_count, self.page_width, self.page_height
+            )
+        self.root_layout.notes_canvas.set_blank_notebook(
+            self._pdf_page_count, self.page_width, self.page_height
+        )
         self.root_layout.pdf_canvas.load_strokes(
-            self._page_strokes.get(index, [])
+            self._pages_to_stacked(self._page_strokes)
         )
         self.root_layout.notes_canvas.load_strokes(
-            self._notes_strokes.get(index, [])
+            self._pages_to_stacked(self._notes_strokes)
         )
-        self.root_layout.set_page_status(index, self._pdf_page_count)
-
-    def prev_pdf_page(self, *_args: Any) -> None:
-        if self._pdf_page_count <= 0:
-            self._notify("קודם פתחו קובץ PDF")
-            return
-        self._show_pdf_page(self._pdf_page_index - 1)
-
-    def next_pdf_page(self, *_args: Any) -> None:
-        if self._pdf_page_count <= 0:
-            self._notify("קודם פתחו קובץ PDF")
-            return
-        self._show_pdf_page(self._pdf_page_index + 1)
+        self.root_layout.set_page_status(0, self._pdf_page_count)
 
     def _uri_is_pdf(self, uri: Any) -> bool:
         try:
@@ -947,7 +1068,7 @@ class SamsungNotesCompanionApp(App):
                 self._pdf_page_count = self._pdf_page_count_from(uri)
                 self.root_layout.pdf_canvas.load_strokes([])
                 self.root_layout.notes_canvas.load_strokes([])
-                self._show_pdf_page(0, uri)
+                self._load_notebook(uri)
                 self._notify(f"PDF נפתח לכתיבה: {display}")
             except Exception as exc:
                 self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
@@ -1101,16 +1222,27 @@ class SamsungNotesCompanionApp(App):
 
     def _apply_payload(self, payload: Dict[str, Any]) -> None:
         self.pdf_path = payload.get("pdf_path")
+        self._pdf_page_index = int(payload.get("pdf_page_index") or 0)
+        self._pdf_page_count = int(payload.get("pdf_page_count") or 1)
+        self.page_count = max(1, self._pdf_page_count)
         self._page_strokes = {
             int(key): value for key, value in (payload.get("pdf_pages") or {}).items()
         }
         self._notes_strokes = {
             int(key): value for key, value in (payload.get("notes_pages") or {}).items()
         }
-        self.root_layout.pdf_canvas.load_strokes(payload.get("pdf_canvas") or [])
-        self.root_layout.notes_canvas.load_strokes(
+        pdf_strokes = self._pages_to_stacked(self._page_strokes) or (
+            payload.get("pdf_canvas") or []
+        )
+        notes_strokes = self._pages_to_stacked(self._notes_strokes) or (
             payload.get("notes_canvas") or []
         )
+        self.root_layout.notes_canvas.set_blank_notebook(
+            self.page_count, self.page_width, self.page_height
+        )
+        self.root_layout.pdf_canvas.load_strokes(pdf_strokes)
+        self.root_layout.notes_canvas.load_strokes(notes_strokes)
+        self.root_layout.set_page_status(0, self.page_count)
 
     def _load_sdocx_file(self, path: str) -> None:
         with zipfile.ZipFile(path, "r") as archive:
@@ -1125,7 +1257,7 @@ class SamsungNotesCompanionApp(App):
                 self.pdf_path = handle.name
                 if is_android():
                     self._pdf_page_count = self._pdf_page_count_from()
-                    self._show_pdf_page(self._pdf_page_index)
+                    self._load_notebook()
 
     def _android_activity(self) -> Any:
         from jnius import autoclass
@@ -1214,7 +1346,7 @@ class SamsungNotesCompanionApp(App):
                     self._pdf_page_count = self._pdf_page_count_from()
                     self.root_layout.pdf_canvas.load_strokes([])
                     self.root_layout.notes_canvas.load_strokes([])
-                    self._show_pdf_page(0)
+                    self._load_notebook()
                     self._notify(f"PDF נפתח לכתיבה: {os.path.basename(path)}")
                     return
                 except Exception as exc:
@@ -1228,7 +1360,7 @@ class SamsungNotesCompanionApp(App):
             return
         self._notify("סוג הקובץ אינו נתמך")
 
-    def _desktop_save_dialog(self, default_ext: str = ".notes") -> None:
+    def _desktop_save_dialog(self, default_ext: str = ".pdf") -> None:
         chooser = FileChooserListView(path=self._desktop_start_dir())
         name_input = TextInput(
             text=f"my_drawing{default_ext}",
@@ -1250,7 +1382,7 @@ class SamsungNotesCompanionApp(App):
             for ext, mime, title in SAVE_TYPES:
                 if title == label:
                     return ext, mime
-            return ".notes", "application/json"
+            return ".pdf", "application/pdf"
 
         def _on_type(_spinner: Spinner, value: str) -> None:
             ext, _mime = _ext_for_label(value)
@@ -1303,19 +1435,9 @@ class SamsungNotesCompanionApp(App):
                 return
         self._desktop_open_dialog()
 
-    def save_document(self, *_args: Any) -> None:
-        if is_android():
-            try:
-                self._start_android_save(".notes", "application/json")
-                return
-            except Exception as exc:
-                self._notify(f"לא ניתן לשמור: {exc}")
-                return
-        self._desktop_save_dialog(".notes")
-
     def save_document_as(self, *_args: Any) -> None:
         if not is_android():
-            self._desktop_save_dialog(".notes")
+            self._desktop_save_dialog(".pdf")
             return
 
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
