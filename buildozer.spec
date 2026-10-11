@@ -19,7 +19,7 @@ source.include_exts = py,png,jpg,jpeg,atlas,kv,pdf
 source.exclude_exts = spec
 
 # (list) List of directory names to exclude
-source.exclude_dirs = tests, bin, venv, .git, .github, .buildozer
+source.exclude_dirs = tests, bin, venv, .git, .github, .buildozer, __pycache__
 
 # (str) Application versioning (method 1)
 version = 0.1
@@ -52,7 +52,8 @@ android.ndk = 25b
 # (bool) Accept Android SDK license (required for CI)
 android.accept_sdk_license = True
 
-# (str) python-for-android branch to use
+# (str) python-for-android fork/branch (master is the stable line for Python 3.10)
+p4a.fork = kivy
 p4a.branch = master
 
 # Do not force setup.py integration; Kivy recipes expect --ignore-setup-py.
