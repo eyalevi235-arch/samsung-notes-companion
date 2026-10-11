@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
 import tempfile
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -13,10 +16,10 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
 from kivy.core.window import Window
-from kivy.graphics import Color, Line, Rectangle
+from kivy.graphics import Color, Line, PopMatrix, PushMatrix, Rectangle, Scale, Translate
 from kivy.input.motionevent import MotionEvent
 from kivy.metrics import dp
-from kivy.properties import BooleanProperty, ListProperty, NumericProperty
+from kivy.properties import BooleanProperty, NumericProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.filechooser import FileChooserListView
@@ -31,9 +34,14 @@ Point = Tuple[float, float]
 Rgba = Tuple[float, float, float, float]
 StrokeRecord = Dict[str, Any]
 
-PDF_BG: Rgba = (1.0, 1.0, 1.0, 1.0)
-NOTES_BG: Rgba = (1.0, 0.98, 0.82, 1.0)
+LETTERBOX: Rgba = (0.90, 0.90, 0.91, 1.0)
+PAGE_WHITE: Rgba = (1.0, 1.0, 1.0, 1.0)
 SPEN_ERASER_WIDTH = 15.0
+TOOL_FINGER = 1
+TOOL_STYLUS = 2
+TOOL_ERASER = 4
+MIN_SCALE = 0.45
+MAX_SCALE = 6.0
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
 COLOR_BLACK: Rgba = (0.0, 0.0, 0.0, 1.0)
@@ -47,8 +55,10 @@ SAVE_REQUEST = 4102
 SPEN_KEYCODES = {110, 139, 188, 189, 308, 309}
 
 SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
-    (".notes", "application/json", "Samsung Notes (*.notes)"),
+    (".notes", "application/json", "Companion (*.notes)"),
     (".json", "application/json", "JSON (*.json)"),
+    (".pdf", "application/pdf", "PDF (*.pdf)"),
+    (".sdocx", "application/octet-stream", "Samsung Notes (*.sdocx)"),
     (".png", "image/png", "PNG image (*.png)"),
 )
 
@@ -103,76 +113,148 @@ def dashed_polylines(
     return dashes
 
 
+def _jpeg_pages_to_pdf(pages: Sequence[Tuple[bytes, int, int]]) -> bytes:
+    """Write a simple PDF 1.4 file that embeds one JPEG image per page."""
+    if not pages:
+        pages = [(b"", 100, 100)]
+    objects: List[bytes] = []
+
+    def add(payload: bytes) -> int:
+        objects.append(payload)
+        return len(objects)
+
+    add(b"<< /Type /Catalog /Pages 2 0 R >>")
+    kids = " ".join(f"{3 + index * 3} 0 R" for index in range(len(pages)))
+    add(
+        f"<< /Type /Pages /Count {len(pages)} /Kids [{kids}] >>".encode("ascii")
+    )
+    for index, (jpeg, width, height) in enumerate(pages):
+        page_id = 3 + index * 3
+        img_id = page_id + 2
+        add(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+                f"/Resources << /XObject << /Im0 {img_id} 0 R >> >> "
+                f"/Contents {page_id + 1} 0 R >>"
+            ).encode("ascii")
+        )
+        stream = f"q {width} 0 0 {height} 0 0 cm /Im0 Do Q".encode("ascii")
+        add(
+            f"<< /Length {len(stream)} >>\nstream\n".encode("ascii")
+            + stream
+            + b"\nendstream"
+        )
+        add(
+            (
+                f"<< /Type /XObject /Subtype /Image /Width {width} "
+                f"/Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8 "
+                f"/Filter /DCTDecode /Length {len(jpeg)} >>\nstream\n"
+            ).encode("ascii")
+            + jpeg
+            + b"\nendstream"
+        )
+    body = b""
+    offsets = [0]
+    cursor = 0
+    header = b"%PDF-1.4\n"
+    cursor += len(header)
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(cursor)
+        chunk = f"{index} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
+        body += chunk
+        cursor += len(chunk)
+    xref_pos = cursor
+    xref = f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii")
+    for offset in offsets[1:]:
+        xref += f"{offset:010d} 00000 n \n".encode("ascii")
+    trailer = (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_pos}\n%%EOF\n"
+    ).encode("ascii")
+    return header + body + xref + trailer
+
+
 class SPenAnnotationCanvas(Widget):
-    """Freehand canvas for S Pen and finger input on a solid page color."""
+    """Page-aligned canvas: S Pen draws, fingers pan/pinch, view is shared."""
 
     ink_width = NumericProperty(2.5)
     min_width = NumericProperty(1.0)
     max_width = NumericProperty(6.0)
-    bg_color = ListProperty([1.0, 1.0, 1.0, 1.0])
+    show_document_image = BooleanProperty(False)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.strokes: List[StrokeRecord] = []
         self.current_stroke: List[Point] = []
         self._bg_rect: Optional[Rectangle] = None
-        self._bg_color_instr: Optional[Color] = None
-        self._bg_image_rect: Optional[Rectangle] = None
         self._live_color: Rgba = COLOR_BLACK
         self._live_width: float = 2.5
         self._live_dashed: bool = False
         self._bg_texture: Any = None
-        self._bind_canvas_background()
-        self.bind(bg_color=self._sync_bg_color)
-
-    def _bind_canvas_background(self) -> None:
         with self.canvas.before:
-            self._bg_color_instr = Color(*self.bg_color)
+            Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
-            Color(1, 1, 1, 1)
-            self._bg_image_rect = Rectangle(pos=self.pos, size=self.size)
-            self._bg_image_rect.texture = None
-        self.bind(pos=self._sync_background, size=self._sync_background)
+        self.bind(pos=self._on_geom, size=self._on_geom)
+        app = App.get_running_app()
+        app.bind(
+            view_scale=self._on_view,
+            view_pan_x=self._on_view,
+            view_pan_y=self._on_view,
+            page_width=self._on_view,
+            page_height=self._on_view,
+        )
+        Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
 
-    def _sync_background(self, *_args: Any) -> None:
+    def _on_geom(self, *_args: Any) -> None:
         if self._bg_rect is not None:
             self._bg_rect.pos = self.pos
             self._bg_rect.size = self.size
-        if self._bg_image_rect is None:
-            return
-        if self._bg_texture is None:
-            self._bg_image_rect.size = (0, 0)
-            return
-        tex_w, tex_h = self._bg_texture.size
-        width, height = self.size
-        if tex_w < 1 or tex_h < 1 or width < 1 or height < 1:
-            return
-        scale = min(width / float(tex_w), height / float(tex_h))
-        fitted_w, fitted_h = tex_w * scale, tex_h * scale
-        self._bg_image_rect.size = (fitted_w, fitted_h)
-        self._bg_image_rect.pos = (
-            self.x + (width - fitted_w) / 2.0,
-            self.y + (height - fitted_h) / 2.0,
-        )
+        self.redraw_all()
 
-    def _sync_bg_color(self, *_args: Any) -> None:
-        if self._bg_color_instr is not None:
-            self._bg_color_instr.rgba = tuple(self.bg_color)
+    def _on_view(self, *_args: Any) -> None:
+        self.redraw_all()
 
     def set_background_image(self, path: str) -> None:
-        if self._bg_image_rect is None:
-            return
-        self._bg_texture = CoreImage(path).texture
-        self._bg_image_rect.texture = self._bg_texture
-        self._sync_background()
+        image = CoreImage(path)
+        self._bg_texture = image.texture
+        app = App.get_running_app()
+        app.page_width = float(image.texture.size[0])
+        app.page_height = float(image.texture.size[1])
+        self.redraw_all()
 
-    def _page_background(self) -> Rgba:
-        return (
-            float(self.bg_color[0]),
-            float(self.bg_color[1]),
-            float(self.bg_color[2]),
-            float(self.bg_color[3]),
-        )
+    def _page_metrics(self) -> Tuple[float, float, float, float, float, float, float]:
+        app = App.get_running_app()
+        page_w = max(1.0, float(app.page_width))
+        page_h = max(1.0, float(app.page_height))
+        width, height = float(self.width), float(self.height)
+        fit = min(width / page_w, height / page_h)
+        scale = fit * float(app.view_scale)
+        disp_w, disp_h = page_w * scale, page_h * scale
+        origin_x = self.x + (width - disp_w) / 2.0 + float(app.view_pan_x)
+        origin_y = self.y + (height - disp_h) / 2.0 + float(app.view_pan_y)
+        return origin_x, origin_y, disp_w, disp_h, scale, page_w, page_h
+
+    def to_doc(self, x: float, y: float) -> Point:
+        origin_x, origin_y, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+        if scale <= 1e-6:
+            return (0.0, 0.0)
+        return ((x - origin_x) / scale, (y - origin_y) / scale)
+
+    def _classify(self, touch: MotionEvent) -> str:
+        if getattr(touch, "is_mouse_scrolling", False):
+            return "wheel"
+        button = str(getattr(touch, "button", None) or "").lower()
+        app = App.get_running_app()
+        if button == "right" or getattr(app, "spen_button_held", False):
+            return "eraser"
+        if not is_android():
+            return "stylus"
+        tool = int(getattr(app, "tool_type", 0) or 0)
+        if tool == TOOL_ERASER:
+            return "eraser"
+        if tool == TOOL_STYLUS:
+            return "stylus"
+        return "finger"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
         if "pressure" in getattr(touch, "profile", []):
@@ -183,14 +265,13 @@ class SPenAnnotationCanvas(Widget):
 
     def _should_erase(self, touch: MotionEvent) -> bool:
         app = App.get_running_app()
-        button = str(getattr(touch, "button", None) or "").lower()
-        if button in {"right", "middle", "stylus", "eraser"}:
+        if getattr(touch, "button", None) == "right":
             return True
         if bool(getattr(app, "spen_button_held", False)):
             return True
         if bool(getattr(app, "is_eraser", False)):
             return True
-        return False
+        return int(getattr(app, "tool_type", 0) or 0) == TOOL_ERASER
 
     def _draw_record(self, record: StrokeRecord) -> None:
         color = tuple(record.get("color", COLOR_BLACK))
@@ -198,21 +279,40 @@ class SPenAnnotationCanvas(Widget):
         points = record.get("points") or []
         if len(points) < 2:
             return
-        with self.canvas:
-            Color(*color)
-            if record.get("dashed"):
-                for dash in dashed_polylines(points):
-                    Line(points=dash, width=width, cap="round", joint="round")
-            else:
-                flat: List[float] = []
-                for point in points:
-                    flat.extend([float(point[0]), float(point[1])])
-                Line(points=flat, width=width, cap="round", joint="round")
+        Color(*color)
+        if record.get("dashed"):
+            for dash in dashed_polylines(points):
+                Line(points=dash, width=width, cap="round", joint="round")
+        else:
+            flat: List[float] = []
+            for point in points:
+                flat.extend([float(point[0]), float(point[1])])
+            Line(points=flat, width=width, cap="round", joint="round")
 
     def redraw_all(self) -> None:
+        origin_x, origin_y, _dw, _dh, scale, page_w, page_h = self._page_metrics()
         self.canvas.clear()
-        for record in self.strokes:
-            self._draw_record(record)
+        with self.canvas:
+            PushMatrix()
+            Translate(origin_x, origin_y)
+            Scale(scale, scale, 1)
+            Color(*PAGE_WHITE)
+            Rectangle(pos=(0, 0), size=(page_w, page_h))
+            if self.show_document_image and self._bg_texture is not None:
+                Color(1, 1, 1, 1)
+                Rectangle(texture=self._bg_texture, pos=(0, 0), size=(page_w, page_h))
+            for record in self.strokes:
+                self._draw_record(record)
+            if len(self.current_stroke) >= 2:
+                self._draw_record(
+                    {
+                        "points": [list(point) for point in self.current_stroke],
+                        "color": list(self._live_color),
+                        "width": self._live_width,
+                        "dashed": self._live_dashed,
+                    }
+                )
+            PopMatrix()
 
     def _erase_at(self, x: float, y: float, radius: float) -> None:
         radius_sq = radius * radius
@@ -239,49 +339,111 @@ class SPenAnnotationCanvas(Widget):
             self.strokes = kept
             self.redraw_all()
 
+    def _begin_pinch(self, app: Any) -> None:
+        points = list(app._fingers.values())
+        if len(points) < 2:
+            return
+        dist = math.hypot(points[0][0] - points[1][0], points[0][1] - points[1][1])
+        app._pinch_dist = max(dist, 1.0)
+        app._pinch_scale = float(app.view_scale)
+        app._pinch_mid = (
+            (points[0][0] + points[1][0]) / 2.0,
+            (points[0][1] + points[1][1]) / 2.0,
+        )
+        app._pinch_doc = self.to_doc(*app._pinch_mid)
+
+    def _update_pinch(self, app: Any) -> None:
+        points = list(app._fingers.values())
+        if len(points) < 2 or not getattr(app, "_pinch_dist", 0):
+            return
+        dist = math.hypot(points[0][0] - points[1][0], points[0][1] - points[1][1])
+        mid = (
+            (points[0][0] + points[1][0]) / 2.0,
+            (points[0][1] + points[1][1]) / 2.0,
+        )
+        new_scale = max(
+            MIN_SCALE,
+            min(MAX_SCALE, app._pinch_scale * (dist / app._pinch_dist)),
+        )
+        app.view_scale = new_scale
+        doc_x, doc_y = app._pinch_doc
+        _ox, _oy, _dw, _dh, scale, page_w, page_h = self._page_metrics()
+        fit_x = self.x + (self.width - page_w * scale) / 2.0
+        fit_y = self.y + (self.height - page_h * scale) / 2.0
+        app.view_pan_x = mid[0] - fit_x - doc_x * scale
+        app.view_pan_y = mid[1] - fit_y - doc_y * scale
+
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
+        kind = self._classify(touch)
+        if kind == "wheel":
+            app = App.get_running_app()
+            factor = 1.12 if touch.button == "scrollup" else 0.89
+            app.view_scale = max(MIN_SCALE, min(MAX_SCALE, app.view_scale * factor))
+            return True
+        if kind == "finger":
+            app = App.get_running_app()
+            touch.grab(self)
+            app._fingers[touch.uid] = (touch.x, touch.y)
+            if len(app._fingers) >= 2:
+                touch.ud["mode"] = "pinch"
+                self._begin_pinch(app)
+            else:
+                touch.ud["mode"] = "pan"
+                touch.ud["last"] = (touch.x, touch.y)
+            return True
 
         touch.grab(self)
-        if getattr(touch, "button", None) == "right":
-            erase = True
-        else:
-            erase = self._should_erase(touch)
-        if erase:
+        doc = self.to_doc(touch.x, touch.y)
+        if kind == "eraser" or self._should_erase(touch):
             touch.ud["erasing"] = True
-            self._erase_at(touch.x, touch.y, SPEN_ERASER_WIDTH)
+            _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+            self._erase_at(doc[0], doc[1], SPEN_ERASER_WIDTH / max(scale, 0.01))
             return True
 
         app = App.get_running_app()
         self._live_color = tuple(getattr(app, "current_color", COLOR_BLACK))
         self._live_width = self._line_width_for_touch(touch)
         self._live_dashed = bool(getattr(app, "is_dashed", False))
-        self.current_stroke = [(touch.x, touch.y)]
+        self.current_stroke = [doc]
         return True
 
     def on_touch_move(self, touch: MotionEvent) -> bool:
         if touch.grab_current is not self:
             return super().on_touch_move(touch)
-        if touch.ud.get("erasing"):
-            self._erase_at(touch.x, touch.y, SPEN_ERASER_WIDTH)
+        app = App.get_running_app()
+        mode = touch.ud.get("mode")
+        if mode == "pan":
+            last = touch.ud.get("last", (touch.x, touch.y))
+            app.view_pan_x += touch.x - last[0]
+            app.view_pan_y += touch.y - last[1]
+            touch.ud["last"] = (touch.x, touch.y)
             return True
-        self.current_stroke.append((touch.x, touch.y))
+        if mode == "pinch" or touch.uid in getattr(app, "_fingers", {}):
+            app._fingers[touch.uid] = (touch.x, touch.y)
+            if len(app._fingers) >= 2:
+                self._update_pinch(app)
+            return True
+        if touch.ud.get("erasing"):
+            doc = self.to_doc(touch.x, touch.y)
+            _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+            self._erase_at(doc[0], doc[1], SPEN_ERASER_WIDTH / max(scale, 0.01))
+            return True
+        self.current_stroke.append(self.to_doc(touch.x, touch.y))
         self.redraw_all()
-        self._draw_record(
-            {
-                "points": [list(point) for point in self.current_stroke],
-                "color": list(self._live_color),
-                "width": self._live_width,
-                "dashed": self._live_dashed,
-            }
-        )
         return True
 
     def on_touch_up(self, touch: MotionEvent) -> bool:
         if touch.grab_current is not self:
             return super().on_touch_up(touch)
         touch.ungrab(self)
+        app = App.get_running_app()
+        app._fingers.pop(touch.uid, None)
+        if touch.ud.get("mode") in {"pan", "pinch"}:
+            if len(app._fingers) >= 2:
+                self._begin_pinch(app)
+            return True
         if touch.ud.get("erasing"):
             return True
         if len(self.current_stroke) >= 2:
@@ -317,8 +479,8 @@ class RootLayout(BoxLayout):
         kwargs.setdefault("padding", dp(6))
         super().__init__(**kwargs)
 
-        self.pdf_canvas = SPenAnnotationCanvas(bg_color=list(PDF_BG))
-        self.notes_canvas = SPenAnnotationCanvas(bg_color=list(NOTES_BG))
+        self.pdf_canvas = SPenAnnotationCanvas(show_document_image=True)
+        self.notes_canvas = SPenAnnotationCanvas(show_document_image=False)
         self.side_panel = self._build_side_panel()
         self.status_label = Label(
             text="",
@@ -463,6 +625,13 @@ class RootLayout(BoxLayout):
 class SamsungNotesCompanionApp(App):
     """Application state and entry point for the companion client."""
 
+    view_scale = NumericProperty(1.0)
+    view_pan_x = NumericProperty(0.0)
+    view_pan_y = NumericProperty(0.0)
+    page_width = NumericProperty(800.0)
+    page_height = NumericProperty(1100.0)
+    tool_type = NumericProperty(0)
+
     def build(self) -> RootLayout:
         Window.clearcolor = (0.95, 0.95, 0.95, 1)
         self.title = "Samsung Notes Companion"
@@ -470,10 +639,13 @@ class SamsungNotesCompanionApp(App):
         self.is_eraser: bool = False
         self.is_dashed: bool = False
         self.spen_button_held: bool = False
+        self.pointer_count = 1
+        self._fingers: Dict[Any, Tuple[float, float]] = {}
         self.pdf_path: Optional[str] = None
         self._pdf_page_index: int = 0
         self._pdf_page_count: int = 0
         self._page_strokes: Dict[int, List[StrokeRecord]] = {}
+        self._notes_strokes: Dict[int, List[StrokeRecord]] = {}
         self._pending_save: Optional[Tuple[str, str]] = None
         self._stylus_listener: Any = None
         self.root_layout = RootLayout()
@@ -535,10 +707,12 @@ class SamsungNotesCompanionApp(App):
         try:
             state = int(event.getButtonState())
             tool = int(event.getToolType(0))
+            self.pointer_count = int(event.getPointerCount())
         except Exception:
             return
+        self.tool_type = tool
         stylus_bits = 0x02 | 0x20 | 0x40
-        self.spen_button_held = bool(state & stylus_bits) or tool == 4
+        self.spen_button_held = bool(state & stylus_bits) or tool == TOOL_ERASER
 
     def _attach_spen_listeners(self) -> None:
         try:
@@ -713,6 +887,14 @@ class SamsungNotesCompanionApp(App):
         self._page_strokes[self._pdf_page_index] = (
             self.root_layout.pdf_canvas.serialized_strokes()
         )
+        self._notes_strokes[self._pdf_page_index] = (
+            self.root_layout.notes_canvas.serialized_strokes()
+        )
+
+    def _reset_view(self) -> None:
+        self.view_scale = 1.0
+        self.view_pan_x = 0.0
+        self.view_pan_y = 0.0
 
     def _show_pdf_page(self, index: int, uri: Any = None) -> None:
         if self._pdf_page_count <= 0:
@@ -725,6 +907,9 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.pdf_canvas.set_background_image(preview)
         self.root_layout.pdf_canvas.load_strokes(
             self._page_strokes.get(index, [])
+        )
+        self.root_layout.notes_canvas.load_strokes(
+            self._notes_strokes.get(index, [])
         )
         self.root_layout.set_page_status(index, self._pdf_page_count)
 
@@ -756,15 +941,24 @@ class SamsungNotesCompanionApp(App):
             try:
                 self.pdf_path = str(uri.toString())
                 self._page_strokes = {}
+                self._notes_strokes = {}
                 self._pdf_page_index = 0
+                self._reset_view()
                 self._pdf_page_count = self._pdf_page_count_from(uri)
                 self.root_layout.pdf_canvas.load_strokes([])
+                self.root_layout.notes_canvas.load_strokes([])
                 self._show_pdf_page(0, uri)
                 self._notify(f"PDF נפתח לכתיבה: {display}")
             except Exception as exc:
                 self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
             return
-        suffix = ".notes" if ".notes" in display.lower() else ".json"
+        lower = display.lower()
+        if ".sdocx" in lower:
+            suffix = ".sdocx"
+        elif ".notes" in lower:
+            suffix = ".notes"
+        else:
+            suffix = ".json"
         try:
             path = self._copy_uri_to_temp(uri, suffix)
             self._load_notes_file(path)
@@ -794,6 +988,10 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.workspace.export_to_png(handle.name)
             with open(handle.name, "rb") as png:
                 return png.read()
+        if extension == ".pdf":
+            return self._export_pdf_bytes()
+        if extension == ".sdocx":
+            return self._export_sdocx_bytes()
         text = json.dumps(self._document_payload(), indent=2)
         return text.encode("utf-8")
 
@@ -803,22 +1001,131 @@ class SamsungNotesCompanionApp(App):
             "pdf_path": self.pdf_path,
             "pdf_page_index": self._pdf_page_index,
             "pdf_page_count": self._pdf_page_count,
+            "view_scale": float(self.view_scale),
             "pdf_pages": {
                 str(index): strokes
                 for index, strokes in self._page_strokes.items()
+            },
+            "notes_pages": {
+                str(index): strokes
+                for index, strokes in self._notes_strokes.items()
             },
             "pdf_canvas": self.root_layout.pdf_canvas.serialized_strokes(),
             "notes_canvas": self.root_layout.notes_canvas.serialized_strokes(),
         }
 
+    def _stroke_on_image(self, image: Any, strokes: Sequence[StrokeRecord]) -> None:
+        from PIL import ImageDraw
+
+        drawer = ImageDraw.Draw(image)
+        height = image.size[1]
+        for record in strokes:
+            points = record.get("points") or []
+            if len(points) < 2:
+                continue
+            color = record.get("color", COLOR_BLACK)
+            fill = tuple(max(0, min(255, int(c * 255))) for c in color[:3])
+            width = max(1, int(record.get("width", 2)))
+            xy = [(float(p[0]), height - float(p[1])) for p in points]
+            if record.get("dashed"):
+                dashes = dashed_polylines(points)
+                for dash in dashes:
+                    pair = [
+                        (dash[i], height - dash[i + 1])
+                        for i in range(0, len(dash) - 1, 2)
+                    ]
+                    if len(pair) >= 2:
+                        drawer.line(pair, fill=fill, width=width)
+            else:
+                drawer.line(xy, fill=fill, width=width)
+
+    def _render_export_pngs(self) -> List[Tuple[bytes, int, int]]:
+        from PIL import Image
+
+        self._stash_current_page_strokes()
+        pages: List[Tuple[bytes, int, int]] = []
+        count = max(1, int(self._pdf_page_count) or 1)
+        for index in range(count):
+            background = None
+            if self.pdf_path and is_android():
+                preview = self._render_pdf_page(index)
+                if preview:
+                    background = Image.open(preview).convert("RGB")
+            if background is None:
+                background = Image.new(
+                    "RGB",
+                    (int(self.page_width), int(self.page_height)),
+                    (255, 255, 255),
+                )
+            self._stroke_on_image(background, self._page_strokes.get(index, []))
+            notes = Image.new("RGB", background.size, (255, 255, 255))
+            self._stroke_on_image(notes, self._notes_strokes.get(index, []))
+            for image in (background, notes):
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=88)
+                pages.append((buffer.getvalue(), image.size[0], image.size[1]))
+        return pages
+
+    def _export_pdf_bytes(self) -> bytes:
+        pages = self._render_export_pngs()
+        return _jpeg_pages_to_pdf(pages)
+
+    def _export_sdocx_bytes(self) -> bytes:
+        payload = self._document_payload()
+        pdf_bytes = self._export_pdf_bytes()
+        buffer = io.BytesIO()
+        page_ids = [str(uuid.uuid4()) for _ in range(max(1, self._pdf_page_count or 1))]
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("companion.json", json.dumps(payload, indent=2))
+            archive.writestr("Document.pdf", pdf_bytes)
+            archive.writestr("note.note", f"Samsung Notes Companion\n{self.title}\n".encode("utf-8"))
+            archive.writestr("pageIdInfo.dat", "\n".join(page_ids).encode("utf-8"))
+            archive.writestr("media/mediaInfo.dat", b"")
+            archive.writestr("end_tag.bin", b"SNOTE")
+            for index, page_id in enumerate(page_ids):
+                preview = None
+                if self.pdf_path and is_android():
+                    preview = self._render_pdf_page(index)
+                if preview:
+                    with open(preview, "rb") as handle:
+                        archive.writestr(f"media/{page_id}.png", handle.read())
+        return buffer.getvalue()
+
     def _load_notes_file(self, path: str) -> None:
+        if path.lower().endswith(".sdocx"):
+            self._load_sdocx_file(path)
+            return
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
+        self._apply_payload(payload)
+
+    def _apply_payload(self, payload: Dict[str, Any]) -> None:
         self.pdf_path = payload.get("pdf_path")
+        self._page_strokes = {
+            int(key): value for key, value in (payload.get("pdf_pages") or {}).items()
+        }
+        self._notes_strokes = {
+            int(key): value for key, value in (payload.get("notes_pages") or {}).items()
+        }
         self.root_layout.pdf_canvas.load_strokes(payload.get("pdf_canvas") or [])
         self.root_layout.notes_canvas.load_strokes(
             payload.get("notes_canvas") or []
         )
+
+    def _load_sdocx_file(self, path: str) -> None:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = archive.namelist()
+            if "companion.json" in names:
+                payload = json.loads(archive.read("companion.json").decode("utf-8"))
+                self._apply_payload(payload)
+            if "Document.pdf" in names:
+                handle = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+                handle.write(archive.read("Document.pdf"))
+                handle.close()
+                self.pdf_path = handle.name
+                if is_android():
+                    self._pdf_page_count = self._pdf_page_count_from()
+                    self._show_pdf_page(self._pdf_page_index)
 
     def _android_activity(self) -> Any:
         from jnius import autoclass
@@ -873,7 +1180,7 @@ class SamsungNotesCompanionApp(App):
     def _desktop_open_dialog(self) -> None:
         chooser = FileChooserListView(
             path=self._desktop_start_dir(),
-            filters=["*.pdf", "*.notes", "*.json", "*"],
+            filters=["*.pdf", "*.notes", "*.json", "*.sdocx", "*"],
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
@@ -899,11 +1206,14 @@ class SamsungNotesCompanionApp(App):
         if lower.endswith(".pdf"):
             self.pdf_path = path
             self._page_strokes = {}
+            self._notes_strokes = {}
             self._pdf_page_index = 0
+            self._reset_view()
             if is_android():
                 try:
                     self._pdf_page_count = self._pdf_page_count_from()
                     self.root_layout.pdf_canvas.load_strokes([])
+                    self.root_layout.notes_canvas.load_strokes([])
                     self._show_pdf_page(0)
                     self._notify(f"PDF נפתח לכתיבה: {os.path.basename(path)}")
                     return
@@ -912,7 +1222,7 @@ class SamsungNotesCompanionApp(App):
                     return
             self._notify(f"נבחר PDF: {os.path.basename(path)}")
             return
-        if lower.endswith(".notes") or lower.endswith(".json"):
+        if lower.endswith((".notes", ".json", ".sdocx")):
             self._load_notes_file(path)
             self._notify(f"נפתח: {os.path.basename(path)}")
             return
@@ -975,7 +1285,7 @@ class SamsungNotesCompanionApp(App):
 
     def _write_local_path(self, path: str, extension: str) -> None:
         data = self._document_bytes(extension)
-        if extension == ".png":
+        if extension in {".png", ".pdf", ".sdocx"}:
             with open(path, "wb") as handle:
                 handle.write(data)
         else:
@@ -1009,7 +1319,7 @@ class SamsungNotesCompanionApp(App):
             return
 
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        popup = Popup(title="Save As — choose file type", content=body, size_hint=(0.7, 0.5))
+        popup = Popup(title="Save As — choose file type", content=body, size_hint=(0.75, 0.7))
         for ext, mime, title in SAVE_TYPES:
             button = Button(text=title, size_hint_y=None, height=dp(44))
 
