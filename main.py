@@ -16,10 +16,11 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
 from kivy.core.window import Window
-from kivy.graphics import Color, Line, PopMatrix, PushMatrix, Rectangle, Scale, Translate
+from kivy.graphics import Color, Ellipse, Line, PopMatrix, PushMatrix, Rectangle, Scale, Translate
 from kivy.input.motionevent import MotionEvent
 from kivy.metrics import dp
-from kivy.properties import BooleanProperty, NumericProperty
+from kivy.properties import BooleanProperty, ListProperty, NumericProperty
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.filechooser import FileChooserListView
@@ -37,6 +38,11 @@ StrokeRecord = Dict[str, Any]
 
 LETTERBOX: Rgba = (0.90, 0.90, 0.91, 1.0)
 PAGE_WHITE: Rgba = (1.0, 1.0, 1.0, 1.0)
+GRID_LINE: Rgba = (0.78, 0.84, 0.92, 1.0)
+HEADER_BG: Rgba = (1.0, 1.0, 1.0, 1.0)
+TOOLBAR_BG: Rgba = (0.10, 0.10, 0.10, 1.0)
+TOOL_IDLE: Rgba = (0.10, 0.10, 0.10, 1.0)
+TOOL_ACTIVE: Rgba = (0.28, 0.28, 0.28, 1.0)
 SPEN_ERASER_WIDTH = 15.0
 TOOL_FINGER = 1
 TOOL_STYLUS = 2
@@ -44,14 +50,22 @@ TOOL_ERASER = 4
 MIN_SCALE = 0.45
 MAX_SCALE = 6.0
 PAGE_GAP = 28.0
-SOURCE_STYLUS = 0x4002
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
 COLOR_BLACK: Rgba = (0.0, 0.0, 0.0, 1.0)
-COLOR_RED: Rgba = (0.90, 0.22, 0.22, 1.0)
-COLOR_BLUE: Rgba = (0.12, 0.23, 0.54, 1.0)
-BTN_IDLE: Rgba = (0.88, 0.88, 0.90, 1.0)
-BTN_ACTIVE: Rgba = (0.55, 0.72, 0.95, 1.0)
+COLOR_BLUE: Rgba = (0.10, 0.38, 0.92, 1.0)
+COLOR_GREEN: Rgba = (0.22, 0.70, 0.32, 1.0)
+COLOR_RED: Rgba = (0.90, 0.18, 0.22, 1.0)
+COLOR_PURPLE: Rgba = (0.58, 0.22, 0.82, 1.0)
+INK_COLORS: Sequence[Tuple[str, Rgba]] = (
+    ("black", COLOR_BLACK),
+    ("blue", COLOR_BLUE),
+    ("green", COLOR_GREEN),
+    ("red", COLOR_RED),
+    ("purple", COLOR_PURPLE),
+)
+HOVER_ACTIONS = {7, 9, 10}
+UP_ACTIONS = {1, 6}
 
 OPEN_REQUEST = 4101
 SAVE_REQUEST = 4102
@@ -176,6 +190,50 @@ def _jpeg_pages_to_pdf(pages: Sequence[Tuple[bytes, int, int]]) -> bytes:
     return header + body + xref + trailer
 
 
+class DarkToolButton(Button):
+    """Compact dark toolbar control styled like Samsung Notes."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("color", (1, 1, 1, 1))
+        kwargs.setdefault("font_size", dp(16))
+        kwargs.setdefault("size_hint_x", None)
+        kwargs.setdefault("width", dp(42))
+        kwargs.setdefault("background_normal", "")
+        kwargs.setdefault("background_down", "")
+        kwargs.setdefault("background_color", TOOL_IDLE)
+        super().__init__(**kwargs)
+
+
+class ColorDot(ButtonBehavior, Widget):
+    """Round ink swatch; a white ring marks the selected color."""
+
+    rgba = ListProperty([0.0, 0.0, 0.0, 1.0])
+    selected = BooleanProperty(False)
+
+    def __init__(self, rgba: Rgba, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.rgba = list(rgba)
+        self.size_hint = (None, None)
+        self.size = (dp(30), dp(30))
+        with self.canvas:
+            self._fill = Color(*self.rgba)
+            self._dot = Ellipse()
+            self._ring = Color(1, 1, 1, 0)
+            self._ring_line = Line(width=1.4)
+        self.bind(pos=self._sync, size=self._sync, selected=self._sync, rgba=self._sync)
+        Clock.schedule_once(lambda _dt: self._sync(), 0)
+
+    def _sync(self, *_args: Any) -> None:
+        pad = dp(5)
+        self._fill.rgba = self.rgba
+        self._dot.pos = (self.x + pad, self.y + pad)
+        self._dot.size = (self.width - 2 * pad, self.height - 2 * pad)
+        cx, cy = self.center_x, self.center_y
+        radius = min(self.width, self.height) / 2.0 - dp(2)
+        self._ring.a = 1.0 if self.selected else 0.0
+        self._ring_line.circle = (cx, cy, radius)
+
+
 class SPenAnnotationCanvas(Widget):
     """Page-aligned canvas: S Pen draws, fingers pan/pinch, view is shared."""
 
@@ -183,6 +241,7 @@ class SPenAnnotationCanvas(Widget):
     min_width = NumericProperty(1.0)
     max_width = NumericProperty(6.0)
     show_document_image = BooleanProperty(False)
+    show_grid = BooleanProperty(False)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -206,6 +265,7 @@ class SPenAnnotationCanvas(Widget):
             page_height=self._on_view,
             page_count=self._on_view,
         )
+        self.bind(show_grid=self._on_view, show_document_image=self._on_view)
         Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
 
     def _on_geom(self, *_args: Any) -> None:
@@ -271,27 +331,24 @@ class SPenAnnotationCanvas(Widget):
     def _classify(self, touch: MotionEvent) -> str:
         if getattr(touch, "is_mouse_scrolling", False):
             return "wheel"
-        button = str(getattr(touch, "button", None) or "").lower()
         app = App.get_running_app()
-        if button == "right" or getattr(app, "spen_button_held", False):
-            return "eraser"
+        if int(getattr(app, "pointer_count", 1) or 1) >= 2:
+            return "finger"
+        if bool(getattr(app, "has_finger_pointer", False)):
+            return "finger"
+        button = str(getattr(touch, "button", None) or "").lower()
         if not is_android():
-            if getattr(touch, "is_touch", False) and str(getattr(touch, "device", "")).startswith("wm_touch"):
+            if getattr(touch, "is_touch", False):
                 return "finger"
+            if button == "right":
+                return "eraser"
             return "stylus"
-        tool = int(getattr(app, "tool_type", 0) or 0)
-        down_tool = int(getattr(app, "down_tool_type", tool) or 0)
-        source = int(getattr(app, "input_source", 0) or 0)
-        if tool == TOOL_ERASER or down_tool == TOOL_ERASER:
+        tool = int(getattr(app, "down_tool_type", 0) or 0)
+        if tool == TOOL_FINGER or tool not in (TOOL_STYLUS, TOOL_ERASER):
+            return "finger"
+        if tool == TOOL_ERASER or button == "right" or getattr(app, "spen_button_held", False):
             return "eraser"
-        stylus = (
-            tool == TOOL_STYLUS
-            or down_tool == TOOL_STYLUS
-            or bool(source & SOURCE_STYLUS)
-        )
-        if stylus and not bool(getattr(app, "has_finger_pointer", False)):
-            return "stylus"
-        return "finger"
+        return "stylus"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
         if "pressure" in getattr(touch, "profile", []):
@@ -338,17 +395,20 @@ class SPenAnnotationCanvas(Widget):
                 page_y = self._page_origin_y(index, page_h)
                 Color(*PAGE_WHITE)
                 Rectangle(pos=(0, page_y), size=(page_w, page_h))
-                if (
+                has_page_image = (
                     self.show_document_image
                     and index < len(self._page_textures)
                     and self._page_textures[index] is not None
-                ):
+                )
+                if has_page_image:
                     Color(1, 1, 1, 1)
                     Rectangle(
                         texture=self._page_textures[index],
                         pos=(0, page_y),
                         size=(page_w, page_h),
                     )
+                elif self.show_grid:
+                    self._draw_grid(page_w, page_h, page_y)
             for record in self.strokes:
                 self._draw_record(record)
             if len(self.current_stroke) >= 2:
@@ -361,6 +421,30 @@ class SPenAnnotationCanvas(Widget):
                     }
                 )
             PopMatrix()
+
+    def _draw_grid(self, page_w: float, page_h: float, page_y: float) -> None:
+        step = max(24.0, min(page_w, page_h) / 22.0)
+        Color(*GRID_LINE)
+        x = 0.0
+        while x <= page_w + 0.5:
+            Line(points=[x, page_y, x, page_y + page_h], width=1.0)
+            x += step
+        y = page_y
+        top = page_y + page_h
+        while y <= top + 0.5:
+            Line(points=[0.0, y, page_w, y], width=1.0)
+            y += step
+
+    def _start_view_gesture(self, touch: MotionEvent) -> None:
+        app = App.get_running_app()
+        touch.grab(self)
+        app._fingers[touch.uid] = (touch.x, touch.y)
+        if len(app._fingers) >= 2:
+            touch.ud["mode"] = "pinch"
+            self._begin_pinch(app)
+            return
+        touch.ud["mode"] = "pan"
+        touch.ud["last"] = (touch.x, touch.y)
 
     def _erase_at(self, x: float, y: float, radius: float) -> None:
         radius_sq = radius * radius
@@ -425,33 +509,28 @@ class SPenAnnotationCanvas(Widget):
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
+        app = App.get_running_app()
         kind = self._classify(touch)
         if kind == "wheel":
-            app = App.get_running_app()
             factor = 1.12 if touch.button == "scrollup" else 0.89
             app.view_scale = max(MIN_SCALE, min(MAX_SCALE, app.view_scale * factor))
             return True
-        if kind == "finger":
-            app = App.get_running_app()
-            touch.grab(self)
-            app._fingers[touch.uid] = (touch.x, touch.y)
-            if len(app._fingers) >= 2:
-                touch.ud["mode"] = "pinch"
-                self._begin_pinch(app)
-            else:
-                touch.ud["mode"] = "pan"
-                touch.ud["last"] = (touch.x, touch.y)
+        tool_mode = str(getattr(app, "tool_mode", "none"))
+        if kind == "finger" or tool_mode == "none":
+            self._start_view_gesture(touch)
             return True
 
         touch.grab(self)
         doc = self.to_doc(touch.x, touch.y)
-        if kind == "eraser" or self._should_erase(touch):
+        if kind == "eraser" or tool_mode == "eraser":
             touch.ud["erasing"] = True
             _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
             self._erase_at(doc[0], doc[1], SPEN_ERASER_WIDTH / max(scale, 0.01))
             return True
+        if tool_mode != "pen":
+            self._start_view_gesture(touch)
+            return True
 
-        app = App.get_running_app()
         self._live_color = tuple(getattr(app, "current_color", COLOR_BLACK))
         self._live_width = self._line_width_for_touch(touch)
         self._live_dashed = bool(getattr(app, "is_dashed", False))
@@ -518,7 +597,7 @@ class SPenAnnotationCanvas(Widget):
 
 
 class RootLayout(FloatLayout):
-    """Notebook workspace with an overlay toolbar that stays above the document."""
+    """Notebook workspace with a Samsung Notes-style overlay chrome."""
 
     notes_expanded = BooleanProperty(True)
     toolbar_visible = BooleanProperty(True)
@@ -526,44 +605,27 @@ class RootLayout(FloatLayout):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.pdf_canvas = SPenAnnotationCanvas(show_document_image=True)
-        self.notes_canvas = SPenAnnotationCanvas(show_document_image=False)
-        self.side_panel = self._build_side_panel()
-        self.status_label = Label(
-            text="",
-            size_hint_y=None,
-            height=dp(22),
-            color=(0.2, 0.2, 0.22, 1),
-            halign="left",
-            valign="middle",
-        )
+        self.notes_canvas = SPenAnnotationCanvas(show_document_image=False, show_grid=True)
+        self.side_panel = self.notes_canvas
         self.tool_buttons: Dict[str, Button] = {}
-        self.workspace = BoxLayout(orientation="horizontal", spacing=dp(6), padding=dp(6))
-        self.workspace.add_widget(self.side_panel)
+        self.color_dots: Dict[str, ColorDot] = {}
+        self.workspace = BoxLayout(orientation="horizontal", spacing=0, padding=0)
+        self.workspace.add_widget(self.notes_canvas)
         self.workspace.add_widget(self.pdf_canvas)
         self.chrome = BoxLayout(
             orientation="vertical",
             size_hint=(1, None),
-            height=dp(72),
+            height=dp(84),
             pos_hint={"x": 0, "top": 1},
-            padding=(dp(6), dp(4)),
-            spacing=dp(2),
+            spacing=0,
         )
-        with self.chrome.canvas.before:
-            Color(0.95, 0.95, 0.96, 0.97)
-            self._chrome_bg = Rectangle()
-        self.chrome.bind(
-            pos=lambda *_args: setattr(self._chrome_bg, "pos", self.chrome.pos),
-            size=lambda *_args: setattr(self._chrome_bg, "size", self.chrome.size),
-        )
+        self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
-        self.chrome.add_widget(self.status_label)
-        self.restore_btn = Button(
-            text="▲ כלים",
+        self.restore_btn = DarkToolButton(
+            text="▾",
             size_hint=(None, None),
-            size=(dp(92), dp(32)),
+            size=(dp(44), dp(32)),
             pos_hint={"center_x": 0.5, "top": 1},
-            color=(0.12, 0.12, 0.14, 1),
-            background_color=BTN_IDLE,
             opacity=0,
             disabled=True,
         )
@@ -583,36 +645,95 @@ class RootLayout(FloatLayout):
     def set_status(self, message: str) -> None:
         self.status_label.text = message
 
+    def _build_header(self) -> BoxLayout:
+        app = App.get_running_app()
+        header = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(44),
+            padding=(dp(8), 0, dp(12), 0),
+            spacing=dp(4),
+        )
+        with header.canvas.before:
+            Color(*HEADER_BG)
+            self._header_bg = Rectangle()
+        header.bind(
+            pos=lambda *_args: setattr(self._header_bg, "pos", header.pos),
+            size=lambda *_args: setattr(self._header_bg, "size", header.size),
+        )
+        for key, label, handler, width in (
+            ("open", "+", app.open_pdf, dp(42)),
+            ("save_as", "↓", app.save_document_as, dp(42)),
+            ("toggle", "▤", self.toggle_notes, dp(42)),
+        ):
+            button = Button(
+                text=label,
+                color=(0.15, 0.15, 0.17, 1),
+                font_size=dp(20),
+                size_hint_x=None,
+                width=width,
+                background_normal="",
+                background_down="",
+                background_color=(1, 1, 1, 1),
+            )
+            button.bind(on_release=handler)
+            header.add_widget(button)
+            self.tool_buttons[key] = button
+        self.status_label = Label(
+            text="",
+            color=(0.35, 0.35, 0.38, 1),
+            font_size=dp(13),
+            halign="right",
+            valign="middle",
+        )
+        title = Label(
+            text="כותרת  >",
+            color=(0.12, 0.12, 0.14, 1),
+            font_size=dp(16),
+            bold=True,
+            size_hint_x=None,
+            width=dp(90),
+            halign="right",
+        )
+        header.add_widget(self.status_label)
+        header.add_widget(title)
+        return header
+
     def _build_toolbar(self) -> BoxLayout:
         app = App.get_running_app()
         toolbar = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(48),
-            spacing=dp(4),
+            height=dp(40),
+            padding=(dp(8), dp(4)),
+            spacing=dp(2),
+        )
+        with toolbar.canvas.before:
+            Color(*TOOLBAR_BG)
+            self._toolbar_bg = Rectangle()
+        toolbar.bind(
+            pos=lambda *_args: setattr(self._toolbar_bg, "pos", toolbar.pos),
+            size=lambda *_args: setattr(self._toolbar_bg, "size", toolbar.size),
         )
         actions: Sequence[Tuple[str, str, Any]] = (
-            ("open", "Open PDF", app.open_pdf),
-            ("save_as", "Save As", app.save_document_as),
-            ("black", "Black", app.set_color_black),
-            ("red", "Red", app.set_color_red),
-            ("blue", "Blue", app.set_color_blue),
-            ("dashed", "Dashed line", app.toggle_dashed),
-            ("eraser", "Eraser", app.enable_eraser),
-            ("toggle", "Toggle Notes", self.toggle_notes),
+            ("pan", "✥", app.clear_tool),
+            ("pen", "✎", app.select_pen),
+            ("dashed", "— —", app.toggle_dashed),
+            ("eraser", "⌫", app.enable_eraser),
         )
         for key, label, handler in actions:
-            button = Button(text=label, color=(0.12, 0.12, 0.14, 1))
+            button = DarkToolButton(text=label, width=dp(44) if key != "dashed" else dp(52))
             button.bind(on_release=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
-        hide_btn = Button(
-            text="▾",
-            size_hint_x=None,
-            width=dp(40),
-            color=(0.12, 0.12, 0.14, 1),
-        )
+        for key, rgba in INK_COLORS:
+            dot = ColorDot(rgba)
+            dot.bind(on_release=lambda _dot, name=key: app.set_ink_color(name))
+            toolbar.add_widget(dot)
+            self.color_dots[key] = dot
+        hide_btn = DarkToolButton(text="▾", width=dp(36))
         hide_btn.bind(on_release=self.hide_toolbar)
+        toolbar.add_widget(Widget())
         toolbar.add_widget(hide_btn)
         self.tool_buttons["hide"] = hide_btn
         return toolbar
@@ -629,56 +750,40 @@ class RootLayout(FloatLayout):
         self.toolbar_visible = True
         self.chrome.opacity = 1
         self.chrome.disabled = False
-        self.chrome.height = dp(72)
+        self.chrome.height = dp(84)
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
 
     def refresh_tool_styles(self) -> None:
         app = App.get_running_app()
+        pen_on = app.tool_mode == "pen"
         mapping = {
-            "black": app.current_color == COLOR_BLACK and not app.is_eraser,
-            "red": app.current_color == COLOR_RED and not app.is_eraser,
-            "blue": app.current_color == COLOR_BLUE and not app.is_eraser,
-            "dashed": bool(app.is_dashed) and not app.is_eraser,
-            "eraser": bool(app.is_eraser),
+            "pan": app.tool_mode == "none",
+            "pen": pen_on and not app.is_dashed,
+            "dashed": pen_on and bool(app.is_dashed),
+            "eraser": app.tool_mode == "eraser",
         }
         for key, button in self.tool_buttons.items():
             if key in {"open", "save_as", "toggle", "hide"}:
-                button.background_color = BTN_IDLE
                 continue
-            active = mapping.get(key, False)
-            button.background_color = BTN_ACTIVE if active else BTN_IDLE
-
-    def _build_side_panel(self) -> BoxLayout:
-        panel = BoxLayout(
-            orientation="vertical",
-            size_hint_x=0.38,
-            spacing=dp(4),
-            padding=dp(4),
-        )
-        panel.add_widget(
-            Label(
-                text="Notes",
-                size_hint_y=None,
-                height=dp(28),
-                bold=True,
-                color=(0.2, 0.2, 0.22, 1),
-            )
-        )
-        panel.add_widget(self.notes_canvas)
-        return panel
+            button.background_color = TOOL_ACTIVE if mapping.get(key, False) else TOOL_IDLE
+        for key, rgba in INK_COLORS:
+            dot = self.color_dots.get(key)
+            if dot is None:
+                continue
+            dot.selected = pen_on and tuple(app.current_color) == tuple(rgba)
 
     def apply_orientation(self, *_args: Any) -> None:
         self.workspace.orientation = "horizontal"
         if not self.notes_expanded:
-            self.side_panel.opacity = 0
-            self.side_panel.disabled = True
-            self.side_panel.size_hint = (0, 1)
+            self.notes_canvas.opacity = 0
+            self.notes_canvas.disabled = True
+            self.notes_canvas.size_hint = (0, 1)
             self.pdf_canvas.size_hint = (1, 1)
             return
-        self.side_panel.opacity = 1
-        self.side_panel.disabled = False
-        self.side_panel.size_hint = (0.38, 1)
+        self.notes_canvas.opacity = 1
+        self.notes_canvas.disabled = False
+        self.notes_canvas.size_hint = (0.38, 1)
         self.pdf_canvas.size_hint = (0.62, 1)
 
     def toggle_notes(self, *_args: Any) -> None:
@@ -687,9 +792,9 @@ class RootLayout(FloatLayout):
 
     def set_page_status(self, index: int, count: int) -> None:
         if count <= 0:
-            self.set_status("אין PDF פתוח")
+            self.set_status("")
             return
-        self.set_status(f"מחברת נגללת · {count} עמודים")
+        self.set_status(f"{count} עמודים")
 
 
 class SamsungNotesCompanionApp(App):
@@ -704,8 +809,9 @@ class SamsungNotesCompanionApp(App):
     tool_type = NumericProperty(0)
 
     def build(self) -> RootLayout:
-        Window.clearcolor = (0.95, 0.95, 0.95, 1)
+        Window.clearcolor = LETTERBOX
         self.title = "Samsung Notes Companion"
+        self.tool_mode: str = "none"
         self.current_color: Rgba = COLOR_BLACK
         self.is_eraser: bool = False
         self.is_dashed: bool = False
@@ -786,18 +892,24 @@ class SamsungNotesCompanionApp(App):
             index = int(event.getActionIndex())
             count = int(event.getPointerCount())
             tool = int(event.getToolType(index))
-            source = int(event.getSource())
             tools = [int(event.getToolType(i)) for i in range(count)]
         except Exception:
             return
+        stylus_bits = 0x02 | 0x20 | 0x40
+        self.spen_button_held = bool(state & stylus_bits) or tool == TOOL_ERASER
+        if action in HOVER_ACTIONS:
+            return
         self.pointer_count = count
-        self.input_source = source
         self.has_finger_pointer = TOOL_FINGER in tools
+        if action in UP_ACTIONS:
+            if count <= 1:
+                self.down_tool_type = 0
+                self.tool_type = 0
+                self.has_finger_pointer = False
+            return
         self.tool_type = tool
         if action in (action_down, action_pointer_down):
             self.down_tool_type = tool
-        stylus_bits = 0x02 | 0x20 | 0x40
-        self.spen_button_held = bool(state & stylus_bits) or tool == TOOL_ERASER
 
     def _attach_spen_listeners(self) -> None:
         try:
@@ -1453,28 +1565,54 @@ class SamsungNotesCompanionApp(App):
             body.add_widget(button)
         popup.open()
 
-    def set_color_black(self, *_args: Any) -> None:
+    def clear_tool(self, *_args: Any) -> None:
+        self.tool_mode = "none"
         self.is_eraser = False
-        self.current_color = COLOR_BLACK
         self.root_layout.refresh_tool_styles()
+
+    def select_pen(self, *_args: Any) -> None:
+        if self.tool_mode == "pen" and not self.is_dashed:
+            self.clear_tool()
+            return
+        self.tool_mode = "pen"
+        self.is_eraser = False
+        self.is_dashed = False
+        self.root_layout.refresh_tool_styles()
+
+    def set_ink_color(self, name: str, *_args: Any) -> None:
+        color_map = dict(INK_COLORS)
+        color = color_map.get(name, COLOR_BLACK)
+        if self.tool_mode == "pen" and tuple(self.current_color) == tuple(color):
+            self.clear_tool()
+            return
+        self.current_color = color
+        self.tool_mode = "pen"
+        self.is_eraser = False
+        self.root_layout.refresh_tool_styles()
+
+    def set_color_black(self, *_args: Any) -> None:
+        self.set_ink_color("black")
 
     def set_color_red(self, *_args: Any) -> None:
-        self.is_eraser = False
-        self.current_color = COLOR_RED
-        self.root_layout.refresh_tool_styles()
+        self.set_ink_color("red")
 
     def set_color_blue(self, *_args: Any) -> None:
-        self.is_eraser = False
-        self.current_color = COLOR_BLUE
-        self.root_layout.refresh_tool_styles()
+        self.set_ink_color("blue")
 
     def toggle_dashed(self, *_args: Any) -> None:
-        self.is_dashed = not self.is_dashed
-        if self.is_dashed:
-            self.is_eraser = False
+        if self.tool_mode == "pen" and self.is_dashed:
+            self.clear_tool()
+            return
+        self.is_dashed = True
+        self.tool_mode = "pen"
+        self.is_eraser = False
         self.root_layout.refresh_tool_styles()
 
     def enable_eraser(self, *_args: Any) -> None:
+        if self.tool_mode == "eraser":
+            self.clear_tool()
+            return
+        self.tool_mode = "eraser"
         self.is_eraser = True
         self.root_layout.refresh_tool_styles()
 
