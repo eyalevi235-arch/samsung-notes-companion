@@ -29,7 +29,8 @@ version = 0.1
 requirements = python3,kivy==2.3.1,pillow==10.4.0,pyjnius,android
 
 # (str) Supported orientation (landscape, sensorLandscape, portrait or all)
-orientation = landscape
+orientation = all
+android.manifest.orientation = fullSensor
 
 # (bool) Indicate if the application should be fullscreen or not
 fullscreen = 0

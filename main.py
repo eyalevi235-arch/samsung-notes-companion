@@ -121,6 +121,7 @@ class SPenAnnotationCanvas(Widget):
         self._live_color: Rgba = COLOR_BLACK
         self._live_width: float = 2.5
         self._live_dashed: bool = False
+        self._bg_texture: Any = None
         self._bind_canvas_background()
         self.bind(bg_color=self._sync_bg_color)
 
@@ -137,9 +138,22 @@ class SPenAnnotationCanvas(Widget):
         if self._bg_rect is not None:
             self._bg_rect.pos = self.pos
             self._bg_rect.size = self.size
-        if self._bg_image_rect is not None:
-            self._bg_image_rect.pos = self.pos
-            self._bg_image_rect.size = self.size
+        if self._bg_image_rect is None:
+            return
+        if self._bg_texture is None:
+            self._bg_image_rect.size = (0, 0)
+            return
+        tex_w, tex_h = self._bg_texture.size
+        width, height = self.size
+        if tex_w < 1 or tex_h < 1 or width < 1 or height < 1:
+            return
+        scale = min(width / float(tex_w), height / float(tex_h))
+        fitted_w, fitted_h = tex_w * scale, tex_h * scale
+        self._bg_image_rect.size = (fitted_w, fitted_h)
+        self._bg_image_rect.pos = (
+            self.x + (width - fitted_w) / 2.0,
+            self.y + (height - fitted_h) / 2.0,
+        )
 
     def _sync_bg_color(self, *_args: Any) -> None:
         if self._bg_color_instr is not None:
@@ -148,7 +162,8 @@ class SPenAnnotationCanvas(Widget):
     def set_background_image(self, path: str) -> None:
         if self._bg_image_rect is None:
             return
-        self._bg_image_rect.texture = CoreImage(path).texture
+        self._bg_texture = CoreImage(path).texture
+        self._bg_image_rect.texture = self._bg_texture
         self._sync_background()
 
     def _page_background(self) -> Rgba:
@@ -314,10 +329,18 @@ class RootLayout(BoxLayout):
             valign="middle",
         )
         self.tool_buttons: Dict[str, Button] = {}
+        self.page_label = Label(
+            text="אין PDF פתוח",
+            size_hint_x=0.4,
+            color=(0.2, 0.2, 0.22, 1),
+        )
         self.add_widget(self._build_toolbar())
+        self.add_widget(self._build_page_bar())
         self.add_widget(self._build_workspace())
         self.add_widget(self.status_label)
         self.refresh_tool_styles()
+        Window.bind(size=lambda *_args: self.apply_orientation())
+        Clock.schedule_once(lambda _dt: self.apply_orientation(), 0)
 
     def set_status(self, message: str) -> None:
         self.status_label.text = message
@@ -380,17 +403,61 @@ class RootLayout(BoxLayout):
         panel.add_widget(self.notes_canvas)
         return panel
 
+    def _build_page_bar(self) -> BoxLayout:
+        app = App.get_running_app()
+        bar = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(36),
+            spacing=dp(6),
+        )
+        prev_btn = Button(text="עמוד קודם", size_hint_x=0.3)
+        next_btn = Button(text="עמוד הבא", size_hint_x=0.3)
+        prev_btn.bind(on_release=app.prev_pdf_page)
+        next_btn.bind(on_release=app.next_pdf_page)
+        bar.add_widget(prev_btn)
+        bar.add_widget(self.page_label)
+        bar.add_widget(next_btn)
+        return bar
+
     def _build_workspace(self) -> BoxLayout:
         self.workspace = BoxLayout(orientation="horizontal", spacing=dp(6))
         self.workspace.add_widget(self.pdf_canvas)
         self.workspace.add_widget(self.side_panel)
         return self.workspace
 
+    def apply_orientation(self, *_args: Any) -> None:
+        """Stack the notes panel under the PDF in portrait; side-by-side in landscape."""
+        portrait = Window.height > Window.width
+        self.workspace.orientation = "vertical" if portrait else "horizontal"
+        if not self.notes_expanded:
+            self.side_panel.opacity = 0
+            self.side_panel.disabled = True
+            if portrait:
+                self.side_panel.size_hint = (1, 0)
+                self.pdf_canvas.size_hint = (1, 1)
+            else:
+                self.side_panel.size_hint = (0, 1)
+                self.pdf_canvas.size_hint = (1, 1)
+            return
+        self.side_panel.opacity = 1
+        self.side_panel.disabled = False
+        if portrait:
+            self.pdf_canvas.size_hint = (1, 0.72)
+            self.side_panel.size_hint = (1, 0.28)
+        else:
+            self.pdf_canvas.size_hint = (0.68, 1)
+            self.side_panel.size_hint = (0.32, 1)
+
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
-        self.side_panel.size_hint_x = 0.32 if self.notes_expanded else 0
-        self.side_panel.opacity = 1 if self.notes_expanded else 0
-        self.side_panel.disabled = not self.notes_expanded
+        self.apply_orientation()
+
+    def set_page_status(self, index: int, count: int) -> None:
+        if count <= 0:
+            self.page_label.text = "אין PDF פתוח"
+            return
+        self.page_label.text = f"עמוד {index + 1} מתוך {count}"
 
 
 class SamsungNotesCompanionApp(App):
@@ -404,6 +471,9 @@ class SamsungNotesCompanionApp(App):
         self.is_dashed: bool = False
         self.spen_button_held: bool = False
         self.pdf_path: Optional[str] = None
+        self._pdf_page_index: int = 0
+        self._pdf_page_count: int = 0
+        self._page_strokes: Dict[int, List[StrokeRecord]] = {}
         self._pending_save: Optional[Tuple[str, str]] = None
         self._stylus_listener: Any = None
         self.root_layout = RootLayout()
@@ -585,21 +655,47 @@ class SamsungNotesCompanionApp(App):
         source.close()
         return handle.name
 
-    def _render_pdf_preview(self, uri: Any) -> Optional[str]:
+    def _open_pdf_pfd(self, uri: Any = None) -> Any:
+        from jnius import autoclass
+
+        activity = self._android_activity()
+        resolver = activity.getContentResolver()
+        if uri is not None:
+            return resolver.openFileDescriptor(uri, "r")
+        path = self.pdf_path or ""
+        if path.startswith("content:") or path.startswith("file:"):
+            parsed = autoclass("android.net.Uri").parse(path)
+            return resolver.openFileDescriptor(parsed, "r")
+        file_cls = autoclass("java.io.File")
+        pfd_cls = autoclass("android.os.ParcelFileDescriptor")
+        return pfd_cls.open(file_cls(path), pfd_cls.MODE_READ_ONLY)
+
+    def _pdf_page_count_from(self, uri: Any = None) -> int:
+        from jnius import autoclass
+
+        pfd = self._open_pdf_pfd(uri)
+        renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
+        count = int(renderer.getPageCount())
+        renderer.close()
+        pfd.close()
+        return count
+
+    def _render_pdf_page(self, index: int, uri: Any = None) -> Optional[str]:
         try:
             from jnius import autoclass
 
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            resolver = activity.getContentResolver()
-            pfd = resolver.openFileDescriptor(uri, "r")
+            pfd = self._open_pdf_pfd(uri)
             renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
-            page = renderer.openPage(0)
+            page = renderer.openPage(int(index))
+            scale = 2
+            width = max(1, int(page.getWidth() * scale))
+            height = max(1, int(page.getHeight() * scale))
             bitmap_cls = autoclass("android.graphics.Bitmap")
             config = autoclass("android.graphics.Bitmap$Config")
-            bitmap = bitmap_cls.createBitmap(
-                page.getWidth(), page.getHeight(), config.ARGB_8888
-            )
-            page.render(bitmap, None, None, 1)
+            bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
+            matrix = autoclass("android.graphics.Matrix")()
+            matrix.setScale(float(scale), float(scale))
+            page.render(bitmap, None, matrix, 1)
             page.close()
             renderer.close()
             pfd.close()
@@ -613,17 +709,62 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             return None
 
-    def _open_android_uri(self, uri: Any) -> None:
-        name = str(uri.toString()).lower()
-        display = str(uri.getLastPathSegment() or uri.toString())
-        if name.endswith(".pdf") or "pdf" in name:
-            preview = self._render_pdf_preview(uri)
-            if preview:
-                self.root_layout.pdf_canvas.set_background_image(preview)
-            self.pdf_path = str(uri.toString())
-            self._notify(f"נפתח PDF: {display}")
+    def _stash_current_page_strokes(self) -> None:
+        self._page_strokes[self._pdf_page_index] = (
+            self.root_layout.pdf_canvas.serialized_strokes()
+        )
+
+    def _show_pdf_page(self, index: int, uri: Any = None) -> None:
+        if self._pdf_page_count <= 0:
             return
-        suffix = ".notes" if ".notes" in name else ".json"
+        index = max(0, min(index, self._pdf_page_count - 1))
+        self._stash_current_page_strokes()
+        self._pdf_page_index = index
+        preview = self._render_pdf_page(index, uri)
+        if preview:
+            self.root_layout.pdf_canvas.set_background_image(preview)
+        self.root_layout.pdf_canvas.load_strokes(
+            self._page_strokes.get(index, [])
+        )
+        self.root_layout.set_page_status(index, self._pdf_page_count)
+
+    def prev_pdf_page(self, *_args: Any) -> None:
+        if self._pdf_page_count <= 0:
+            self._notify("קודם פתחו קובץ PDF")
+            return
+        self._show_pdf_page(self._pdf_page_index - 1)
+
+    def next_pdf_page(self, *_args: Any) -> None:
+        if self._pdf_page_count <= 0:
+            self._notify("קודם פתחו קובץ PDF")
+            return
+        self._show_pdf_page(self._pdf_page_index + 1)
+
+    def _uri_is_pdf(self, uri: Any) -> bool:
+        try:
+            mime = str(self._android_activity().getContentResolver().getType(uri) or "")
+            if "pdf" in mime.lower():
+                return True
+        except Exception:
+            pass
+        name = str(uri.toString()).lower()
+        return name.endswith(".pdf") or "/pdf" in name or "pdf" in name
+
+    def _open_android_uri(self, uri: Any) -> None:
+        display = str(uri.getLastPathSegment() or uri.toString())
+        if self._uri_is_pdf(uri):
+            try:
+                self.pdf_path = str(uri.toString())
+                self._page_strokes = {}
+                self._pdf_page_index = 0
+                self._pdf_page_count = self._pdf_page_count_from(uri)
+                self.root_layout.pdf_canvas.load_strokes([])
+                self._show_pdf_page(0, uri)
+                self._notify(f"PDF נפתח לכתיבה: {display}")
+            except Exception as exc:
+                self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
+            return
+        suffix = ".notes" if ".notes" in display.lower() else ".json"
         try:
             path = self._copy_uri_to_temp(uri, suffix)
             self._load_notes_file(path)
@@ -657,8 +798,15 @@ class SamsungNotesCompanionApp(App):
         return text.encode("utf-8")
 
     def _document_payload(self) -> Dict[str, Any]:
+        self._stash_current_page_strokes()
         return {
             "pdf_path": self.pdf_path,
+            "pdf_page_index": self._pdf_page_index,
+            "pdf_page_count": self._pdf_page_count,
+            "pdf_pages": {
+                str(index): strokes
+                for index, strokes in self._page_strokes.items()
+            },
             "pdf_canvas": self.root_layout.pdf_canvas.serialized_strokes(),
             "notes_canvas": self.root_layout.notes_canvas.serialized_strokes(),
         }
@@ -672,36 +820,44 @@ class SamsungNotesCompanionApp(App):
             payload.get("notes_canvas") or []
         )
 
+    def _android_activity(self) -> Any:
+        from jnius import autoclass
+
+        return autoclass("org.kivy.android.PythonActivity").mActivity
+
+    def _launch_android_intent(self, intent: Any, request_code: int) -> None:
+        from android.runnable import run_on_ui_thread
+
+        activity = self._android_activity()
+
+        @run_on_ui_thread
+        def _start() -> None:
+            activity.startActivityForResult(intent, request_code)
+
+        _start()
+
     def _start_android_open(self) -> None:
         from jnius import autoclass
 
         Intent = autoclass("android.content.Intent")
-        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent = Intent(Intent.ACTION_GET_CONTENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         intent.setType("*/*")
-        intent.putExtra(
-            Intent.EXTRA_MIME_TYPES,
-            ["application/pdf", "application/json", "application/octet-stream"],
-        )
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-        activity = autoclass("org.kivy.android.PythonActivity").mActivity
-        chooser = Intent.createChooser(intent, "Open file")
-        activity.startActivityForResult(chooser, OPEN_REQUEST)
+        self._launch_android_intent(intent, OPEN_REQUEST)
 
     def _start_android_save(self, extension: str, mime: str) -> None:
         from jnius import autoclass
 
         self._pending_save = (extension, mime)
         Intent = autoclass("android.content.Intent")
+        String = autoclass("java.lang.String")
         intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         intent.setType(mime)
-        intent.putExtra(Intent.EXTRA_TITLE, f"my_drawing{extension}")
+        intent.putExtra(Intent.EXTRA_TITLE, String(f"my_drawing{extension}"))
         intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        activity = autoclass("org.kivy.android.PythonActivity").mActivity
-        chooser = Intent.createChooser(intent, "Save file")
-        activity.startActivityForResult(chooser, SAVE_REQUEST)
+        self._launch_android_intent(intent, SAVE_REQUEST)
 
     def _desktop_start_dir(self) -> str:
         for candidate in (
@@ -742,6 +898,18 @@ class SamsungNotesCompanionApp(App):
         lower = path.lower()
         if lower.endswith(".pdf"):
             self.pdf_path = path
+            self._page_strokes = {}
+            self._pdf_page_index = 0
+            if is_android():
+                try:
+                    self._pdf_page_count = self._pdf_page_count_from()
+                    self.root_layout.pdf_canvas.load_strokes([])
+                    self._show_pdf_page(0)
+                    self._notify(f"PDF נפתח לכתיבה: {os.path.basename(path)}")
+                    return
+                except Exception as exc:
+                    self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
+                    return
             self._notify(f"נבחר PDF: {os.path.basename(path)}")
             return
         if lower.endswith(".notes") or lower.endswith(".json"):
