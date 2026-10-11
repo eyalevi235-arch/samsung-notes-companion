@@ -22,15 +22,15 @@ source.exclude_exts = spec
 source.exclude_dirs = tests, bin, venv, .git, .github, .buildozer, __pycache__
 
 # (str) Application versioning (method 1)
-version = 0.1
+version = 0.2
 
 # (list) Application requirements
 # Kivy 2.3.1 supports Cython 0.29.x through 3.0.11 on Python 3.10.
 requirements = python3,kivy==2.3.1,pillow==10.4.0,pyjnius,android
 
-# (str) Supported orientation (landscape, sensorLandscape, portrait or all)
-orientation = all
-android.manifest.orientation = fullSensor
+# (list) Supported orientations for Buildozer 1.5.0
+# Valid options: landscape, portrait, portrait-reverse, landscape-reverse
+orientation = portrait, landscape
 
 # (bool) Indicate if the application should be fullscreen or not
 fullscreen = 0
