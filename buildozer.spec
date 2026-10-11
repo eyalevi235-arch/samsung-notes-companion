@@ -26,7 +26,7 @@ version = 0.1
 
 # (list) Application requirements
 # Kivy 2.3.1 supports Cython 0.29.x through 3.0.11 on Python 3.10.
-requirements = python3,kivy==2.3.1,pillow==10.4.0
+requirements = python3,kivy==2.3.1,pillow==10.4.0,pyjnius,android
 
 # (str) Supported orientation (landscape, sensorLandscape, portrait or all)
 orientation = landscape
@@ -35,7 +35,7 @@ orientation = landscape
 fullscreen = 0
 
 # (list) Permissions
-android.permissions = WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+android.permissions = WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,READ_MEDIA_IMAGES
 
 # (int) Target Android API (stable with NDK 25b / p4a master)
 android.api = 33
@@ -68,6 +68,9 @@ android.archs = arm64-v8a
 
 # (bool) enables Android auto backup feature (Android API >=23)
 android.allow_backup = True
+
+# Needed so the system document picker (My Files / Drive) can return a URI.
+android.enable_androidx = True
 
 [buildozer]
 

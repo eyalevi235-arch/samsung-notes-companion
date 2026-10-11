@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from kivy.app import App
+from kivy.clock import Clock
+from kivy.core.image import Image as CoreImage
 from kivy.core.window import Window
 from kivy.graphics import Color, Line, Rectangle
 from kivy.input.motionevent import MotionEvent
@@ -17,7 +22,10 @@ from kivy.uix.button import Button
 from kivy.uix.filechooser import FileChooserListView
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+from kivy.uix.spinner import Spinner
+from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
+from kivy.utils import platform
 
 Point = Tuple[float, float]
 Rgba = Tuple[float, float, float, float]
@@ -26,9 +34,73 @@ StrokeRecord = Dict[str, Any]
 PDF_BG: Rgba = (1.0, 1.0, 1.0, 1.0)
 NOTES_BG: Rgba = (1.0, 0.98, 0.82, 1.0)
 SPEN_ERASER_WIDTH = 15.0
+DASH_LENGTH = 18.0
+GAP_LENGTH = 12.0
 COLOR_BLACK: Rgba = (0.0, 0.0, 0.0, 1.0)
 COLOR_RED: Rgba = (0.90, 0.22, 0.22, 1.0)
 COLOR_BLUE: Rgba = (0.12, 0.23, 0.54, 1.0)
+BTN_IDLE: Rgba = (0.88, 0.88, 0.90, 1.0)
+BTN_ACTIVE: Rgba = (0.55, 0.72, 0.95, 1.0)
+
+OPEN_REQUEST = 4101
+SAVE_REQUEST = 4102
+SPEN_KEYCODES = {110, 139, 188, 189, 308, 309}
+
+SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
+    (".notes", "application/json", "Samsung Notes (*.notes)"),
+    (".json", "application/json", "JSON (*.json)"),
+    (".png", "image/png", "PNG image (*.png)"),
+)
+
+
+def is_android() -> bool:
+    return platform == "android"
+
+
+def _dist2(left: Sequence[float], right: Sequence[float]) -> float:
+    dx = float(left[0]) - float(right[0])
+    dy = float(left[1]) - float(right[1])
+    return dx * dx + dy * dy
+
+
+def dashed_polylines(
+    points: Sequence[Sequence[float]],
+    dash_len: float = DASH_LENGTH,
+    gap_len: float = GAP_LENGTH,
+) -> List[List[float]]:
+    """Split a polyline into visible dash segments (works on Android GLES)."""
+    if len(points) < 2:
+        return []
+    dashes: List[List[float]] = []
+    drawing = True
+    remaining = dash_len
+    current = [float(points[0][0]), float(points[0][1])]
+    cursor = (float(points[0][0]), float(points[0][1]))
+
+    for raw in points[1:]:
+        target = (float(raw[0]), float(raw[1]))
+        while True:
+            dx = target[0] - cursor[0]
+            dy = target[1] - cursor[1]
+            seg_len = math.hypot(dx, dy)
+            if seg_len <= 1e-6:
+                break
+            step = min(remaining, seg_len)
+            ratio = step / seg_len
+            cursor = (cursor[0] + dx * ratio, cursor[1] + dy * ratio)
+            if drawing:
+                current.extend([cursor[0], cursor[1]])
+            remaining -= step
+            if remaining > 1e-6:
+                break
+            if drawing and len(current) >= 4:
+                dashes.append(current)
+            drawing = not drawing
+            remaining = dash_len if drawing else gap_len
+            current = [cursor[0], cursor[1]]
+    if drawing and len(current) >= 4:
+        dashes.append(current)
+    return dashes
 
 
 class SPenAnnotationCanvas(Widget):
@@ -45,6 +117,10 @@ class SPenAnnotationCanvas(Widget):
         self.current_stroke: List[Point] = []
         self._bg_rect: Optional[Rectangle] = None
         self._bg_color_instr: Optional[Color] = None
+        self._bg_image_rect: Optional[Rectangle] = None
+        self._live_color: Rgba = COLOR_BLACK
+        self._live_width: float = 2.5
+        self._live_dashed: bool = False
         self._bind_canvas_background()
         self.bind(bg_color=self._sync_bg_color)
 
@@ -52,24 +128,28 @@ class SPenAnnotationCanvas(Widget):
         with self.canvas.before:
             self._bg_color_instr = Color(*self.bg_color)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
+            Color(1, 1, 1, 1)
+            self._bg_image_rect = Rectangle(pos=self.pos, size=self.size)
+            self._bg_image_rect.texture = None
         self.bind(pos=self._sync_background, size=self._sync_background)
 
     def _sync_background(self, *_args: Any) -> None:
         if self._bg_rect is not None:
             self._bg_rect.pos = self.pos
             self._bg_rect.size = self.size
+        if self._bg_image_rect is not None:
+            self._bg_image_rect.pos = self.pos
+            self._bg_image_rect.size = self.size
 
     def _sync_bg_color(self, *_args: Any) -> None:
         if self._bg_color_instr is not None:
             self._bg_color_instr.rgba = tuple(self.bg_color)
 
-    def _line_width_for_touch(self, touch: MotionEvent) -> float:
-        """Map S Pen pressure to stroke width when the device reports it."""
-        if "pressure" in touch.profile:
-            pressure = max(0.0, min(1.0, float(touch.pressure)))
-            span = self.max_width - self.min_width
-            return float(self.min_width + span * pressure)
-        return float(self.ink_width)
+    def set_background_image(self, path: str) -> None:
+        if self._bg_image_rect is None:
+            return
+        self._bg_image_rect.texture = CoreImage(path).texture
+        self._sync_background()
 
     def _page_background(self) -> Rgba:
         return (
@@ -79,16 +159,70 @@ class SPenAnnotationCanvas(Widget):
             float(self.bg_color[3]),
         )
 
-    def _stroke_style(self, touch: MotionEvent) -> Tuple[Rgba, float, bool, bool]:
-        """Resolve color/width from app state (toolbar eraser, ink, dashes)."""
-        app = App.get_running_app()
-        if bool(getattr(app, "is_eraser", False)):
-            width = max(8.0, self._line_width_for_touch(touch) * 3.0)
-            return self._page_background(), width, False, True
+    def _line_width_for_touch(self, touch: MotionEvent) -> float:
+        if "pressure" in getattr(touch, "profile", []):
+            pressure = max(0.0, min(1.0, float(touch.pressure)))
+            span = self.max_width - self.min_width
+            return float(self.min_width + span * pressure)
+        return float(self.ink_width)
 
-        color = tuple(getattr(app, "current_color", COLOR_BLACK))
-        dashed = bool(getattr(app, "is_dashed", False))
-        return color, self._line_width_for_touch(touch), dashed, False
+    def _should_erase(self, touch: MotionEvent) -> bool:
+        app = App.get_running_app()
+        button = str(getattr(touch, "button", None) or "").lower()
+        if button in {"right", "middle", "stylus", "eraser"}:
+            return True
+        if bool(getattr(app, "spen_button_held", False)):
+            return True
+        if bool(getattr(app, "is_eraser", False)):
+            return True
+        return False
+
+    def _draw_record(self, record: StrokeRecord) -> None:
+        color = tuple(record.get("color", COLOR_BLACK))
+        width = float(record.get("width", self.ink_width))
+        points = record.get("points") or []
+        if len(points) < 2:
+            return
+        with self.canvas:
+            Color(*color)
+            if record.get("dashed"):
+                for dash in dashed_polylines(points):
+                    Line(points=dash, width=width, cap="round", joint="round")
+            else:
+                flat: List[float] = []
+                for point in points:
+                    flat.extend([float(point[0]), float(point[1])])
+                Line(points=flat, width=width, cap="round", joint="round")
+
+    def redraw_all(self) -> None:
+        self.canvas.clear()
+        for record in self.strokes:
+            self._draw_record(record)
+
+    def _erase_at(self, x: float, y: float, radius: float) -> None:
+        radius_sq = radius * radius
+        kept: List[StrokeRecord] = []
+        changed = False
+        for record in self.strokes:
+            fragment: List[List[float]] = []
+            pieces: List[List[List[float]]] = []
+            for point in record.get("points") or []:
+                if _dist2(point, (x, y)) <= radius_sq:
+                    changed = True
+                    if len(fragment) >= 2:
+                        pieces.append(fragment)
+                    fragment = []
+                else:
+                    fragment.append([float(point[0]), float(point[1])])
+            if len(fragment) >= 2:
+                pieces.append(fragment)
+            for piece in pieces:
+                clone = dict(record)
+                clone["points"] = piece
+                kept.append(clone)
+        if changed:
+            self.strokes = kept
+            self.redraw_all()
 
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if not self.collide_point(*touch.pos):
@@ -96,63 +230,65 @@ class SPenAnnotationCanvas(Widget):
 
         touch.grab(self)
         if getattr(touch, "button", None) == "right":
-            # S Pen hardware button: local eraser only, do not change app state.
-            color = self._page_background()
-            width = SPEN_ERASER_WIDTH
-            dashed = False
-            eraser = True
+            erase = True
         else:
-            color, width, dashed, eraser = self._stroke_style(touch)
+            erase = self._should_erase(touch)
+        if erase:
+            touch.ud["erasing"] = True
+            self._erase_at(touch.x, touch.y, SPEN_ERASER_WIDTH)
+            return True
+
+        app = App.get_running_app()
+        self._live_color = tuple(getattr(app, "current_color", COLOR_BLACK))
+        self._live_width = self._line_width_for_touch(touch)
+        self._live_dashed = bool(getattr(app, "is_dashed", False))
         self.current_stroke = [(touch.x, touch.y)]
-        touch.ud["stroke_meta"] = {
-            "color": color,
-            "width": width,
-            "dashed": dashed,
-            "eraser": eraser,
-        }
-        line_kwargs: Dict[str, Any] = {
-            "points": [touch.x, touch.y],
-            "width": width,
-            "cap": "round",
-            "joint": "round",
-        }
-        if dashed:
-            line_kwargs["dash_length"] = 12
-            line_kwargs["dash_offset"] = 6
-        with self.canvas:
-            Color(*color)
-            touch.ud["line"] = Line(**line_kwargs)
         return True
 
     def on_touch_move(self, touch: MotionEvent) -> bool:
-        if touch.grab_current is not self or "line" not in touch.ud:
+        if touch.grab_current is not self:
             return super().on_touch_move(touch)
-
+        if touch.ud.get("erasing"):
+            self._erase_at(touch.x, touch.y, SPEN_ERASER_WIDTH)
+            return True
         self.current_stroke.append((touch.x, touch.y))
-        touch.ud["line"].points += [touch.x, touch.y]
+        self.redraw_all()
+        self._draw_record(
+            {
+                "points": [list(point) for point in self.current_stroke],
+                "color": list(self._live_color),
+                "width": self._live_width,
+                "dashed": self._live_dashed,
+            }
+        )
         return True
 
     def on_touch_up(self, touch: MotionEvent) -> bool:
         if touch.grab_current is not self:
             return super().on_touch_up(touch)
-
         touch.ungrab(self)
-        meta = touch.ud.get("stroke_meta")
-        if "line" in touch.ud and self.current_stroke and meta:
-            record: StrokeRecord = {
-                "points": [list(point) for point in self.current_stroke],
-                "color": list(meta["color"]),
-                "width": meta["width"],
-                "dashed": meta["dashed"],
-                "eraser": meta["eraser"],
-            }
-            self.strokes.append(record)
+        if touch.ud.get("erasing"):
+            return True
+        if len(self.current_stroke) >= 2:
+            self.strokes.append(
+                {
+                    "points": [list(point) for point in self.current_stroke],
+                    "color": list(self._live_color),
+                    "width": self._live_width,
+                    "dashed": self._live_dashed,
+                    "eraser": False,
+                }
+            )
         self.current_stroke = []
+        self.redraw_all()
         return True
 
     def serialized_strokes(self) -> List[StrokeRecord]:
-        """Return a JSON-safe copy of completed strokes."""
         return json.loads(json.dumps(self.strokes))
+
+    def load_strokes(self, records: Sequence[StrokeRecord]) -> None:
+        self.strokes = [dict(record) for record in records]
+        self.redraw_all()
 
 
 class RootLayout(BoxLayout):
@@ -169,8 +305,22 @@ class RootLayout(BoxLayout):
         self.pdf_canvas = SPenAnnotationCanvas(bg_color=list(PDF_BG))
         self.notes_canvas = SPenAnnotationCanvas(bg_color=list(NOTES_BG))
         self.side_panel = self._build_side_panel()
+        self.status_label = Label(
+            text="",
+            size_hint_y=None,
+            height=dp(22),
+            color=(0.2, 0.2, 0.22, 1),
+            halign="left",
+            valign="middle",
+        )
+        self.tool_buttons: Dict[str, Button] = {}
         self.add_widget(self._build_toolbar())
         self.add_widget(self._build_workspace())
+        self.add_widget(self.status_label)
+        self.refresh_tool_styles()
+
+    def set_status(self, message: str) -> None:
+        self.status_label.text = message
 
     def _build_toolbar(self) -> BoxLayout:
         app = App.get_running_app()
@@ -180,25 +330,36 @@ class RootLayout(BoxLayout):
             height=dp(48),
             spacing=dp(4),
         )
-        actions: Sequence[Tuple[str, Any]] = (
-            ("Open PDF", app.open_pdf),
-            ("Save .notes", app.save_document),
-            ("Black", app.set_color_black),
-            ("Red", app.set_color_red),
-            ("Blue", app.set_color_blue),
-            ("Dashed line", app.toggle_dashed),
-            ("Eraser", app.enable_eraser),
-            ("Toggle Notes", self.toggle_notes),
+        actions: Sequence[Tuple[str, str, Any]] = (
+            ("open", "Open PDF", app.open_pdf),
+            ("save", "Save .notes", app.save_document),
+            ("save_as", "Save As", app.save_document_as),
+            ("black", "Black", app.set_color_black),
+            ("red", "Red", app.set_color_red),
+            ("blue", "Blue", app.set_color_blue),
+            ("dashed", "Dashed line", app.toggle_dashed),
+            ("eraser", "Eraser", app.enable_eraser),
+            ("toggle", "Toggle Notes", self.toggle_notes),
         )
-        for label, handler in actions:
-            button = Button(
-                text=label,
-                background_color=(0.88, 0.88, 0.90, 1),
-                color=(0.12, 0.12, 0.14, 1),
-            )
+        for key, label, handler in actions:
+            button = Button(text=label, color=(0.12, 0.12, 0.14, 1))
             button.bind(on_release=handler)
             toolbar.add_widget(button)
+            self.tool_buttons[key] = button
         return toolbar
+
+    def refresh_tool_styles(self) -> None:
+        app = App.get_running_app()
+        mapping = {
+            "black": app.current_color == COLOR_BLACK and not app.is_eraser,
+            "red": app.current_color == COLOR_RED and not app.is_eraser,
+            "blue": app.current_color == COLOR_BLUE and not app.is_eraser,
+            "dashed": bool(app.is_dashed) and not app.is_eraser,
+            "eraser": bool(app.is_eraser),
+        }
+        for key, button in self.tool_buttons.items():
+            active = mapping.get(key, False)
+            button.background_color = BTN_ACTIVE if active else BTN_IDLE
 
     def _build_side_panel(self) -> BoxLayout:
         panel = BoxLayout(
@@ -220,13 +381,12 @@ class RootLayout(BoxLayout):
         return panel
 
     def _build_workspace(self) -> BoxLayout:
-        workspace = BoxLayout(orientation="horizontal", spacing=dp(6))
-        workspace.add_widget(self.pdf_canvas)
-        workspace.add_widget(self.side_panel)
-        return workspace
+        self.workspace = BoxLayout(orientation="horizontal", spacing=dp(6))
+        self.workspace.add_widget(self.pdf_canvas)
+        self.workspace.add_widget(self.side_panel)
+        return self.workspace
 
     def toggle_notes(self, *_args: Any) -> None:
-        """Collapse or restore the notes side panel."""
         self.notes_expanded = not self.notes_expanded
         self.side_panel.size_hint_x = 0.32 if self.notes_expanded else 0
         self.side_panel.opacity = 1 if self.notes_expanded else 0
@@ -242,23 +402,333 @@ class SamsungNotesCompanionApp(App):
         self.current_color: Rgba = COLOR_BLACK
         self.is_eraser: bool = False
         self.is_dashed: bool = False
+        self.spen_button_held: bool = False
         self.pdf_path: Optional[str] = None
+        self._pending_save: Optional[Tuple[str, str]] = None
+        self._stylus_listener: Any = None
         self.root_layout = RootLayout()
+        Window.bind(on_key_down=self._on_key_down, on_key_up=self._on_key_up)
+        if is_android():
+            self._setup_android()
         return self.root_layout
 
-    def open_pdf(self, *_args: Any) -> None:
-        """Let the user pick a PDF to associate with the main canvas."""
-        chooser = FileChooserListView(filters=["*.pdf"], path=os.getcwd())
+    def _notify(self, message: str) -> None:
+        self.root_layout.set_status(message)
+        if not is_android():
+            return
+        try:
+            from android.runnable import run_on_ui_thread
+            from jnius import autoclass
+
+            Toast = autoclass("android.widget.Toast")
+            String = autoclass("java.lang.String")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+
+            @run_on_ui_thread
+            def _toast() -> None:
+                Toast.makeText(activity, String(message), Toast.LENGTH_SHORT).show()
+
+            _toast()
+        except Exception:
+            pass
+
+    def _on_key_down(self, *_args: Any, **kwargs: Any) -> bool:
+        key = _args[1] if len(_args) > 1 else None
+        code = key[0] if isinstance(key, (tuple, list)) else key
+        try:
+            if int(code) in SPEN_KEYCODES:
+                self.spen_button_held = True
+        except (TypeError, ValueError):
+            pass
+        return False
+
+    def _on_key_up(self, *_args: Any, **kwargs: Any) -> bool:
+        key = _args[1] if len(_args) > 1 else None
+        code = key[0] if isinstance(key, (tuple, list)) else key
+        try:
+            if int(code) in SPEN_KEYCODES:
+                self.spen_button_held = False
+        except (TypeError, ValueError):
+            pass
+        return False
+
+    def _setup_android(self) -> None:
+        try:
+            from android import activity
+
+            activity.bind(on_activity_result=self._on_activity_result)
+        except Exception:
+            pass
+        self._attach_spen_listeners()
+
+    def _update_spen_from_motion(self, event: Any) -> None:
+        try:
+            state = int(event.getButtonState())
+            tool = int(event.getToolType(0))
+        except Exception:
+            return
+        stylus_bits = 0x02 | 0x20 | 0x40
+        self.spen_button_held = bool(state & stylus_bits) or tool == 4
+
+    def _attach_spen_listeners(self) -> None:
+        try:
+            from android.runnable import run_on_ui_thread
+            from jnius import PythonJavaClass, autoclass, java_method
+
+            app = self
+
+            class StylusListener(PythonJavaClass):
+                __javacontext__ = "app"
+                __javainterfaces__ = [
+                    "android.view.View$OnGenericMotionListener",
+                    "android.view.View$OnHoverListener",
+                    "android.view.View$OnTouchListener",
+                ]
+
+                @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
+                def onGenericMotion(self, _view, event):
+                    app._update_spen_from_motion(event)
+                    return False
+
+                @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
+                def onHover(self, _view, event):
+                    app._update_spen_from_motion(event)
+                    return False
+
+                @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
+                def onTouch(self, _view, event):
+                    app._update_spen_from_motion(event)
+                    return False
+
+            listener = StylusListener()
+            self._stylus_listener = listener
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+
+            @run_on_ui_thread
+            def _attach() -> None:
+                view = activity.getWindow().getDecorView()
+                view.setOnGenericMotionListener(listener)
+                view.setOnHoverListener(listener)
+                view.setOnTouchListener(listener)
+
+            _attach()
+        except Exception:
+            pass
+
+    def _on_activity_result(
+        self, request_code: int, result_code: int, intent: Any
+    ) -> None:
+        Clock.schedule_once(
+            lambda _dt: self._handle_activity_result(
+                request_code, result_code, intent
+            )
+        )
+
+    def _handle_activity_result(
+        self, request_code: int, result_code: int, intent: Any
+    ) -> None:
+        try:
+            from jnius import autoclass
+
+            activity_cls = autoclass("android.app.Activity")
+            if result_code != activity_cls.RESULT_OK or intent is None:
+                self._notify("הפעולה בוטלה")
+                return
+            uri = intent.getData()
+            if uri is None:
+                return
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            flags = intent.getFlags()
+            take = autoclass("android.content.Intent")
+            grant = take.FLAG_GRANT_READ_URI_PERMISSION | (
+                take.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            try:
+                activity.getContentResolver().takePersistableUriPermission(
+                    uri, flags & grant
+                )
+            except Exception:
+                pass
+            if request_code == OPEN_REQUEST:
+                self._open_android_uri(uri)
+            elif request_code == SAVE_REQUEST and self._pending_save:
+                self._write_android_uri(uri, *self._pending_save)
+                self._pending_save = None
+        except Exception as exc:
+            self._notify(f"שגיאה בפתיחת הקובץ: {exc}")
+
+    def _copy_uri_to_temp(self, uri: Any, suffix: str) -> str:
+        from jnius import autoclass
+
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        resolver = activity.getContentResolver()
+        source = resolver.openInputStream(uri)
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        handle.close()
+        dest = autoclass("java.io.FileOutputStream")(handle.name)
+        copied = False
+        try:
+            file_utils = autoclass("android.os.FileUtils")
+            file_utils.copy(source, dest)
+            copied = True
+        except Exception:
+            pass
+        if not copied:
+            data = bytes()
+            chunk = source.read()
+            while chunk != -1:
+                data += bytes([chunk & 0xFF])
+                chunk = source.read()
+            with open(handle.name, "wb") as out:
+                out.write(data)
+        dest.close()
+        source.close()
+        return handle.name
+
+    def _render_pdf_preview(self, uri: Any) -> Optional[str]:
+        try:
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            resolver = activity.getContentResolver()
+            pfd = resolver.openFileDescriptor(uri, "r")
+            renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
+            page = renderer.openPage(0)
+            bitmap_cls = autoclass("android.graphics.Bitmap")
+            config = autoclass("android.graphics.Bitmap$Config")
+            bitmap = bitmap_cls.createBitmap(
+                page.getWidth(), page.getHeight(), config.ARGB_8888
+            )
+            page.render(bitmap, None, None, 1)
+            page.close()
+            renderer.close()
+            pfd.close()
+            handle = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            handle.close()
+            stream = autoclass("java.io.FileOutputStream")(handle.name)
+            fmt = autoclass("android.graphics.Bitmap$CompressFormat")
+            bitmap.compress(fmt.PNG, 100, stream)
+            stream.close()
+            return handle.name
+        except Exception:
+            return None
+
+    def _open_android_uri(self, uri: Any) -> None:
+        name = str(uri.toString()).lower()
+        display = str(uri.getLastPathSegment() or uri.toString())
+        if name.endswith(".pdf") or "pdf" in name:
+            preview = self._render_pdf_preview(uri)
+            if preview:
+                self.root_layout.pdf_canvas.set_background_image(preview)
+            self.pdf_path = str(uri.toString())
+            self._notify(f"נפתח PDF: {display}")
+            return
+        suffix = ".notes" if ".notes" in name else ".json"
+        try:
+            path = self._copy_uri_to_temp(uri, suffix)
+            self._load_notes_file(path)
+            self._notify(f"נפתח: {display}")
+        except Exception as exc:
+            self._notify(f"לא ניתן לפתוח את הקובץ: {exc}")
+
+    def _write_android_uri(self, uri: Any, extension: str, mime: str) -> None:
+        from jnius import autoclass
+
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=extension)
+        handle.close()
+        self._write_local_path(handle.name, extension)
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        resolver = activity.getContentResolver()
+        source = autoclass("java.io.FileInputStream")(handle.name)
+        dest = resolver.openOutputStream(uri)
+        autoclass("android.os.FileUtils").copy(source, dest)
+        source.close()
+        dest.close()
+        self._notify("הקובץ נשמר")
+
+    def _document_bytes(self, extension: str) -> bytes:
+        if extension == ".png":
+            handle = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            handle.close()
+            self.root_layout.workspace.export_to_png(handle.name)
+            with open(handle.name, "rb") as png:
+                return png.read()
+        text = json.dumps(self._document_payload(), indent=2)
+        return text.encode("utf-8")
+
+    def _document_payload(self) -> Dict[str, Any]:
+        return {
+            "pdf_path": self.pdf_path,
+            "pdf_canvas": self.root_layout.pdf_canvas.serialized_strokes(),
+            "notes_canvas": self.root_layout.notes_canvas.serialized_strokes(),
+        }
+
+    def _load_notes_file(self, path: str) -> None:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.pdf_path = payload.get("pdf_path")
+        self.root_layout.pdf_canvas.load_strokes(payload.get("pdf_canvas") or [])
+        self.root_layout.notes_canvas.load_strokes(
+            payload.get("notes_canvas") or []
+        )
+
+    def _start_android_open(self) -> None:
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType("*/*")
+        intent.putExtra(
+            Intent.EXTRA_MIME_TYPES,
+            ["application/pdf", "application/json", "application/octet-stream"],
+        )
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        chooser = Intent.createChooser(intent, "Open file")
+        activity.startActivityForResult(chooser, OPEN_REQUEST)
+
+    def _start_android_save(self, extension: str, mime: str) -> None:
+        from jnius import autoclass
+
+        self._pending_save = (extension, mime)
+        Intent = autoclass("android.content.Intent")
+        intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType(mime)
+        intent.putExtra(Intent.EXTRA_TITLE, f"my_drawing{extension}")
+        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        chooser = Intent.createChooser(intent, "Save file")
+        activity.startActivityForResult(chooser, SAVE_REQUEST)
+
+    def _desktop_start_dir(self) -> str:
+        for candidate in (
+            Path.home() / "Documents",
+            Path.home() / "Download",
+            Path.home() / "Downloads",
+            Path.home(),
+        ):
+            if candidate.is_dir():
+                return str(candidate)
+        return os.getcwd()
+
+    def _desktop_open_dialog(self) -> None:
+        chooser = FileChooserListView(
+            path=self._desktop_start_dir(),
+            filters=["*.pdf", "*.notes", "*.json", "*"],
+        )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        popup = Popup(title="Open PDF", content=body, size_hint=(0.9, 0.9))
+        popup = Popup(title="Open file", content=body, size_hint=(0.94, 0.94))
 
         def _load(_instance: Button) -> None:
             if chooser.selection:
-                self.pdf_path = chooser.selection[0]
+                self._open_local_path(chooser.selection[0])
             popup.dismiss()
 
-        load_btn = Button(text="Load")
+        load_btn = Button(text="Open")
         cancel_btn = Button(text="Cancel")
         load_btn.bind(on_release=_load)
         cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
@@ -268,43 +738,145 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(buttons)
         popup.open()
 
+    def _open_local_path(self, path: str) -> None:
+        lower = path.lower()
+        if lower.endswith(".pdf"):
+            self.pdf_path = path
+            self._notify(f"נבחר PDF: {os.path.basename(path)}")
+            return
+        if lower.endswith(".notes") or lower.endswith(".json"):
+            self._load_notes_file(path)
+            self._notify(f"נפתח: {os.path.basename(path)}")
+            return
+        self._notify("סוג הקובץ אינו נתמך")
+
+    def _desktop_save_dialog(self, default_ext: str = ".notes") -> None:
+        chooser = FileChooserListView(path=self._desktop_start_dir())
+        name_input = TextInput(
+            text=f"my_drawing{default_ext}",
+            multiline=False,
+            size_hint_y=None,
+            height=dp(40),
+        )
+        spinner = Spinner(
+            text=SAVE_TYPES[0][2],
+            values=[item[2] for item in SAVE_TYPES],
+            size_hint_y=None,
+            height=dp(40),
+        )
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        popup = Popup(title="Save As", content=body, size_hint=(0.94, 0.94))
+
+        def _ext_for_label(label: str) -> Tuple[str, str]:
+            for ext, mime, title in SAVE_TYPES:
+                if title == label:
+                    return ext, mime
+            return ".notes", "application/json"
+
+        def _on_type(_spinner: Spinner, value: str) -> None:
+            ext, _mime = _ext_for_label(value)
+            stem = Path(name_input.text).stem or "my_drawing"
+            name_input.text = f"{stem}{ext}"
+
+        spinner.bind(text=_on_type)
+
+        def _save(_instance: Button) -> None:
+            ext, _mime = _ext_for_label(spinner.text)
+            directory = chooser.path
+            if chooser.selection and os.path.isdir(chooser.selection[0]):
+                directory = chooser.selection[0]
+            filename = name_input.text.strip() or f"my_drawing{ext}"
+            if not filename.lower().endswith(ext):
+                filename += ext
+            path = os.path.join(directory, filename)
+            self._write_local_path(path, ext)
+            popup.dismiss()
+
+        save_btn = Button(text="Save")
+        cancel_btn = Button(text="Cancel")
+        save_btn.bind(on_release=_save)
+        cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
+        buttons.add_widget(save_btn)
+        buttons.add_widget(cancel_btn)
+        body.add_widget(chooser)
+        body.add_widget(spinner)
+        body.add_widget(name_input)
+        body.add_widget(buttons)
+        popup.open()
+
+    def _write_local_path(self, path: str, extension: str) -> None:
+        data = self._document_bytes(extension)
+        if extension == ".png":
+            with open(path, "wb") as handle:
+                handle.write(data)
+        else:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(data.decode("utf-8"))
+        self._notify(f"נשמר: {path}")
+
+    def open_pdf(self, *_args: Any) -> None:
+        if is_android():
+            try:
+                self._start_android_open()
+                return
+            except Exception as exc:
+                self._notify(f"לא ניתן לפתוח את ספריית הקבצים: {exc}")
+                return
+        self._desktop_open_dialog()
+
     def save_document(self, *_args: Any) -> None:
-        """Serialize strokes from both canvases into my_drawing.notes."""
-        payload = {
-            "pdf_path": self.pdf_path,
-            "pdf_canvas": self.root_layout.pdf_canvas.serialized_strokes(),
-            "notes_canvas": self.root_layout.notes_canvas.serialized_strokes(),
-        }
-        serialized = json.dumps(payload, indent=2)
-        notes_path = os.path.join(self.user_data_dir, "my_drawing.notes")
-        os.makedirs(self.user_data_dir, exist_ok=True)
-        with open(notes_path, "w", encoding="utf-8") as handle:
-            handle.write(serialized)
-        try:
-            with open("my_drawing.notes", "w", encoding="utf-8") as handle:
-                handle.write(serialized)
-        except OSError:
-            pass
+        if is_android():
+            try:
+                self._start_android_save(".notes", "application/json")
+                return
+            except Exception as exc:
+                self._notify(f"לא ניתן לשמור: {exc}")
+                return
+        self._desktop_save_dialog(".notes")
+
+    def save_document_as(self, *_args: Any) -> None:
+        if not is_android():
+            self._desktop_save_dialog(".notes")
+            return
+
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+        popup = Popup(title="Save As — choose file type", content=body, size_hint=(0.7, 0.5))
+        for ext, mime, title in SAVE_TYPES:
+            button = Button(text=title, size_hint_y=None, height=dp(44))
+
+            def _pick(_btn: Button, extension: str = ext, media: str = mime) -> None:
+                popup.dismiss()
+                self._start_android_save(extension, media)
+
+            button.bind(on_release=_pick)
+            body.add_widget(button)
+        popup.open()
 
     def set_color_black(self, *_args: Any) -> None:
         self.is_eraser = False
         self.current_color = COLOR_BLACK
+        self.root_layout.refresh_tool_styles()
 
     def set_color_red(self, *_args: Any) -> None:
         self.is_eraser = False
         self.current_color = COLOR_RED
+        self.root_layout.refresh_tool_styles()
 
     def set_color_blue(self, *_args: Any) -> None:
         self.is_eraser = False
         self.current_color = COLOR_BLUE
+        self.root_layout.refresh_tool_styles()
 
     def toggle_dashed(self, *_args: Any) -> None:
         self.is_dashed = not self.is_dashed
         if self.is_dashed:
             self.is_eraser = False
+        self.root_layout.refresh_tool_styles()
 
     def enable_eraser(self, *_args: Any) -> None:
         self.is_eraser = True
+        self.root_layout.refresh_tool_styles()
 
 
 if __name__ == "__main__":
