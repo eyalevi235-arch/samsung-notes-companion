@@ -68,6 +68,8 @@ TOOL_STYLUS = 2
 TOOL_ERASER = 4
 MIN_SCALE = 0.45
 MAX_SCALE = 6.0
+PDF_RENDER_SCALE = 2.0
+PDF_RENDER_MAX_SIDE = 2048.0
 PAGE_GAP = 28.0
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
@@ -1504,14 +1506,20 @@ class SamsungNotesCompanionApp(App):
         width = int(bitmap.getWidth())
         height = int(bitmap.getHeight())
         clip = autoclass("android.graphics.Rect")(0, 0, width, height)
-        identity = autoclass("android.graphics.Matrix")()
-        page.render(bitmap, clip, identity, mode)
+        matrix = autoclass("android.graphics.Matrix")()
+        page_w = max(1.0, float(page.getWidth()))
+        page_h = max(1.0, float(page.getHeight()))
+        matrix.setScale(width / page_w, height / page_h)
+        page.render(bitmap, clip, matrix, mode)
 
     def _render_opened_page(self, page: Any) -> Optional[str]:
         from jnius import autoclass
 
-        width = max(1, int(page.getWidth()))
-        height = max(1, int(page.getHeight()))
+        page_w = max(1.0, float(page.getWidth()))
+        page_h = max(1.0, float(page.getHeight()))
+        scale = min(PDF_RENDER_SCALE, PDF_RENDER_MAX_SIDE / max(page_w, page_h))
+        width = max(1, int(round(page_w * scale)))
+        height = max(1, int(round(page_h * scale)))
         bitmap_cls = autoclass("android.graphics.Bitmap")
         config = autoclass("android.graphics.Bitmap$Config")
         bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
@@ -1832,21 +1840,18 @@ class SamsungNotesCompanionApp(App):
 
         try:
             image = Image.frombytes("RGBA", tuple(texture.size), bytes(texture.pixels))
-            image = image.transpose(Image.FLIP_TOP_BOTTOM)
             return _image_rgb_on_white(image)
         except Exception:
             return None
 
     def _export_document_page(self, index: int) -> Optional[Any]:
-        textures = getattr(self.root_layout.pdf_canvas, "_page_textures", [])
-        if 0 <= index < len(textures) and textures[index] is not None:
-            converted = self._texture_to_rgb(textures[index])
-            if converted is not None:
-                return converted
         if self.pdf_path and is_android():
             preview = self._render_pdf_page(index)
             if preview:
                 return _image_rgb_on_white(preview)
+        textures = getattr(self.root_layout.pdf_canvas, "_page_textures", [])
+        if 0 <= index < len(textures) and textures[index] is not None:
+            return self._texture_to_rgb(textures[index])
         return None
 
     def _render_export_pngs(self) -> List[Tuple[bytes, int, int]]:
