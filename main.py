@@ -46,6 +46,7 @@ from kivy.uix.filechooser import FileChooserListView
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+from kivy.uix.slider import Slider
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
@@ -85,6 +86,8 @@ INK_COLORS: Sequence[Tuple[str, Rgba]] = (
     ("red", COLOR_RED),
     ("purple", COLOR_PURPLE),
 )
+SHAPE_TOOLS = frozenset({"line", "square", "rectangle", "circle", "triangle", "star"})
+CHROME_HEIGHT_DP = 124.0
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
 
@@ -192,6 +195,52 @@ def _image_rgb_on_white(source: Any) -> Any:
     background = Image.new("RGB", rgba.size, (255, 255, 255))
     background.paste(rgba, mask=rgba.split()[3])
     return background
+
+
+def shape_points(kind: str, start: Point, end: Point) -> List[Point]:
+    x0, y0 = float(start[0]), float(start[1])
+    x1, y1 = float(end[0]), float(end[1])
+    if kind == "line":
+        return [(x0, y0), (x1, y1)]
+    if kind == "square":
+        side = min(abs(x1 - x0), abs(y1 - y0))
+        if side < 1.0:
+            return [(x0, y0), (x1, y1)]
+        x1 = x0 + math.copysign(side, x1 - x0 or 1.0)
+        y1 = y0 + math.copysign(side, y1 - y0 or 1.0)
+    left, right = (x0, x1) if x0 <= x1 else (x1, x0)
+    bottom, top = (y0, y1) if y0 <= y1 else (y1, y0)
+    if kind in {"square", "rectangle"}:
+        return [
+            (left, bottom),
+            (right, bottom),
+            (right, top),
+            (left, top),
+            (left, bottom),
+        ]
+    cx = (left + right) / 2.0
+    cy = (bottom + top) / 2.0
+    rx = max(1.0, (right - left) / 2.0)
+    ry = max(1.0, (top - bottom) / 2.0)
+    if kind == "circle":
+        points = [
+            (cx + rx * math.cos(step), cy + ry * math.sin(step))
+            for step in (i * 2.0 * math.pi / 64.0 for i in range(65))
+        ]
+        return points
+    if kind == "triangle":
+        return [(cx, top), (left, bottom), (right, bottom), (cx, top)]
+    if kind == "star":
+        outer = min(rx, ry)
+        inner = outer * 0.42
+        points = []
+        for index in range(10):
+            angle = math.pi / 2.0 + index * math.pi / 5.0
+            radius = outer if index % 2 == 0 else inner
+            points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+        points.append(points[0])
+        return points
+    return [(x0, y0), (x1, y1)]
 
 
 def _pil_to_texture(image: Any) -> Any:
@@ -373,6 +422,30 @@ class ToolIcon(ButtonBehavior, Widget):
             elif kind == "notes":
                 Line(rectangle=(x + w * 0.08, y + h * 0.1, w * 0.35, h * 0.8), width=1.2)
                 Line(rectangle=(x + w * 0.55, y + h * 0.1, w * 0.35, h * 0.8), width=1.2)
+            elif kind == "line":
+                Line(points=[x + w * 0.08, y + h * 0.18, x + w * 0.92, y + h * 0.82], width=1.4)
+            elif kind == "square":
+                side = min(w, h) * 0.7
+                Line(rectangle=(cx - side / 2.0, cy - side / 2.0, side, side), width=1.3)
+            elif kind == "rectangle":
+                Line(rectangle=(x + w * 0.08, y + h * 0.22, w * 0.84, h * 0.56), width=1.3)
+            elif kind == "circle":
+                Line(circle=(cx, cy, min(w, h) * 0.34), width=1.3)
+            elif kind == "triangle":
+                Line(
+                    points=[cx, y + h * 0.82, x + w * 0.12, y + h * 0.16, x + w * 0.88, y + h * 0.16, cx, y + h * 0.82],
+                    width=1.3,
+                )
+            elif kind == "star":
+                outer = min(w, h) * 0.38
+                inner = outer * 0.42
+                star: List[float] = []
+                for index in range(10):
+                    angle = math.pi / 2.0 + index * math.pi / 5.0
+                    radius = outer if index % 2 == 0 else inner
+                    star.extend([cx + radius * math.cos(angle), cy + radius * math.sin(angle)])
+                star.extend(star[:2])
+                Line(points=star, width=1.2)
 
 
 class ColorDot(ButtonBehavior, Widget):
@@ -577,11 +650,8 @@ class SPenAnnotationCanvas(Widget):
         return "stylus"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
-        if "pressure" in getattr(touch, "profile", []):
-            pressure = max(0.0, min(1.0, float(touch.pressure)))
-            span = self.max_width - self.min_width
-            return float(self.min_width + span * pressure)
-        return float(self.ink_width)
+        app = App.get_running_app()
+        return max(1.0, float(getattr(app, "ink_width", self.ink_width)))
 
     def _should_erase(self, touch: MotionEvent) -> bool:
         app = App.get_running_app()
@@ -778,12 +848,19 @@ class SPenAnnotationCanvas(Widget):
         if tool_mode == "none":
             self._start_view_gesture(touch)
             return True
+        color = tuple(getattr(app, "current_color", COLOR_BLACK))[:3]
+        opacity = max(0.12, min(1.0, float(getattr(app, "ink_opacity", 1.0))))
+        self._live_color = (color[0], color[1], color[2], opacity)
+        self._live_width = self._line_width_for_touch(touch)
+        self._live_dashed = bool(getattr(app, "is_dashed", False))
+        if tool_mode in SHAPE_TOOLS:
+            touch.ud["shape"] = tool_mode
+            touch.ud["shape_start"] = doc
+            self.current_stroke = [doc]
+            return True
         if tool_mode != "pen":
             self._start_view_gesture(touch)
             return True
-        self._live_color = tuple(getattr(app, "current_color", COLOR_BLACK))
-        self._live_width = self._line_width_for_touch(touch)
-        self._live_dashed = bool(getattr(app, "is_dashed", False))
         self.current_stroke = [doc]
         return True
 
@@ -809,6 +886,13 @@ class SPenAnnotationCanvas(Widget):
             _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
             radius = max(SPEN_ERASER_WIDTH, 36.0) / max(scale, 0.01)
             self._erase_at(doc[0], doc[1], radius)
+            return True
+        if touch.ud.get("shape"):
+            start = touch.ud.get("shape_start", self.to_doc(touch.x, touch.y))
+            self.current_stroke = shape_points(
+                str(touch.ud["shape"]), start, self.to_doc(touch.x, touch.y)
+            )
+            self.redraw_all()
             return True
         self.current_stroke.append(self.to_doc(touch.x, touch.y))
         self.redraw_all()
@@ -878,12 +962,13 @@ class RootLayout(FloatLayout):
         self.chrome = BoxLayout(
             orientation="vertical",
             size_hint=(1, None),
-            height=dp(84),
+            height=dp(CHROME_HEIGHT_DP),
             pos_hint={"x": 0, "top": 1},
             spacing=0,
         )
         self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
+        self.chrome.add_widget(self._build_shape_bar())
         self.restore_btn = ToolIcon(
             "restore",
             on_dark=True,
@@ -1002,6 +1087,51 @@ class RootLayout(FloatLayout):
         self.tool_buttons["hide"] = hide_btn
         return toolbar
 
+    def _build_shape_bar(self) -> BoxLayout:
+        app = App.get_running_app()
+        bar = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            padding=(dp(8), dp(4)),
+            spacing=dp(2),
+        )
+        with bar.canvas.before:
+            Color(*TOOLBAR_BG)
+            self._shape_bg = Rectangle()
+        bar.bind(
+            pos=lambda *_args: setattr(self._shape_bg, "pos", bar.pos),
+            size=lambda *_args: setattr(self._shape_bg, "size", bar.size),
+        )
+        for kind in ("line", "square", "rectangle", "circle", "triangle", "star"):
+            button = ToolIcon(kind, on_dark=True, size=(dp(36), dp(32)))
+            button.bind(on_press=lambda _btn, name=kind: app.select_shape(name))
+            bar.add_widget(button)
+            self.tool_buttons[kind] = button
+        width_slider = Slider(
+            min=1.0,
+            max=16.0,
+            value=float(app.ink_width),
+            step=0.5,
+            size_hint_x=None,
+            width=dp(110),
+        )
+        width_slider.bind(value=lambda _slider, value: app.set_ink_width(value))
+        opacity_slider = Slider(
+            min=0.15,
+            max=1.0,
+            value=float(app.ink_opacity),
+            step=0.05,
+            size_hint_x=None,
+            width=dp(110),
+        )
+        opacity_slider.bind(value=lambda _slider, value: app.set_ink_opacity(value))
+        bar.add_widget(width_slider)
+        bar.add_widget(opacity_slider)
+        self.width_slider = width_slider
+        self.opacity_slider = opacity_slider
+        return bar
+
     def hide_toolbar(self, *_args: Any) -> None:
         self.toolbar_visible = False
         self.chrome.opacity = 0
@@ -1014,19 +1144,22 @@ class RootLayout(FloatLayout):
         self.toolbar_visible = True
         self.chrome.opacity = 1
         self.chrome.disabled = False
-        self.chrome.height = dp(84)
+        self.chrome.height = dp(CHROME_HEIGHT_DP)
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
 
     def refresh_tool_styles(self) -> None:
         app = App.get_running_app()
         pen_on = app.tool_mode == "pen"
+        drawing = pen_on or app.tool_mode in SHAPE_TOOLS
         mapping = {
             "pan": app.tool_mode == "none",
             "pen": pen_on and not app.is_dashed,
             "dashed": pen_on and bool(app.is_dashed),
             "eraser": app.tool_mode == "eraser",
         }
+        for shape in SHAPE_TOOLS:
+            mapping[shape] = app.tool_mode == shape
         for key, button in self.tool_buttons.items():
             if key in {"open", "save_as", "toggle", "hide"}:
                 continue
@@ -1036,7 +1169,8 @@ class RootLayout(FloatLayout):
             dot = self.color_dots.get(key)
             if dot is None:
                 continue
-            dot.selected = pen_on and tuple(app.current_color) == tuple(rgba)
+            rgb = tuple(app.current_color[:3])
+            dot.selected = drawing and rgb == tuple(rgba[:3])
 
     def apply_orientation(self, *_args: Any) -> None:
         self.pdf_canvas.size_hint = (1, 1)
@@ -1105,6 +1239,8 @@ class SamsungNotesCompanionApp(App):
         self.title = "Samsung Notes Companion"
         self.tool_mode: str = "none"
         self.current_color: Rgba = COLOR_BLACK
+        self.ink_width: float = 2.5
+        self.ink_opacity: float = 1.0
         self.is_eraser: bool = False
         self.is_dashed: bool = False
         self.spen_button_held: bool = False
@@ -1807,10 +1943,11 @@ class SamsungNotesCompanionApp(App):
         page_w: float = 0.0,
         page_h: float = 0.0,
     ) -> None:
-        from PIL import ImageDraw
+        from PIL import Image, ImageDraw
 
-        drawer = ImageDraw.Draw(image)
         width, height = image.size
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        drawer = ImageDraw.Draw(overlay)
         scale_x = width / page_w if page_w > 1 else 1.0
         scale_y = height / page_h if page_h > 1 else 1.0
         for record in strokes:
@@ -1818,7 +1955,8 @@ class SamsungNotesCompanionApp(App):
             if len(points) < 2:
                 continue
             color = record.get("color", COLOR_BLACK)
-            fill = tuple(max(0, min(255, int(c * 255))) for c in color[:3])
+            alpha = int(max(0.0, min(1.0, float(color[3] if len(color) > 3 else 1.0))) * 255)
+            fill = tuple(max(0, min(255, int(c * 255))) for c in color[:3]) + (alpha,)
             stroke_w = max(1, int(record.get("width", 2) * max(scale_x, scale_y)))
             xy = [
                 (float(p[0]) * scale_x, height - float(p[1]) * scale_y) for p in points
@@ -1834,6 +1972,8 @@ class SamsungNotesCompanionApp(App):
                         drawer.line(pair, fill=fill, width=stroke_w)
             else:
                 drawer.line(xy, fill=fill, width=stroke_w)
+        composed = Image.alpha_composite(image.convert("RGBA"), overlay)
+        image.paste(composed.convert(image.mode))
 
     def _texture_to_rgb(self, texture: Any) -> Optional[Any]:
         from PIL import Image
@@ -2178,14 +2318,32 @@ class SamsungNotesCompanionApp(App):
         self.is_dashed = False
         self.root_layout.refresh_tool_styles()
 
+    def set_ink_width(self, value: float, *_args: Any) -> None:
+        self.ink_width = max(1.0, min(16.0, float(value)))
+
+    def set_ink_opacity(self, value: float, *_args: Any) -> None:
+        self.ink_opacity = max(0.15, min(1.0, float(value)))
+
+    def select_shape(self, kind: str, *_args: Any) -> None:
+        if kind not in SHAPE_TOOLS:
+            return
+        if self.tool_mode == kind:
+            self.clear_tool()
+            return
+        self.tool_mode = kind
+        self.is_eraser = False
+        self.root_layout.refresh_tool_styles()
+
     def set_ink_color(self, name: str, *_args: Any) -> None:
         color_map = dict(INK_COLORS)
         color = color_map.get(name, COLOR_BLACK)
-        if self.tool_mode == "pen" and tuple(self.current_color) == tuple(color):
+        same = tuple(self.current_color[:3]) == tuple(color[:3])
+        if self.tool_mode == "pen" and same:
             self.clear_tool()
             return
         self.current_color = color
-        self.tool_mode = "pen"
+        if self.tool_mode in {"none", "eraser"}:
+            self.tool_mode = "pen"
         self.is_eraser = False
         self.root_layout.refresh_tool_styles()
 
