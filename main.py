@@ -402,12 +402,12 @@ class SPenAnnotationCanvas(Widget):
             )
         else:
             app.bind(
-                view_scale=self._on_pdf_view,
-                view_pan_x=self._on_pdf_view,
-                view_pan_y=self._on_pdf_view,
-                page_width=self._on_pdf_view,
-                page_height=self._on_pdf_view,
-                page_count=self._on_pdf_view,
+                view_scale=self._on_view,
+                view_pan_x=self._on_view,
+                view_pan_y=self._on_view,
+                page_width=self._on_view,
+                page_height=self._on_view,
+                page_count=self._on_view,
             )
         self.bind(show_grid=self._on_view, show_document_image=self._on_view)
         Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
@@ -421,11 +421,10 @@ class SPenAnnotationCanvas(Widget):
     def _on_view(self, *_args: Any) -> None:
         self.redraw_all()
 
-    def _on_pdf_view(self, *_args: Any) -> None:
-        self.redraw_all()
-        root = getattr(App.get_running_app(), "root_layout", None)
-        if root is not None:
-            root.dock_notes()
+    def collide_point(self, x: float, y: float) -> bool:
+        if self.disabled or self.opacity <= 0 or self.width <= 1 or self.height <= 1:
+            return False
+        return super().collide_point(x, y)
 
     def _scale_value(self) -> float:
         app = App.get_running_app()
@@ -531,16 +530,11 @@ class SPenAnnotationCanvas(Widget):
         if len(getattr(app, "_fingers", {})) >= 1 and touch.uid not in app._fingers:
             return "finger"
         button = str(getattr(touch, "button", None) or "").lower()
-        is_touch = bool(getattr(touch, "is_touch", True))
-        device = str(getattr(touch, "device", "") or "").lower()
-        tool = int(getattr(app, "hover_tool", 0) or getattr(app, "down_tool_type", 0) or 0)
-        if tool == TOOL_ERASER or button == "right" or getattr(app, "spen_button_held", False):
+        if button == "right" or getattr(app, "spen_button_held", False):
             return "eraser"
-        if not is_touch or "mouse" in device:
-            return "stylus"
-        if bool(getattr(app, "pen_in_range", False)) and tool == TOOL_STYLUS:
-            return "stylus"
-        return "finger"
+        if bool(getattr(touch, "is_touch", True)):
+            return "finger"
+        return "stylus"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
         if "pressure" in getattr(touch, "profile", []):
@@ -809,7 +803,7 @@ class RootLayout(FloatLayout):
         self.color_dots: Dict[str, ColorDot] = {}
         self.workspace = FloatLayout()
         self.pdf_canvas.size_hint = (1, 1)
-        self.notes_canvas.size_hint = (None, 1)
+        self.notes_canvas.size_hint = (None, None)
         self.workspace.add_widget(self.pdf_canvas)
         self.workspace.add_widget(self.notes_canvas)
         self.chrome = BoxLayout(
@@ -1000,7 +994,9 @@ class RootLayout(FloatLayout):
         app = App.get_running_app()
         pdf_w = max(1.0, float(self.pdf_canvas.width))
         notes_w = max(1.0, float(self.notes_canvas.width))
-        app.notes_page_width = max(1.0, notes_w * float(app.page_width) / pdf_w)
+        width = max(1.0, notes_w * float(app.page_width) / pdf_w)
+        if abs(float(app.notes_page_width) - width) > 0.5:
+            app.notes_page_width = width
 
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
@@ -1063,7 +1059,6 @@ class SamsungNotesCompanionApp(App):
         Window.bind(on_key_down=self._on_key_down, on_key_up=self._on_key_up)
         if is_android():
             self._setup_android()
-        Window.bind(size=lambda *_args: self.clamp_view())
         return self.root_layout
 
     def _file_stem(self) -> str:
@@ -1091,7 +1086,7 @@ class SamsungNotesCompanionApp(App):
             self._clamp_canvas(item)
         if root.pdf_canvas.width > 1:
             self._clamp_shared_y(root.pdf_canvas)
-        if canvas is None or getattr(canvas, "view_role", "") == "pdf":
+        if canvas is None:
             root.dock_notes()
 
     def _clamp_canvas(self, canvas: SPenAnnotationCanvas) -> None:
@@ -1122,10 +1117,13 @@ class SamsungNotesCompanionApp(App):
         else:
             pan_y = min(max(pan_y, min_y), max_y)
         if canvas.view_role == "notes":
-            self.notes_pan_x = pan_x
+            if abs(float(self.notes_pan_x) - pan_x) > 0.01:
+                self.notes_pan_x = pan_x
             return
-        self.view_pan_x = pan_x
-        self.view_pan_y = pan_y
+        if abs(float(self.view_pan_x) - pan_x) > 0.01:
+            self.view_pan_x = pan_x
+        if abs(float(self.view_pan_y) - pan_y) > 0.01:
+            self.view_pan_y = pan_y
 
     def _clamp_shared_y(self, canvas: SPenAnnotationCanvas) -> None:
         _ox, _oy, _dw, disp_h, _scale, _pw, _ph = canvas._page_metrics()
@@ -1139,9 +1137,11 @@ class SamsungNotesCompanionApp(App):
         if min_y > max_y:
             min_y, max_y = max_y, min_y
         if min_y > max_y:
-            self.view_pan_y = (min_y + max_y) / 2.0
-            return
-        self.view_pan_y = min(max(float(self.view_pan_y), min_y), max_y)
+            pan_y = (min_y + max_y) / 2.0
+        else:
+            pan_y = min(max(float(self.view_pan_y), min_y), max_y)
+        if abs(float(self.view_pan_y) - pan_y) > 0.01:
+            self.view_pan_y = pan_y
 
     def rename_document(self, *_args: Any) -> None:
         field = TextInput(
@@ -1219,7 +1219,7 @@ class SamsungNotesCompanionApp(App):
             activity.bind(on_activity_result=self._on_activity_result)
         except Exception:
             pass
-        self._attach_spen_listeners()
+        # Do not attach Android view touch listeners: they steal SDL input.
 
     def _update_spen_from_motion(self, event: Any) -> None:
         action_down = 0
