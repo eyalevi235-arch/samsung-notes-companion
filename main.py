@@ -1505,19 +1505,7 @@ class SamsungNotesCompanionApp(App):
         height = int(bitmap.getHeight())
         clip = autoclass("android.graphics.Rect")(0, 0, width, height)
         identity = autoclass("android.graphics.Matrix")()
-        last_error: Optional[Exception] = None
-        for args in (
-            (bitmap, clip, identity, mode),
-            (bitmap, clip, identity, 1),
-            (bitmap, clip, identity, 2),
-        ):
-            try:
-                page.render(*args)
-                return
-            except Exception as exc:
-                last_error = exc
-        if last_error is not None:
-            raise last_error
+        page.render(bitmap, clip, identity, mode)
 
     def _render_opened_page(self, page: Any) -> Optional[str]:
         from jnius import autoclass
@@ -1528,7 +1516,9 @@ class SamsungNotesCompanionApp(App):
         config = autoclass("android.graphics.Bitmap$Config")
         bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
         canvas = autoclass("android.graphics.Canvas")(bitmap)
-        canvas.drawColor(autoclass("android.graphics.Color").WHITE)
+        paint = autoclass("android.graphics.Paint")()
+        paint.setARGB(255, 255, 255, 255)
+        canvas.drawRect(0.0, 0.0, float(width), float(height), paint)
         self._call_page_render(page, bitmap)
         path = self._bitmap_to_png(bitmap)
         try:
