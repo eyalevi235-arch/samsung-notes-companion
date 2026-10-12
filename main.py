@@ -395,6 +395,7 @@ class SPenAnnotationCanvas(Widget):
                 notes_scale=self._on_view,
                 notes_pan_x=self._on_view,
                 view_pan_y=self._on_view,
+                notes_page_width=self._on_view,
                 page_width=self._on_view,
                 page_height=self._on_view,
                 page_count=self._on_view,
@@ -480,12 +481,15 @@ class SPenAnnotationCanvas(Widget):
             app.page_count = max(1, len(textures))
         self.redraw_all()
 
-    def set_blank_notebook(self, count: int, width: float, height: float) -> None:
+    def set_blank_notebook(self, count: int, width: float = 0.0, height: float = 0.0) -> None:
         self._page_textures = []
         app = App.get_running_app()
-        app.page_width = max(1.0, float(width))
-        app.page_height = max(1.0, float(height))
         app.page_count = max(1, int(count))
+        if self.view_role == "notes" and width > 0:
+            app.notes_page_width = max(1.0, float(width))
+        elif width > 0 and height > 0:
+            app.page_width = max(1.0, float(width))
+            app.page_height = max(1.0, float(height))
         self.redraw_all()
 
     def _notebook_height(self, page_h: float) -> float:
@@ -498,7 +502,10 @@ class SPenAnnotationCanvas(Widget):
 
     def _page_metrics(self) -> Tuple[float, float, float, float, float, float, float]:
         app = App.get_running_app()
-        page_w = max(1.0, float(app.page_width))
+        if self.view_role == "notes":
+            page_w = max(1.0, float(app.notes_page_width))
+        else:
+            page_w = max(1.0, float(app.page_width))
         page_h = max(1.0, float(app.page_height))
         notebook_h = self._notebook_height(page_h)
         width, height = float(self.width), float(self.height)
@@ -525,7 +532,6 @@ class SPenAnnotationCanvas(Widget):
             return "finger"
         if bool(getattr(app, "has_finger_pointer", False)):
             return "finger"
-        is_touch = bool(getattr(touch, "is_touch", True))
         button = str(getattr(touch, "button", None) or "").lower()
         tool = int(getattr(app, "down_tool_type", 0) or 0)
         source = int(getattr(app, "down_source", 0) or 0)
@@ -534,12 +540,12 @@ class SPenAnnotationCanvas(Widget):
         if tool == TOOL_ERASER:
             return "eraser"
         if tool == TOOL_STYLUS or bool(source & 0x4002):
-            return "eraser" if button == "right" or getattr(app, "spen_button_held", False) else "stylus"
-        if button == "right":
-            return "eraser"
-        if button in {"left", "middle"}:
+            if button == "right" or getattr(app, "spen_button_held", False):
+                return "eraser"
             return "stylus"
-        if not is_touch:
+        if not bool(getattr(touch, "is_touch", True)):
+            if button == "right":
+                return "eraser"
             return "stylus"
         return "finger"
 
@@ -995,6 +1001,13 @@ class RootLayout(FloatLayout):
         width = min(dp(360), max(dp(170), self.width * 0.30))
         self.notes_canvas.width = width
         self.notes_canvas.x = self.x
+        self.sync_notes_page_size()
+
+    def sync_notes_page_size(self) -> None:
+        app = App.get_running_app()
+        pdf_w = max(1.0, float(self.pdf_canvas.width))
+        notes_w = max(1.0, float(self.notes_canvas.width))
+        app.notes_page_width = max(1.0, notes_w * float(app.page_width) / pdf_w)
 
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
@@ -1021,6 +1034,7 @@ class SamsungNotesCompanionApp(App):
     notes_scale = NumericProperty(1.0)
     notes_pan_x = NumericProperty(0.0)
     notes_pan_y = NumericProperty(0.0)
+    notes_page_width = NumericProperty(280.0)
     page_width = NumericProperty(800.0)
     page_height = NumericProperty(1100.0)
     page_count = NumericProperty(1)
@@ -1277,14 +1291,31 @@ class SamsungNotesCompanionApp(App):
             self._stylus_listener = listener
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
 
+            def _bind_view(view: Any) -> None:
+                try:
+                    view.setOnGenericMotionListener(listener)
+                    view.setOnHoverListener(listener)
+                    view.setOnTouchListener(listener)
+                except Exception:
+                    pass
+                try:
+                    child_count = int(view.getChildCount())
+                except Exception:
+                    return
+                for index in range(child_count):
+                    _bind_view(view.getChildAt(index))
+
             @run_on_ui_thread
             def _attach() -> None:
-                view = activity.getWindow().getDecorView()
-                view.setOnGenericMotionListener(listener)
-                view.setOnHoverListener(listener)
-                view.setOnTouchListener(listener)
+                root = activity.getWindow().getDecorView()
+                _bind_view(root)
+                for attr in ("mView", "mSurface", "mLayout"):
+                    child = getattr(activity, attr, None)
+                    if child is not None:
+                        _bind_view(child)
 
             _attach()
+            Clock.schedule_once(lambda _dt: _attach(), 0.8)
         except Exception:
             pass
 
@@ -1483,15 +1514,15 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.pdf_canvas.set_blank_notebook(
                 self._pdf_page_count, self.page_width, self.page_height
             )
-        self.root_layout.notes_canvas.set_blank_notebook(
-            self._pdf_page_count, self.page_width, self.page_height
-        )
+        self.root_layout.notes_canvas.set_blank_notebook(self._pdf_page_count)
+        self.root_layout.sync_notes_page_size()
         self.root_layout.pdf_canvas.load_strokes(
             self._pages_to_stacked(self._page_strokes)
         )
         self.root_layout.notes_canvas.load_strokes(
             self._pages_to_stacked(self._notes_strokes)
         )
+        Clock.schedule_once(lambda _dt: self.root_layout.sync_notes_page_size(), 0)
         self.root_layout.set_page_status(0, self._pdf_page_count)
 
     def _uri_is_pdf(self, uri: Any) -> bool:
@@ -1583,7 +1614,24 @@ class SamsungNotesCompanionApp(App):
             "pdf_canvas": self.root_layout.pdf_canvas.serialized_strokes(),
             "notes_canvas": self.root_layout.notes_canvas.serialized_strokes(),
             "document_title": self.document_title,
+            "notes_page_width": float(self.notes_page_width),
         }
+
+    def _draw_notes_grid_pil(self, image: Any) -> None:
+        from PIL import ImageDraw
+
+        drawer = ImageDraw.Draw(image)
+        width, height = image.size
+        step = max(12, min(width, height) // 22)
+        color = (199, 214, 235)
+        x = 0
+        while x <= width:
+            drawer.line([(x, 0), (x, height)], fill=color, width=1)
+            x += step
+        y = 0
+        while y <= height:
+            drawer.line([(0, y), (width, y)], fill=color, width=1)
+            y += step
 
     def _stroke_on_image(self, image: Any, strokes: Sequence[StrokeRecord]) -> None:
         from PIL import ImageDraw
@@ -1629,29 +1677,24 @@ class SamsungNotesCompanionApp(App):
                     (255, 255, 255),
                 )
             self._stroke_on_image(background, self._page_strokes.get(index, []))
-            notes = Image.new("RGB", background.size, (255, 255, 255))
-            self._stroke_on_image(notes, self._notes_strokes.get(index, []))
-            notes_width = 0
-            root = self.root_layout
-            if root.notes_expanded and root.notes_canvas.width > 1:
-                _ox, _oy, disp_w, _dh, _scale, _pw, _ph = root.pdf_canvas._page_metrics()
-                ratio = float(root.notes_canvas.width) / max(float(disp_w), 1.0)
-                notes_width = max(1, int(background.size[0] * ratio))
-            if notes_width > 0:
-                notes = notes.resize((notes_width, background.size[1]), Image.LANCZOS)
-                combined = Image.new(
-                    "RGB",
-                    (notes.size[0] + background.size[0], background.size[1]),
-                    (255, 255, 255),
-                )
-                combined.paste(notes, (0, 0))
-                combined.paste(background, (notes.size[0], 0))
-                image = combined
-            else:
-                image = background
+            notes_h = int(max(1, self.page_height))
+            notes_w = int(max(1, round(float(self.notes_page_width))))
+            notes_native = Image.new("RGB", (notes_w, notes_h), (255, 255, 255))
+            self._draw_notes_grid_pil(notes_native)
+            self._stroke_on_image(notes_native, self._notes_strokes.get(index, []))
+            export_notes_h = background.size[1]
+            export_notes_w = max(1, int(round(notes_w * export_notes_h / max(notes_h, 1))))
+            notes = notes_native.resize((export_notes_w, export_notes_h), Image.LANCZOS)
+            combined = Image.new(
+                "RGB",
+                (notes.size[0] + background.size[0], background.size[1]),
+                (255, 255, 255),
+            )
+            combined.paste(notes, (0, 0))
+            combined.paste(background, (notes.size[0], 0))
             buffer = io.BytesIO()
-            image.save(buffer, format="JPEG", quality=90)
-            pages.append((buffer.getvalue(), image.size[0], image.size[1]))
+            combined.save(buffer, format="JPEG", quality=92)
+            pages.append((buffer.getvalue(), combined.size[0], combined.size[1]))
         return pages
 
     def _export_pdf_bytes(self) -> bytes:
@@ -1704,9 +1747,8 @@ class SamsungNotesCompanionApp(App):
         notes_strokes = self._pages_to_stacked(self._notes_strokes) or (
             payload.get("notes_canvas") or []
         )
-        self.root_layout.notes_canvas.set_blank_notebook(
-            self.page_count, self.page_width, self.page_height
-        )
+        self.root_layout.notes_canvas.set_blank_notebook(self.page_count)
+        self.root_layout.sync_notes_page_size()
         if payload.get("document_title"):
             self.document_title = str(payload.get("document_title"))
             self.root_layout.refresh_title()
