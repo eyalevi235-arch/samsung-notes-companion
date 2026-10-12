@@ -1405,41 +1405,41 @@ class SamsungNotesCompanionApp(App):
         except Exception as exc:
             self._notify(f"שגיאה בפתיחת הקובץ: {exc}")
 
-    def _copy_stream_to_file(self, source: Any, path: str) -> None:
+    def _copy_java_stream(self, source: Any, path: str) -> None:
         from jnius import autoclass, jarray
 
         dest = autoclass("java.io.FileOutputStream")(path)
-        copied = False
-        try:
-            autoclass("android.os.FileUtils").copy(source, dest)
-            copied = os.path.getsize(path) > 5
-        except Exception:
-            copied = False
-        if not copied:
-            buf = jarray("b")(65536)
-            while True:
-                n = int(source.read(buf))
-                if n <= 0:
-                    break
-                dest.write(buf, 0, n)
+        buf = jarray("b")(65536)
+        while True:
+            n = int(source.read(buf))
+            if n <= 0:
+                break
+            dest.write(buf, 0, n)
         dest.flush()
         dest.close()
 
     def _copy_uri_to_temp(self, uri: Any, suffix: str) -> str:
         from jnius import autoclass
 
-        activity = autoclass("org.kivy.android.PythonActivity").mActivity
-        resolver = activity.getContentResolver()
+        resolver = self._android_activity().getContentResolver()
         handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         handle.close()
-        source = resolver.openInputStream(uri)
+        copied = False
         try:
-            self._copy_stream_to_file(source, handle.name)
-        except Exception:
+            pfd = resolver.openFileDescriptor(uri, "r")
+            source = autoclass("java.io.FileInputStream")(pfd.getFileDescriptor())
+            self._copy_java_stream(source, handle.name)
             source.close()
+            pfd.close()
+            copied = os.path.getsize(handle.name) > 4
+        except Exception:
+            copied = False
+        if not copied:
             source = resolver.openInputStream(uri)
-            self._copy_stream_to_file(source, handle.name)
-        source.close()
+            if source is None:
+                raise OSError("openInputStream returned null")
+            self._copy_java_stream(source, handle.name)
+            source.close()
         if os.path.getsize(handle.name) < 5:
             raise OSError("failed to copy the selected file")
         return handle.name
@@ -1635,6 +1635,32 @@ class SamsungNotesCompanionApp(App):
         Clock.schedule_once(lambda _dt: self.root_layout.sync_notes_page_size(), 0)
         self.root_layout.set_page_status(0, self._pdf_page_count)
 
+    def _uri_display_name(self, uri: Any) -> str:
+        try:
+            from jnius import autoclass
+
+            resolver = self._android_activity().getContentResolver()
+            columns = autoclass("android.provider.OpenableColumns")
+            cursor = resolver.query(uri, [columns.DISPLAY_NAME], None, None, None)
+            if cursor is not None:
+                try:
+                    if cursor.moveToFirst():
+                        name = str(cursor.getString(0) or "")
+                        if name:
+                            return name
+                finally:
+                    cursor.close()
+        except Exception:
+            pass
+        return str(uri.getLastPathSegment() or uri.toString())
+
+    def _bytes_look_like_pdf(self, path: str) -> bool:
+        try:
+            with open(path, "rb") as handle:
+                return handle.read(5).startswith(b"%PDF")
+        except Exception:
+            return False
+
     def _uri_is_pdf(self, uri: Any) -> bool:
         try:
             mime = str(self._android_activity().getContentResolver().getType(uri) or "")
@@ -1643,35 +1669,41 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             pass
         name = str(uri.toString()).lower()
-        return name.endswith(".pdf") or "/pdf" in name or "pdf" in name
+        return name.endswith(".pdf") or "/pdf" in name
+
+    def _open_local_pdf(self, path: str, display: str) -> None:
+        self.pdf_path = path
+        self._page_strokes = {}
+        self._notes_strokes = {}
+        self._pdf_page_index = 0
+        self._reset_view()
+        self._pdf_page_count = self._pdf_page_count_from()
+        self.root_layout.pdf_canvas.load_strokes([])
+        self.root_layout.notes_canvas.load_strokes([])
+        self._load_notebook()
+        self._set_title_from_filename(display)
+        if self.root_layout.pdf_canvas._page_textures:
+            self._notify(f"PDF נפתח לכתיבה: {display}")
 
     def _open_android_uri(self, uri: Any) -> None:
-        display = str(uri.getLastPathSegment() or uri.toString())
-        if self._uri_is_pdf(uri):
+        display = self._uri_display_name(uri)
+        try:
+            path = self._copy_uri_to_temp(uri, ".bin")
+        except Exception as exc:
+            self._notify(f"לא ניתן להעתיק את הקובץ: {exc}")
+            return
+        lower = display.lower()
+        if (
+            self._bytes_look_like_pdf(path)
+            or lower.endswith(".pdf")
+            or self._uri_is_pdf(uri)
+        ):
             try:
-                self.pdf_path = self._copy_uri_to_temp(uri, ".pdf")
-                self._page_strokes = {}
-                self._notes_strokes = {}
-                self._pdf_page_index = 0
-                self._reset_view()
-                self._pdf_page_count = self._pdf_page_count_from()
-                self.root_layout.pdf_canvas.load_strokes([])
-                self.root_layout.notes_canvas.load_strokes([])
-                self._load_notebook()
-                self._set_title_from_filename(display)
-                self._notify(f"PDF נפתח לכתיבה: {display}")
+                self._open_local_pdf(path, display)
             except Exception as exc:
                 self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
             return
-        lower = display.lower()
-        if ".sdocx" in lower:
-            suffix = ".sdocx"
-        elif ".notes" in lower:
-            suffix = ".notes"
-        else:
-            suffix = ".json"
         try:
-            path = self._copy_uri_to_temp(uri, suffix)
             self._load_notes_file(path)
             self._notify(f"נפתח: {display}")
         except Exception as exc:
@@ -1941,10 +1973,11 @@ class SamsungNotesCompanionApp(App):
         from jnius import autoclass
 
         Intent = autoclass("android.content.Intent")
-        intent = Intent(Intent.ACTION_GET_CONTENT)
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         intent.setType("*/*")
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         self._launch_android_intent(intent, OPEN_REQUEST)
 
     def _start_android_save(self, extension: str, mime: str) -> None:
@@ -1997,24 +2030,14 @@ class SamsungNotesCompanionApp(App):
 
     def _open_local_path(self, path: str) -> None:
         lower = path.lower()
-        if lower.endswith(".pdf"):
-            self.pdf_path = path
-            self._page_strokes = {}
-            self._notes_strokes = {}
-            self._pdf_page_index = 0
-            self._reset_view()
+        if lower.endswith(".pdf") or self._bytes_look_like_pdf(path):
             if is_android():
                 try:
-                    self._pdf_page_count = self._pdf_page_count_from()
-                    self.root_layout.pdf_canvas.load_strokes([])
-                    self.root_layout.notes_canvas.load_strokes([])
-                    self._load_notebook()
-                    self._set_title_from_filename(path)
-                    self._notify(f"PDF נפתח לכתיבה: {os.path.basename(path)}")
-                    return
+                    self._open_local_pdf(path, os.path.basename(path))
                 except Exception as exc:
                     self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
-                    return
+                return
+            self.pdf_path = path
             self._set_title_from_filename(path)
             self._notify(f"נבחר PDF: {os.path.basename(path)}")
             return
