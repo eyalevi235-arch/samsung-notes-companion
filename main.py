@@ -18,9 +18,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.core.image import Image as CoreImage
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
+from kivy.graphics.texture import Texture
 from kivy.graphics import (
     Color,
     Ellipse,
@@ -190,6 +190,17 @@ def _image_rgb_on_white(source: Any) -> Any:
     background = Image.new("RGB", rgba.size, (255, 255, 255))
     background.paste(rgba, mask=rgba.split()[3])
     return background
+
+
+def _pil_to_texture(image: Any) -> Any:
+    rgba = image.convert("RGBA")
+    texture = Texture.create(size=rgba.size, colorfmt="rgba")
+    texture.blit_buffer(rgba.tobytes(), colorfmt="rgba", bufferfmt="ubyte")
+    texture.flip_vertical()
+    texture.wrap = "clamp_to_edge"
+    texture.mag_filter = "linear"
+    texture.min_filter = "linear"
+    return texture
 
 
 def dashed_polylines(
@@ -492,10 +503,12 @@ class SPenAnnotationCanvas(Widget):
         app.clamp_view(self)
 
     def set_page_images(self, paths: Sequence[str]) -> None:
+        from PIL import Image
+
         textures: List[Any] = []
         for path in paths:
             try:
-                textures.append(CoreImage(path).texture)
+                textures.append(_pil_to_texture(_image_rgb_on_white(Image.open(path))))
             except Exception:
                 continue
         self._page_textures = textures
@@ -1445,6 +1458,58 @@ class SamsungNotesCompanionApp(App):
         pfd.close()
         return count
 
+    def _bitmap_to_png(self, bitmap: Any) -> Optional[str]:
+        from jnius import autoclass
+
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        handle.close()
+        stream = autoclass("java.io.FileOutputStream")(handle.name)
+        fmt = autoclass("android.graphics.Bitmap$CompressFormat")
+        ok = bool(bitmap.compress(fmt.PNG, 100, stream))
+        stream.close()
+        if not ok:
+            return None
+        return handle.name
+
+    def _render_opened_page(self, page: Any) -> Optional[str]:
+        from jnius import autoclass
+
+        page_w = max(1.0, float(page.getWidth()))
+        page_h = max(1.0, float(page.getHeight()))
+        max_side = 2048.0
+        scale = min(2.0, max_side / max(page_w, page_h))
+        width = max(1, int(round(page_w * scale)))
+        height = max(1, int(round(page_h * scale)))
+        bitmap_cls = autoclass("android.graphics.Bitmap")
+        config = autoclass("android.graphics.Bitmap$Config")
+        bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
+        bitmap.eraseColor(-1)
+        clip = autoclass("android.graphics.Rect")(0, 0, width, height)
+        display_mode = 1
+        rendered = False
+        try:
+            page.render(bitmap, clip, None, display_mode)
+            rendered = True
+        except Exception:
+            rendered = False
+        if not rendered:
+            try:
+                page.render(bitmap, None, None, display_mode)
+                rendered = True
+            except Exception:
+                rendered = False
+        if not rendered:
+            matrix = autoclass("android.graphics.Matrix")()
+            matrix.setScale(width / page_w, -height / page_h)
+            matrix.postTranslate(0.0, float(height))
+            page.render(bitmap, clip, matrix, display_mode)
+        path = self._bitmap_to_png(bitmap)
+        try:
+            bitmap.recycle()
+        except Exception:
+            pass
+        return path
+
     def _render_pdf_page(self, index: int, uri: Any = None) -> Optional[str]:
         try:
             from jnius import autoclass
@@ -1452,33 +1517,11 @@ class SamsungNotesCompanionApp(App):
             pfd = self._open_pdf_pfd(uri)
             renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
             page = renderer.openPage(int(index))
-            scale = 2.0
-            width = max(1, int(round(float(page.getWidth()) * scale)))
-            height = max(1, int(round(float(page.getHeight()) * scale)))
-            bitmap_cls = autoclass("android.graphics.Bitmap")
-            config = autoclass("android.graphics.Bitmap$Config")
-            bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
-            bitmap.eraseColor(-1)
-            clip = autoclass("android.graphics.Rect")(0, 0, width, height)
-            matrix = autoclass("android.graphics.Matrix")()
-            page_w = max(1.0, float(page.getWidth()))
-            page_h = max(1.0, float(page.getHeight()))
-            matrix.setScale(width / page_w, height / page_h)
-            page.render(bitmap, clip, matrix, 1)
+            path = self._render_opened_page(page)
             page.close()
             renderer.close()
             pfd.close()
-            handle = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-            handle.close()
-            stream = autoclass("java.io.FileOutputStream")(handle.name)
-            fmt = autoclass("android.graphics.Bitmap$CompressFormat")
-            bitmap.compress(fmt.JPEG, 95, stream)
-            stream.close()
-            try:
-                bitmap.recycle()
-            except Exception:
-                pass
-            return handle.name
+            return path
         except Exception:
             return None
 
@@ -1549,10 +1592,13 @@ class SamsungNotesCompanionApp(App):
                 paths.append(preview)
         if paths:
             self.root_layout.pdf_canvas.set_page_images(paths)
+            if not self.root_layout.pdf_canvas._page_textures:
+                self._notify("ה-PDF נפתח אבל לא ניתן להציג את תוכן העמודים")
         else:
             self.root_layout.pdf_canvas.set_blank_notebook(
                 self._pdf_page_count, self.page_width, self.page_height
             )
+            self._notify("ה-PDF נפתח בלי תצוגת עמודים — בדקו הרשאות קובץ")
         self.root_layout.notes_canvas.set_blank_notebook(self._pdf_page_count)
         self.root_layout.sync_notes_page_size()
         self.root_layout.pdf_canvas.load_strokes(
