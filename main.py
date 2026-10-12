@@ -1104,7 +1104,6 @@ class SamsungNotesCompanionApp(App):
         self._pointers: Dict[Any, Tuple[float, float]] = {}
         self._multitouch = False
         self.pdf_path: Optional[str] = None
-        self._pdf_local_path: Optional[str] = None
         self._pdf_page_index: int = 0
         self._pdf_page_count: int = 0
         self._page_strokes: Dict[int, List[StrokeRecord]] = {}
@@ -1461,14 +1460,11 @@ class SamsungNotesCompanionApp(App):
             bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
             bitmap.eraseColor(-1)
             clip = autoclass("android.graphics.Rect")(0, 0, width, height)
-            # Null transform lets PdfRenderer fit the page into the bitmap.
-            # An extra Matrix scale on an already-sized bitmap crops the form
-            # to a white corner.
-            try:
-                page.render(bitmap, clip, None, 1)
-            except Exception:
-                matrix = autoclass("android.graphics.Matrix")()
-                page.render(bitmap, clip, matrix, 1)
+            matrix = autoclass("android.graphics.Matrix")()
+            page_w = max(1.0, float(page.getWidth()))
+            page_h = max(1.0, float(page.getHeight()))
+            matrix.setScale(width / page_w, height / page_h)
+            page.render(bitmap, clip, matrix, 1)
             page.close()
             renderer.close()
             pfd.close()
@@ -1482,75 +1478,9 @@ class SamsungNotesCompanionApp(App):
                 bitmap.recycle()
             except Exception:
                 pass
-            self._overlay_acroform_fields(handle.name, int(index))
             return handle.name
         except Exception:
             return None
-
-    def _remember_pdf_file(self, path: Optional[str]) -> None:
-        self._pdf_local_path = path if path and os.path.isfile(path) else None
-
-    def _overlay_acroform_fields(self, image_path: str, index: int) -> None:
-        pdf_path = self._pdf_local_path or (
-            self.pdf_path if self.pdf_path and os.path.isfile(self.pdf_path) else None
-        )
-        if not pdf_path:
-            return
-        try:
-            from PIL import Image, ImageDraw, ImageFont
-            from pypdf import PdfReader
-        except Exception:
-            return
-        try:
-            reader = PdfReader(pdf_path)
-            if getattr(reader, "is_encrypted", False):
-                try:
-                    reader.decrypt("")
-                except Exception:
-                    pass
-            if index >= len(reader.pages):
-                return
-            page = reader.pages[index]
-            box = page.mediabox
-            pdf_w = max(1.0, float(box.width))
-            pdf_h = max(1.0, float(box.height))
-            image = Image.open(image_path).convert("RGB")
-            scale_x = image.size[0] / pdf_w
-            scale_y = image.size[1] / pdf_h
-            drawer = ImageDraw.Draw(image)
-            font_path = resolve_hebrew_font() or resolve_latin_font()
-            annots = page.get("/Annots") or []
-            for annot_ref in annots:
-                try:
-                    annot = annot_ref.get_object()
-                except Exception:
-                    continue
-                if str(annot.get("/Subtype", "")) != "/Widget":
-                    continue
-                value = annot.get("/V")
-                if value is None:
-                    value = annot.get("/DV")
-                text = str(value or "").replace("/", "").strip()
-                if not text or text.lower() in {"off", "none", "null"}:
-                    continue
-                rect = [float(item) for item in (annot.get("/Rect") or [])]
-                if len(rect) != 4:
-                    continue
-                left = min(rect[0], rect[2]) * scale_x
-                right = max(rect[0], rect[2]) * scale_x
-                top = image.size[1] - max(rect[1], rect[3]) * scale_y
-                bottom = image.size[1] - min(rect[1], rect[3]) * scale_y
-                box_h = max(8.0, bottom - top)
-                font = None
-                if font_path:
-                    try:
-                        font = ImageFont.truetype(font_path, max(10, int(box_h * 0.55)))
-                    except Exception:
-                        font = None
-                drawer.text((left + 2, top + 1), text, fill=(20, 20, 20), font=font)
-            image.save(image_path, format="JPEG", quality=95)
-        except Exception:
-            return
 
     def _stacked_to_pages(
         self, strokes: Sequence[StrokeRecord]
@@ -1649,10 +1579,6 @@ class SamsungNotesCompanionApp(App):
         if self._uri_is_pdf(uri):
             try:
                 self.pdf_path = str(uri.toString())
-                try:
-                    self._remember_pdf_file(self._copy_uri_to_temp(uri, ".pdf"))
-                except Exception:
-                    self._pdf_local_path = None
                 self._page_strokes = {}
                 self._notes_strokes = {}
                 self._pdf_page_index = 0
@@ -1920,7 +1846,6 @@ class SamsungNotesCompanionApp(App):
                 handle.write(archive.read("Document.pdf"))
                 handle.close()
                 self.pdf_path = handle.name
-                self._remember_pdf_file(handle.name)
                 if is_android():
                     self._pdf_page_count = self._pdf_page_count_from()
                     self._load_notebook()
@@ -2003,7 +1928,6 @@ class SamsungNotesCompanionApp(App):
         lower = path.lower()
         if lower.endswith(".pdf"):
             self.pdf_path = path
-            self._remember_pdf_file(path)
             self._page_strokes = {}
             self._notes_strokes = {}
             self._pdf_page_index = 0
