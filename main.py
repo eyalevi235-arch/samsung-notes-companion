@@ -1527,7 +1527,8 @@ class SamsungNotesCompanionApp(App):
         bitmap_cls = autoclass("android.graphics.Bitmap")
         config = autoclass("android.graphics.Bitmap$Config")
         bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
-        bitmap.eraseColor(-1)
+        canvas = autoclass("android.graphics.Canvas")(bitmap)
+        canvas.drawColor(autoclass("android.graphics.Color").WHITE)
         self._call_page_render(page, bitmap)
         path = self._bitmap_to_png(bitmap)
         try:
