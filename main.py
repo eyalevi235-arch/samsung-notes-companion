@@ -166,6 +166,32 @@ def _dist2(left: Sequence[float], right: Sequence[float]) -> float:
     return dx * dx + dy * dy
 
 
+def _dist_point_seg2(
+    point: Sequence[float], start: Sequence[float], end: Sequence[float]
+) -> float:
+    px, py = float(point[0]), float(point[1])
+    ax, ay = float(start[0]), float(start[1])
+    bx, by = float(end[0]), float(end[1])
+    dx, dy = bx - ax, by - ay
+    length = dx * dx + dy * dy
+    if length <= 1e-8:
+        return _dist2(point, start)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length))
+    return (px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2
+
+
+def _image_rgb_on_white(source: Any) -> Any:
+    from PIL import Image
+
+    image = Image.open(source) if isinstance(source, (str, Path)) else source
+    if image.mode == "RGB":
+        return image
+    rgba = image.convert("RGBA")
+    background = Image.new("RGB", rgba.size, (255, 255, 255))
+    background.paste(rgba, mask=rgba.split()[3])
+    return background
+
+
 def dashed_polylines(
     points: Sequence[Sequence[float]],
     dash_len: float = DASH_LENGTH,
@@ -249,7 +275,7 @@ def _jpeg_pages_to_pdf(pages: Sequence[Tuple[bytes, int, int]]) -> bytes:
     body = b""
     offsets = [0]
     cursor = 0
-    header = b"%PDF-1.4\n"
+    header = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
     cursor += len(header)
     for index, obj in enumerate(objects, start=1):
         offsets.append(cursor)
@@ -531,7 +557,7 @@ class SPenAnnotationCanvas(Widget):
         if len(pointers) >= 1 and touch.uid not in pointers:
             return "finger"
         button = str(getattr(touch, "button", None) or "").lower()
-        if button == "right" or getattr(app, "spen_button_held", False):
+        if button in {"right", "middle", "alt"} or getattr(app, "spen_button_held", False):
             return "eraser"
         return "stylus"
 
@@ -639,13 +665,20 @@ class SPenAnnotationCanvas(Widget):
 
     def _erase_at(self, x: float, y: float, radius: float) -> None:
         radius_sq = radius * radius
+        eraser = (x, y)
         kept: List[StrokeRecord] = []
         changed = False
         for record in self.strokes:
             fragment: List[List[float]] = []
             pieces: List[List[List[float]]] = []
-            for point in record.get("points") or []:
-                if _dist2(point, (x, y)) <= radius_sq:
+            points = record.get("points") or []
+            previous: Optional[Sequence[float]] = None
+            for point in points:
+                hit = _dist2(point, eraser) <= radius_sq
+                if not hit and previous is not None:
+                    hit = _dist_point_seg2(eraser, previous, point) <= radius_sq
+                previous = point
+                if hit:
                     changed = True
                     if len(fragment) >= 2:
                         pieces.append(fragment)
@@ -720,14 +753,15 @@ class SPenAnnotationCanvas(Widget):
             self._begin_two_finger_view(touch)
             return True
         tool_mode = str(getattr(app, "tool_mode", "none"))
-        if tool_mode == "none":
-            self._start_view_gesture(touch)
-            return True
         doc = self.to_doc(touch.x, touch.y)
-        if kind == "eraser" or tool_mode == "eraser":
+        if kind == "eraser" or tool_mode == "eraser" or bool(getattr(app, "is_eraser", False)):
             touch.ud["erasing"] = True
             _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
-            self._erase_at(doc[0], doc[1], SPEN_ERASER_WIDTH / max(scale, 0.01))
+            radius = max(SPEN_ERASER_WIDTH, 36.0) / max(scale, 0.01)
+            self._erase_at(doc[0], doc[1], radius)
+            return True
+        if tool_mode == "none":
+            self._start_view_gesture(touch)
             return True
         if tool_mode != "pen":
             self._start_view_gesture(touch)
@@ -758,7 +792,8 @@ class SPenAnnotationCanvas(Widget):
         if touch.ud.get("erasing"):
             doc = self.to_doc(touch.x, touch.y)
             _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
-            self._erase_at(doc[0], doc[1], SPEN_ERASER_WIDTH / max(scale, 0.01))
+            radius = max(SPEN_ERASER_WIDTH, 36.0) / max(scale, 0.01)
+            self._erase_at(doc[0], doc[1], radius)
             return True
         self.current_stroke.append(self.to_doc(touch.x, touch.y))
         self.redraw_all()
@@ -937,7 +972,7 @@ class RootLayout(FloatLayout):
         )
         for key, kind, handler in actions:
             button = ToolIcon(kind, on_dark=True)
-            button.bind(on_release=handler)
+            button.bind(on_press=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
         for key, rgba in INK_COLORS:
@@ -1240,7 +1275,7 @@ class SamsungNotesCompanionApp(App):
             activity.bind(on_activity_result=self._on_activity_result)
         except Exception:
             pass
-        # Do not attach Android view touch listeners: they steal SDL input.
+        self._attach_spen_listeners()
 
     def _update_spen_from_motion(self, event: Any) -> None:
         action_down = 0
@@ -1310,18 +1345,6 @@ class SamsungNotesCompanionApp(App):
                 view = activity.getWindow().getDecorView()
                 view.setOnGenericMotionListener(listener)
                 view.setOnHoverListener(listener)
-                try:
-                    view.setOnTouchListener(None)
-                except Exception:
-                    pass
-                for attr in ("mView", "mSurface", "mLayout"):
-                    child = getattr(activity, attr, None)
-                    if child is None:
-                        continue
-                    try:
-                        child.setOnTouchListener(None)
-                    except Exception:
-                        pass
 
             _attach()
         except Exception:
@@ -1435,9 +1458,10 @@ class SamsungNotesCompanionApp(App):
             bitmap_cls = autoclass("android.graphics.Bitmap")
             config = autoclass("android.graphics.Bitmap$Config")
             bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
+            bitmap.eraseColor(-1)
             matrix = autoclass("android.graphics.Matrix")()
             matrix.setScale(float(scale), float(scale))
-            page.render(bitmap, None, matrix, 1)
+            page.render(bitmap, None, matrix, 2)
             page.close()
             renderer.close()
             pfd.close()
@@ -1641,30 +1665,62 @@ class SamsungNotesCompanionApp(App):
             drawer.line([(0, y), (width, y)], fill=color, width=1)
             y += step
 
-    def _stroke_on_image(self, image: Any, strokes: Sequence[StrokeRecord]) -> None:
+    def _stroke_on_image(
+        self,
+        image: Any,
+        strokes: Sequence[StrokeRecord],
+        page_w: float = 0.0,
+        page_h: float = 0.0,
+    ) -> None:
         from PIL import ImageDraw
 
         drawer = ImageDraw.Draw(image)
-        height = image.size[1]
+        width, height = image.size
+        scale_x = width / page_w if page_w > 1 else 1.0
+        scale_y = height / page_h if page_h > 1 else 1.0
         for record in strokes:
             points = record.get("points") or []
             if len(points) < 2:
                 continue
             color = record.get("color", COLOR_BLACK)
             fill = tuple(max(0, min(255, int(c * 255))) for c in color[:3])
-            width = max(1, int(record.get("width", 2)))
-            xy = [(float(p[0]), height - float(p[1])) for p in points]
+            stroke_w = max(1, int(record.get("width", 2) * max(scale_x, scale_y)))
+            xy = [
+                (float(p[0]) * scale_x, height - float(p[1]) * scale_y) for p in points
+            ]
             if record.get("dashed"):
                 dashes = dashed_polylines(points)
                 for dash in dashes:
                     pair = [
-                        (dash[i], height - dash[i + 1])
+                        (dash[i] * scale_x, height - dash[i + 1] * scale_y)
                         for i in range(0, len(dash) - 1, 2)
                     ]
                     if len(pair) >= 2:
-                        drawer.line(pair, fill=fill, width=width)
+                        drawer.line(pair, fill=fill, width=stroke_w)
             else:
-                drawer.line(xy, fill=fill, width=width)
+                drawer.line(xy, fill=fill, width=stroke_w)
+
+    def _texture_to_rgb(self, texture: Any) -> Optional[Any]:
+        from PIL import Image
+
+        try:
+            image = Image.frombytes("RGBA", tuple(texture.size), bytes(texture.pixels))
+            image = image.transpose(Image.FLIP_TOP_BOTTOM)
+            return _image_rgb_on_white(image)
+        except Exception:
+            return None
+
+    def _export_document_page(self, index: int) -> Optional[Any]:
+        textures = getattr(self.root_layout.pdf_canvas, "_page_textures", [])
+        if 0 <= index < len(textures) and textures[index] is not None:
+            converted = self._texture_to_rgb(textures[index])
+            if converted is not None:
+                return converted
+        if self.pdf_path and is_android():
+            preview = self._render_pdf_page(index)
+            if preview:
+                return _image_rgb_on_white(preview)
+        return None
 
     def _render_export_pngs(self) -> List[Tuple[bytes, int, int]]:
         from PIL import Image
@@ -1673,23 +1729,29 @@ class SamsungNotesCompanionApp(App):
         pages: List[Tuple[bytes, int, int]] = []
         count = max(1, int(self._pdf_page_count) or 1)
         for index in range(count):
-            background = None
-            if self.pdf_path and is_android():
-                preview = self._render_pdf_page(index)
-                if preview:
-                    background = Image.open(preview).convert("RGB")
+            background = self._export_document_page(index)
             if background is None:
                 background = Image.new(
                     "RGB",
                     (int(self.page_width), int(self.page_height)),
                     (255, 255, 255),
                 )
-            self._stroke_on_image(background, self._page_strokes.get(index, []))
+            self._stroke_on_image(
+                background,
+                self._page_strokes.get(index, []),
+                float(self.page_width),
+                float(self.page_height),
+            )
             notes_h = int(max(1, self.page_height))
             notes_w = int(max(1, round(float(self.notes_page_width))))
             notes_native = Image.new("RGB", (notes_w, notes_h), (255, 255, 255))
             self._draw_notes_grid_pil(notes_native)
-            self._stroke_on_image(notes_native, self._notes_strokes.get(index, []))
+            self._stroke_on_image(
+                notes_native,
+                self._notes_strokes.get(index, []),
+                float(notes_w),
+                float(notes_h),
+            )
             export_notes_h = background.size[1]
             export_notes_w = max(1, int(round(notes_w * export_notes_h / max(notes_h, 1))))
             notes = notes_native.resize((export_notes_w, export_notes_h), Image.LANCZOS)
@@ -1701,7 +1763,9 @@ class SamsungNotesCompanionApp(App):
             combined.paste(notes, (0, 0))
             combined.paste(background, (notes.size[0], 0))
             buffer = io.BytesIO()
-            combined.save(buffer, format="JPEG", quality=92)
+            combined.save(
+                buffer, format="JPEG", quality=92, optimize=False, progressive=False
+            )
             pages.append((buffer.getvalue(), combined.size[0], combined.size[1]))
         return pages
 
