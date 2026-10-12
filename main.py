@@ -1255,11 +1255,17 @@ class SamsungNotesCompanionApp(App):
 
             @run_on_ui_thread
             def _toast() -> None:
-                Toast.makeText(activity, String(message), Toast.LENGTH_SHORT).show()
+                Toast.makeText(activity, String(message), Toast.LENGTH_LONG).show()
 
             _toast()
         except Exception:
             pass
+
+    def _notify_long(self, message: str) -> None:
+        self._notify(message)
+        field = TextInput(text=message, readonly=True, multiline=True)
+        set_latin_font(field)
+        Popup(title="שגיאה", content=field, size_hint=(0.94, 0.6)).open()
 
     def _on_key_down(self, *_args: Any, **kwargs: Any) -> bool:
         key = _args[1] if len(_args) > 1 else None
@@ -1490,24 +1496,39 @@ class SamsungNotesCompanionApp(App):
             return None
         return handle.name
 
+    def _call_page_render(self, page: Any, bitmap: Any) -> None:
+        from jnius import autoclass
+
+        page_cls = autoclass("android.graphics.pdf.PdfRenderer$Page")
+        mode = int(getattr(page_cls, "RENDER_MODE_FOR_DISPLAY", 1))
+        width = int(bitmap.getWidth())
+        height = int(bitmap.getHeight())
+        clip = autoclass("android.graphics.Rect")(0, 0, width, height)
+        identity = autoclass("android.graphics.Matrix")()
+        last_error: Optional[Exception] = None
+        for args in (
+            (bitmap, clip, identity, mode),
+            (bitmap, clip, identity, 1),
+            (bitmap, clip, identity, 2),
+        ):
+            try:
+                page.render(*args)
+                return
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+
     def _render_opened_page(self, page: Any) -> Optional[str]:
         from jnius import autoclass
 
-        page_w = max(1.0, float(page.getWidth()))
-        page_h = max(1.0, float(page.getHeight()))
-        max_side = 2048.0
-        scale = min(2.0, max_side / max(page_w, page_h))
-        width = max(1, int(round(page_w * scale)))
-        height = max(1, int(round(page_h * scale)))
+        width = max(1, int(page.getWidth()))
+        height = max(1, int(page.getHeight()))
         bitmap_cls = autoclass("android.graphics.Bitmap")
         config = autoclass("android.graphics.Bitmap$Config")
         bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
         bitmap.eraseColor(-1)
-        clip = autoclass("android.graphics.Rect")(0, 0, width, height)
-        matrix = autoclass("android.graphics.Matrix")()
-        matrix.setScale(width / page_w, -height / page_h)
-        matrix.postTranslate(0.0, float(height))
-        page.render(bitmap, clip, matrix, 1)
+        self._call_page_render(page, bitmap)
         path = self._bitmap_to_png(bitmap)
         try:
             bitmap.recycle()
@@ -1524,7 +1545,9 @@ class SamsungNotesCompanionApp(App):
         error = ""
         try:
             count = int(renderer.getPageCount())
-            self._pdf_page_count = max(1, count)
+            self._pdf_page_count = max(0, count)
+            if count <= 0:
+                return [], "PdfRenderer reported 0 pages"
             for index in range(count):
                 page = renderer.openPage(int(index))
                 try:
@@ -1532,7 +1555,7 @@ class SamsungNotesCompanionApp(App):
                     if path:
                         paths.append(path)
                 except Exception as exc:
-                    error = str(exc)
+                    error = f"page {index}/{count}: {exc}"
                 page.close()
         finally:
             renderer.close()
@@ -1613,16 +1636,11 @@ class SamsungNotesCompanionApp(App):
     def _load_notebook(self, uri: Any = None) -> None:
         if uri is not None and (not self.pdf_path or str(self.pdf_path).startswith("content:")):
             self.pdf_path = self._copy_uri_to_temp(uri, ".pdf")
-        if self._pdf_page_count <= 0:
-            try:
-                self._pdf_page_count = self._pdf_page_count_from()
-            except Exception:
-                return
-        self.page_count = int(self._pdf_page_count)
         try:
             paths, error = self._render_pdf_pages()
         except Exception as exc:
             paths, error = [], str(exc)
+        self.page_count = max(1, int(self._pdf_page_count or 1))
         if paths:
             self.root_layout.pdf_canvas.set_page_images(paths)
             if not self.root_layout.pdf_canvas._page_textures:
@@ -1631,7 +1649,7 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.pdf_canvas.set_blank_notebook(
                 self._pdf_page_count, self.page_width, self.page_height
             )
-            self._notify(f"לא ניתן לרנדר את ה-PDF: {error or 'שגיאה לא ידועה'}")
+            self._notify_long(f"לא ניתן לרנדר את ה-PDF: {error or 'שגיאה לא ידועה'}")
         self.root_layout.notes_canvas.set_blank_notebook(self._pdf_page_count)
         self.root_layout.sync_notes_page_size()
         self.root_layout.pdf_canvas.load_strokes(
@@ -1685,7 +1703,7 @@ class SamsungNotesCompanionApp(App):
         self._notes_strokes = {}
         self._pdf_page_index = 0
         self._reset_view()
-        self._pdf_page_count = self._pdf_page_count_from()
+        self._pdf_page_count = 0
         self.root_layout.pdf_canvas.load_strokes([])
         self.root_layout.notes_canvas.load_strokes([])
         self._load_notebook()
