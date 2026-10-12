@@ -8,7 +8,9 @@ import math
 import os
 import tempfile
 
-os.environ.setdefault("SDL_ANDROID_SEPARATE_MOUSE_AND_TOUCH", "1")
+os.environ["SDL_ANDROID_SEPARATE_MOUSE_AND_TOUCH"] = "1"
+os.environ["SDL_TOUCH_MOUSE_EVENTS"] = "0"
+os.environ["SDL_MOUSE_TOUCH_EVENTS"] = "0"
 import uuid
 import zipfile
 from pathlib import Path
@@ -100,31 +102,60 @@ def is_android() -> bool:
     return platform == "android"
 
 
-def resolve_ui_font() -> Optional[str]:
-    candidates = (
-        "/system/fonts/NotoSansHebrew-Regular.ttf",
-        "/system/fonts/NotoSansHebrew-VF.ttf",
-        "/system/fonts/SamsungOneUI-Regular.ttf",
-        "/system/fonts/SECCjk-Regular.ttf",
-        "/system/fonts/NotoSans-Regular.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\calibri.ttf",
-    )
-    for path in candidates:
+def _first_existing(paths: Sequence[str]) -> Optional[str]:
+    for path in paths:
         if os.path.isfile(path):
             return path
     return None
 
 
+def resolve_latin_font() -> Optional[str]:
+    return _first_existing(
+        (
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/NotoSans-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+        )
+    )
+
+
+def resolve_hebrew_font() -> Optional[str]:
+    return _first_existing(
+        (
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+            "/system/fonts/NotoSansHebrew-Regular.ttf",
+            "/system/fonts/NotoSansHebrew-VF.ttf",
+            "/system/fonts/SamsungSans-Regular.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
+        )
+    )
+
+
 def apply_ui_font() -> None:
-    path = resolve_ui_font()
-    if not path:
-        return
+    latin = resolve_latin_font()
+    hebrew = resolve_hebrew_font()
     try:
-        LabelBase.register(name="UIFont", fn_regular=path)
-        Label.font_name = "UIFont"
-        Button.font_name = "UIFont"
-        TextInput.font_name = "UIFont"
+        if latin:
+            LabelBase.register(name="LatinFont", fn_regular=latin)
+        if hebrew:
+            LabelBase.register(name="HebrewFont", fn_regular=hebrew)
+    except Exception:
+        pass
+
+
+def set_latin_font(widget: Any) -> None:
+    try:
+        widget.font_name = "LatinFont"
+    except Exception:
+        pass
+
+
+def set_hebrew_font(widget: Any) -> None:
+    try:
+        widget.font_name = "HebrewFont"
     except Exception:
         pass
 
@@ -363,7 +394,7 @@ class SPenAnnotationCanvas(Widget):
             app.bind(
                 notes_scale=self._on_view,
                 notes_pan_x=self._on_view,
-                notes_pan_y=self._on_view,
+                view_pan_y=self._on_view,
                 page_width=self._on_view,
                 page_height=self._on_view,
                 page_count=self._on_view,
@@ -404,7 +435,7 @@ class SPenAnnotationCanvas(Widget):
     def _pan_value(self) -> Tuple[float, float]:
         app = App.get_running_app()
         if self.view_role == "notes":
-            return float(app.notes_pan_x), float(app.notes_pan_y)
+            return float(app.notes_pan_x), float(app.view_pan_y)
         return float(app.view_pan_x), float(app.view_pan_y)
 
     def _set_scale(self, value: float) -> None:
@@ -420,20 +451,18 @@ class SPenAnnotationCanvas(Widget):
         app = App.get_running_app()
         if self.view_role == "notes":
             app.notes_pan_x += dx
-            app.notes_pan_y += dy
         else:
             app.view_pan_x += dx
-            app.view_pan_y += dy
+        app.view_pan_y += dy
         app.clamp_view(self)
 
     def _set_pan(self, pan_x: float, pan_y: float) -> None:
         app = App.get_running_app()
         if self.view_role == "notes":
             app.notes_pan_x = pan_x
-            app.notes_pan_y = pan_y
         else:
             app.view_pan_x = pan_x
-            app.view_pan_y = pan_y
+        app.view_pan_y = pan_y
         app.clamp_view(self)
 
     def set_page_images(self, paths: Sequence[str]) -> None:
@@ -499,17 +528,20 @@ class SPenAnnotationCanvas(Widget):
         is_touch = bool(getattr(touch, "is_touch", True))
         button = str(getattr(touch, "button", None) or "").lower()
         tool = int(getattr(app, "down_tool_type", 0) or 0)
+        source = int(getattr(app, "down_source", 0) or 0)
         if tool == TOOL_FINGER:
             return "finger"
         if tool == TOOL_ERASER:
             return "eraser"
-        if tool == TOOL_STYLUS:
+        if tool == TOOL_STYLUS or bool(source & 0x4002):
             return "eraser" if button == "right" or getattr(app, "spen_button_held", False) else "stylus"
-        if is_touch:
-            return "finger"
-        if button == "right" or getattr(app, "spen_button_held", False):
+        if button == "right":
             return "eraser"
-        return "stylus"
+        if button in {"left", "middle"}:
+            return "stylus"
+        if not is_touch:
+            return "stylus"
+        return "finger"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
         if "pressure" in getattr(touch, "profile", []):
@@ -850,6 +882,7 @@ class RootLayout(FloatLayout):
             halign="right",
             valign="middle",
         )
+        set_hebrew_font(self.status_label)
         self.title_button = Button(
             text=f"{app.document_title}  >",
             color=(0.12, 0.12, 0.14, 1),
@@ -862,6 +895,7 @@ class RootLayout(FloatLayout):
             background_color=(1, 1, 1, 1),
             halign="right",
         )
+        set_hebrew_font(self.title_button)
         self.title_button.bind(on_release=app.rename_document)
         header.add_widget(self.status_label)
         header.add_widget(self.title_button)
@@ -960,8 +994,7 @@ class RootLayout(FloatLayout):
         self.notes_canvas.disabled = False
         width = min(dp(360), max(dp(170), self.width * 0.30))
         self.notes_canvas.width = width
-        origin_x, _oy, _dw, _dh, _scale, _pw, _ph = self.pdf_canvas._page_metrics()
-        self.notes_canvas.x = max(self.x, origin_x - width)
+        self.notes_canvas.x = self.x
 
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
@@ -1005,6 +1038,7 @@ class SamsungNotesCompanionApp(App):
         self.spen_button_held: bool = False
         self.pointer_count = 1
         self.down_tool_type = 0
+        self.down_source = 0
         self.input_source = 0
         self.has_finger_pointer = False
         self._fingers: Dict[Any, Tuple[float, float]] = {}
@@ -1046,6 +1080,8 @@ class SamsungNotesCompanionApp(App):
             if item is None or item.width <= 1 or item.height <= 1:
                 continue
             self._clamp_canvas(item)
+        if root.pdf_canvas.width > 1:
+            self._clamp_shared_y(root.pdf_canvas)
         if canvas is None or getattr(canvas, "view_role", "") == "pdf":
             root.dock_notes()
 
@@ -1078,10 +1114,25 @@ class SamsungNotesCompanionApp(App):
             pan_y = min(max(pan_y, min_y), max_y)
         if canvas.view_role == "notes":
             self.notes_pan_x = pan_x
-            self.notes_pan_y = pan_y
+            return
+        self.view_pan_x = pan_x
+        self.view_pan_y = pan_y
+
+    def _clamp_shared_y(self, canvas: SPenAnnotationCanvas) -> None:
+        _ox, _oy, _dw, disp_h, _scale, _pw, _ph = canvas._page_metrics()
+        board_y = float(canvas.y)
+        board_h = float(canvas.height)
+        base_y = canvas.y + canvas.height - disp_h
+        if disp_h <= board_h:
+            min_y, max_y = board_y - base_y, board_y + board_h - disp_h - base_y
         else:
-            self.view_pan_x = pan_x
-            self.view_pan_y = pan_y
+            min_y, max_y = board_y + board_h - disp_h - base_y, board_y - base_y
+        if min_y > max_y:
+            min_y, max_y = max_y, min_y
+        if min_y > max_y:
+            self.view_pan_y = (min_y + max_y) / 2.0
+            return
+        self.view_pan_y = min(max(float(self.view_pan_y), min_y), max_y)
 
     def rename_document(self, *_args: Any) -> None:
         field = TextInput(
@@ -1170,6 +1221,7 @@ class SamsungNotesCompanionApp(App):
             index = int(event.getActionIndex())
             count = int(event.getPointerCount())
             tool = int(event.getToolType(index))
+            source = int(event.getSource())
             tools = [int(event.getToolType(i)) for i in range(count)]
         except Exception:
             return
@@ -1182,12 +1234,14 @@ class SamsungNotesCompanionApp(App):
         if action in UP_ACTIONS:
             if count <= 1:
                 self.down_tool_type = 0
+                self.down_source = 0
                 self.tool_type = 0
                 self.has_finger_pointer = False
             return
         self.tool_type = tool
         if action in (action_down, action_pointer_down):
             self.down_tool_type = tool
+            self.down_source = source
 
     def _attach_spen_listeners(self) -> None:
         try:
@@ -1577,10 +1631,27 @@ class SamsungNotesCompanionApp(App):
             self._stroke_on_image(background, self._page_strokes.get(index, []))
             notes = Image.new("RGB", background.size, (255, 255, 255))
             self._stroke_on_image(notes, self._notes_strokes.get(index, []))
-            for image in (background, notes):
-                buffer = io.BytesIO()
-                image.save(buffer, format="JPEG", quality=88)
-                pages.append((buffer.getvalue(), image.size[0], image.size[1]))
+            notes_width = 0
+            root = self.root_layout
+            if root.notes_expanded and root.notes_canvas.width > 1:
+                _ox, _oy, disp_w, _dh, _scale, _pw, _ph = root.pdf_canvas._page_metrics()
+                ratio = float(root.notes_canvas.width) / max(float(disp_w), 1.0)
+                notes_width = max(1, int(background.size[0] * ratio))
+            if notes_width > 0:
+                notes = notes.resize((notes_width, background.size[1]), Image.LANCZOS)
+                combined = Image.new(
+                    "RGB",
+                    (notes.size[0] + background.size[0], background.size[1]),
+                    (255, 255, 255),
+                )
+                combined.paste(notes, (0, 0))
+                combined.paste(background, (notes.size[0], 0))
+                image = combined
+            else:
+                image = background
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=90)
+            pages.append((buffer.getvalue(), image.size[0], image.size[1]))
         return pages
 
     def _export_pdf_bytes(self) -> bytes:
@@ -1842,9 +1913,11 @@ class SamsungNotesCompanionApp(App):
             return
 
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        popup = Popup(title="Save As — choose file type", content=body, size_hint=(0.75, 0.7))
+        popup = Popup(title="Save As", content=body, size_hint=(0.75, 0.7))
+        set_latin_font(popup)
         for ext, mime, title in SAVE_TYPES:
             button = Button(text=title, size_hint_y=None, height=dp(44))
+            set_latin_font(button)
 
             def _pick(_btn: Button, extension: str = ext, media: str = mime) -> None:
                 popup.dismiss()
