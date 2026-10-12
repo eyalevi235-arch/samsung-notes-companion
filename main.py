@@ -1406,17 +1406,25 @@ class SamsungNotesCompanionApp(App):
             self._notify(f"שגיאה בפתיחת הקובץ: {exc}")
 
     def _copy_java_stream(self, source: Any, path: str) -> None:
-        from jnius import autoclass, jarray
+        from jnius import autoclass
 
         dest = autoclass("java.io.FileOutputStream")(path)
-        buf = jarray("b")(65536)
-        while True:
-            n = int(source.read(buf))
-            if n <= 0:
-                break
-            dest.write(buf, 0, n)
-        dest.flush()
-        dest.close()
+        try:
+            autoclass("android.os.FileUtils").copy(source, dest)
+            dest.flush()
+            dest.close()
+            return
+        except Exception:
+            try:
+                dest.close()
+            except Exception:
+                pass
+        with open(path, "wb") as out:
+            while True:
+                value = int(source.read())
+                if value < 0:
+                    break
+                out.write(bytes([value & 0xFF]))
 
     def _copy_uri_to_temp(self, uri: Any, suffix: str) -> str:
         from jnius import autoclass
