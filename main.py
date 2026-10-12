@@ -528,24 +528,17 @@ class SPenAnnotationCanvas(Widget):
         if getattr(touch, "is_mouse_scrolling", False):
             return "wheel"
         app = App.get_running_app()
-        if int(getattr(app, "pointer_count", 1) or 1) >= 2:
-            return "finger"
-        if bool(getattr(app, "has_finger_pointer", False)):
+        if len(getattr(app, "_fingers", {})) >= 1 and touch.uid not in app._fingers:
             return "finger"
         button = str(getattr(touch, "button", None) or "").lower()
-        tool = int(getattr(app, "down_tool_type", 0) or 0)
-        source = int(getattr(app, "down_source", 0) or 0)
-        if tool == TOOL_FINGER:
-            return "finger"
-        if tool == TOOL_ERASER:
+        is_touch = bool(getattr(touch, "is_touch", True))
+        device = str(getattr(touch, "device", "") or "").lower()
+        tool = int(getattr(app, "hover_tool", 0) or getattr(app, "down_tool_type", 0) or 0)
+        if tool == TOOL_ERASER or button == "right" or getattr(app, "spen_button_held", False):
             return "eraser"
-        if tool == TOOL_STYLUS or bool(source & 0x4002):
-            if button == "right" or getattr(app, "spen_button_held", False):
-                return "eraser"
+        if not is_touch or "mouse" in device:
             return "stylus"
-        if not bool(getattr(touch, "is_touch", True)):
-            if button == "right":
-                return "eraser"
+        if bool(getattr(app, "pen_in_range", False)) and tool == TOOL_STYLUS:
             return "stylus"
         return "finger"
 
@@ -1055,6 +1048,8 @@ class SamsungNotesCompanionApp(App):
         self.down_source = 0
         self.input_source = 0
         self.has_finger_pointer = False
+        self.pen_in_range = False
+        self.hover_tool = 0
         self._fingers: Dict[Any, Tuple[float, float]] = {}
         self.pdf_path: Optional[str] = None
         self._pdf_page_index: int = 0
@@ -1242,6 +1237,10 @@ class SamsungNotesCompanionApp(App):
         stylus_bits = 0x02 | 0x20 | 0x40
         self.spen_button_held = bool(state & stylus_bits) or tool == TOOL_ERASER
         if action in HOVER_ACTIONS:
+            self.pen_in_range = tool in (TOOL_STYLUS, TOOL_ERASER) or bool(
+                source & 0x4002
+            )
+            self.hover_tool = tool
             return
         self.pointer_count = count
         self.has_finger_pointer = TOOL_FINGER in tools
@@ -1269,7 +1268,6 @@ class SamsungNotesCompanionApp(App):
                 __javainterfaces__ = [
                     "android.view.View$OnGenericMotionListener",
                     "android.view.View$OnHoverListener",
-                    "android.view.View$OnTouchListener",
                 ]
 
                 @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
@@ -1282,40 +1280,29 @@ class SamsungNotesCompanionApp(App):
                     app._update_spen_from_motion(event)
                     return False
 
-                @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
-                def onTouch(self, _view, event):
-                    app._update_spen_from_motion(event)
-                    return False
-
             listener = StylusListener()
             self._stylus_listener = listener
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
 
-            def _bind_view(view: Any) -> None:
-                try:
-                    view.setOnGenericMotionListener(listener)
-                    view.setOnHoverListener(listener)
-                    view.setOnTouchListener(listener)
-                except Exception:
-                    pass
-                try:
-                    child_count = int(view.getChildCount())
-                except Exception:
-                    return
-                for index in range(child_count):
-                    _bind_view(view.getChildAt(index))
-
             @run_on_ui_thread
             def _attach() -> None:
-                root = activity.getWindow().getDecorView()
-                _bind_view(root)
+                view = activity.getWindow().getDecorView()
+                view.setOnGenericMotionListener(listener)
+                view.setOnHoverListener(listener)
+                try:
+                    view.setOnTouchListener(None)
+                except Exception:
+                    pass
                 for attr in ("mView", "mSurface", "mLayout"):
                     child = getattr(activity, attr, None)
-                    if child is not None:
-                        _bind_view(child)
+                    if child is None:
+                        continue
+                    try:
+                        child.setOnTouchListener(None)
+                    except Exception:
+                        pass
 
             _attach()
-            Clock.schedule_once(lambda _dt: _attach(), 0.8)
         except Exception:
             pass
 
