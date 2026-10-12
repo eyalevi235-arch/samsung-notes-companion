@@ -367,7 +367,7 @@ class ColorDot(ButtonBehavior, Widget):
 
 
 class SPenAnnotationCanvas(Widget):
-    """Page-aligned canvas: S Pen draws, fingers pan/pinch, view is shared."""
+    """Page-aligned canvas: one contact draws, two contacts pan/pinch."""
 
     ink_width = NumericProperty(2.5)
     min_width = NumericProperty(1.0)
@@ -527,13 +527,12 @@ class SPenAnnotationCanvas(Widget):
         if getattr(touch, "is_mouse_scrolling", False):
             return "wheel"
         app = App.get_running_app()
-        if len(getattr(app, "_fingers", {})) >= 1 and touch.uid not in app._fingers:
+        pointers = getattr(app, "_pointers", {})
+        if len(pointers) >= 1 and touch.uid not in pointers:
             return "finger"
         button = str(getattr(touch, "button", None) or "").lower()
         if button == "right" or getattr(app, "spen_button_held", False):
             return "eraser"
-        if bool(getattr(touch, "is_touch", True)):
-            return "finger"
         return "stylus"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
@@ -697,6 +696,15 @@ class SPenAnnotationCanvas(Widget):
         fit_y = self.y + self.height - notebook_h * scale
         self._set_pan(mid[0] - fit_x - doc_x * scale, mid[1] - fit_y - doc_y * scale)
 
+    def _begin_two_finger_view(self, touch: MotionEvent) -> None:
+        app = App.get_running_app()
+        app._multitouch = True
+        self.current_stroke = []
+        self.redraw_all()
+        app._fingers = dict(app._pointers)
+        touch.ud["mode"] = "pinch"
+        self._begin_pinch(app)
+
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
@@ -706,12 +714,15 @@ class SPenAnnotationCanvas(Widget):
             factor = 1.12 if touch.button == "scrollup" else 0.89
             self._set_scale(self._scale_value() * factor)
             return True
+        touch.grab(self)
+        app._pointers[touch.uid] = (touch.x, touch.y)
+        if len(app._pointers) >= 2:
+            self._begin_two_finger_view(touch)
+            return True
         tool_mode = str(getattr(app, "tool_mode", "none"))
-        if kind == "finger" or tool_mode == "none":
+        if tool_mode == "none":
             self._start_view_gesture(touch)
             return True
-
-        touch.grab(self)
         doc = self.to_doc(touch.x, touch.y)
         if kind == "eraser" or tool_mode == "eraser":
             touch.ud["erasing"] = True
@@ -721,7 +732,6 @@ class SPenAnnotationCanvas(Widget):
         if tool_mode != "pen":
             self._start_view_gesture(touch)
             return True
-
         self._live_color = tuple(getattr(app, "current_color", COLOR_BLACK))
         self._live_width = self._line_width_for_touch(touch)
         self._live_dashed = bool(getattr(app, "is_dashed", False))
@@ -732,16 +742,18 @@ class SPenAnnotationCanvas(Widget):
         if touch.grab_current is not self:
             return super().on_touch_move(touch)
         app = App.get_running_app()
+        if touch.uid in getattr(app, "_pointers", {}):
+            app._pointers[touch.uid] = (touch.x, touch.y)
+        if bool(getattr(app, "_multitouch", False)) or len(getattr(app, "_pointers", {})) >= 2:
+            if len(app._pointers) >= 2:
+                app._fingers = dict(app._pointers)
+                self._update_pinch(app)
+            return True
         mode = touch.ud.get("mode")
         if mode == "pan":
             last = touch.ud.get("last", (touch.x, touch.y))
             self._add_pan(touch.x - last[0], touch.y - last[1])
             touch.ud["last"] = (touch.x, touch.y)
-            return True
-        if mode == "pinch" or touch.uid in getattr(app, "_fingers", {}):
-            app._fingers[touch.uid] = (touch.x, touch.y)
-            if len(app._fingers) >= 2:
-                self._update_pinch(app)
             return True
         if touch.ud.get("erasing"):
             doc = self.to_doc(touch.x, touch.y)
@@ -757,10 +769,17 @@ class SPenAnnotationCanvas(Widget):
             return super().on_touch_up(touch)
         touch.ungrab(self)
         app = App.get_running_app()
+        app._pointers.pop(touch.uid, None)
         app._fingers.pop(touch.uid, None)
-        if touch.ud.get("mode") in {"pan", "pinch"}:
-            if len(app._fingers) >= 2:
+        if not app._pointers:
+            app._multitouch = False
+            app._fingers.clear()
+        if bool(getattr(app, "_multitouch", False)):
+            if len(app._pointers) >= 2:
+                app._fingers = dict(app._pointers)
                 self._begin_pinch(app)
+            return True
+        if touch.ud.get("mode") in {"pan", "pinch"}:
             return True
         if touch.ud.get("erasing"):
             return True
@@ -1047,6 +1066,8 @@ class SamsungNotesCompanionApp(App):
         self.pen_in_range = False
         self.hover_tool = 0
         self._fingers: Dict[Any, Tuple[float, float]] = {}
+        self._pointers: Dict[Any, Tuple[float, float]] = {}
+        self._multitouch = False
         self.pdf_path: Optional[str] = None
         self._pdf_page_index: int = 0
         self._pdf_page_count: int = 0
