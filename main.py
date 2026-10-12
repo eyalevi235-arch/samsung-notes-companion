@@ -1405,32 +1405,43 @@ class SamsungNotesCompanionApp(App):
         except Exception as exc:
             self._notify(f"שגיאה בפתיחת הקובץ: {exc}")
 
+    def _copy_stream_to_file(self, source: Any, path: str) -> None:
+        from jnius import autoclass, jarray
+
+        dest = autoclass("java.io.FileOutputStream")(path)
+        copied = False
+        try:
+            autoclass("android.os.FileUtils").copy(source, dest)
+            copied = os.path.getsize(path) > 5
+        except Exception:
+            copied = False
+        if not copied:
+            buf = jarray("b")(65536)
+            while True:
+                n = int(source.read(buf))
+                if n <= 0:
+                    break
+                dest.write(buf, 0, n)
+        dest.flush()
+        dest.close()
+
     def _copy_uri_to_temp(self, uri: Any, suffix: str) -> str:
         from jnius import autoclass
 
         activity = autoclass("org.kivy.android.PythonActivity").mActivity
         resolver = activity.getContentResolver()
-        source = resolver.openInputStream(uri)
         handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         handle.close()
-        dest = autoclass("java.io.FileOutputStream")(handle.name)
-        copied = False
+        source = resolver.openInputStream(uri)
         try:
-            file_utils = autoclass("android.os.FileUtils")
-            file_utils.copy(source, dest)
-            copied = True
+            self._copy_stream_to_file(source, handle.name)
         except Exception:
-            pass
-        if not copied:
-            data = bytes()
-            chunk = source.read()
-            while chunk != -1:
-                data += bytes([chunk & 0xFF])
-                chunk = source.read()
-            with open(handle.name, "wb") as out:
-                out.write(data)
-        dest.close()
+            source.close()
+            source = resolver.openInputStream(uri)
+            self._copy_stream_to_file(source, handle.name)
         source.close()
+        if os.path.getsize(handle.name) < 5:
+            raise OSError("failed to copy the selected file")
         return handle.name
 
     def _open_pdf_pfd(self, uri: Any = None) -> Any:
@@ -1485,30 +1496,40 @@ class SamsungNotesCompanionApp(App):
         bitmap = bitmap_cls.createBitmap(width, height, config.ARGB_8888)
         bitmap.eraseColor(-1)
         clip = autoclass("android.graphics.Rect")(0, 0, width, height)
-        display_mode = 1
-        rendered = False
-        try:
-            page.render(bitmap, clip, None, display_mode)
-            rendered = True
-        except Exception:
-            rendered = False
-        if not rendered:
-            try:
-                page.render(bitmap, None, None, display_mode)
-                rendered = True
-            except Exception:
-                rendered = False
-        if not rendered:
-            matrix = autoclass("android.graphics.Matrix")()
-            matrix.setScale(width / page_w, -height / page_h)
-            matrix.postTranslate(0.0, float(height))
-            page.render(bitmap, clip, matrix, display_mode)
+        matrix = autoclass("android.graphics.Matrix")()
+        matrix.setScale(width / page_w, -height / page_h)
+        matrix.postTranslate(0.0, float(height))
+        page.render(bitmap, clip, matrix, 1)
         path = self._bitmap_to_png(bitmap)
         try:
             bitmap.recycle()
         except Exception:
             pass
         return path
+
+    def _render_pdf_pages(self) -> Tuple[List[str], str]:
+        from jnius import autoclass
+
+        pfd = self._open_pdf_pfd()
+        renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
+        paths: List[str] = []
+        error = ""
+        try:
+            count = int(renderer.getPageCount())
+            self._pdf_page_count = max(1, count)
+            for index in range(count):
+                page = renderer.openPage(int(index))
+                try:
+                    path = self._render_opened_page(page)
+                    if path:
+                        paths.append(path)
+                except Exception as exc:
+                    error = str(exc)
+                page.close()
+        finally:
+            renderer.close()
+            pfd.close()
+        return paths, error
 
     def _render_pdf_page(self, index: int, uri: Any = None) -> Optional[str]:
         try:
@@ -1582,23 +1603,27 @@ class SamsungNotesCompanionApp(App):
         Clock.schedule_once(lambda _dt: self.clamp_view(), 0)
 
     def _load_notebook(self, uri: Any = None) -> None:
+        if uri is not None and (not self.pdf_path or str(self.pdf_path).startswith("content:")):
+            self.pdf_path = self._copy_uri_to_temp(uri, ".pdf")
         if self._pdf_page_count <= 0:
-            return
+            try:
+                self._pdf_page_count = self._pdf_page_count_from()
+            except Exception:
+                return
         self.page_count = int(self._pdf_page_count)
-        paths: List[str] = []
-        for index in range(self._pdf_page_count):
-            preview = self._render_pdf_page(index, uri)
-            if preview:
-                paths.append(preview)
+        try:
+            paths, error = self._render_pdf_pages()
+        except Exception as exc:
+            paths, error = [], str(exc)
         if paths:
             self.root_layout.pdf_canvas.set_page_images(paths)
             if not self.root_layout.pdf_canvas._page_textures:
-                self._notify("ה-PDF נפתח אבל לא ניתן להציג את תוכן העמודים")
+                self._notify("ה-PDF נפתח אבל טעינת התמונות נכשלה")
         else:
             self.root_layout.pdf_canvas.set_blank_notebook(
                 self._pdf_page_count, self.page_width, self.page_height
             )
-            self._notify("ה-PDF נפתח בלי תצוגת עמודים — בדקו הרשאות קובץ")
+            self._notify(f"לא ניתן לרנדר את ה-PDF: {error or 'שגיאה לא ידועה'}")
         self.root_layout.notes_canvas.set_blank_notebook(self._pdf_page_count)
         self.root_layout.sync_notes_page_size()
         self.root_layout.pdf_canvas.load_strokes(
@@ -1624,15 +1649,15 @@ class SamsungNotesCompanionApp(App):
         display = str(uri.getLastPathSegment() or uri.toString())
         if self._uri_is_pdf(uri):
             try:
-                self.pdf_path = str(uri.toString())
+                self.pdf_path = self._copy_uri_to_temp(uri, ".pdf")
                 self._page_strokes = {}
                 self._notes_strokes = {}
                 self._pdf_page_index = 0
                 self._reset_view()
-                self._pdf_page_count = self._pdf_page_count_from(uri)
+                self._pdf_page_count = self._pdf_page_count_from()
                 self.root_layout.pdf_canvas.load_strokes([])
                 self.root_layout.notes_canvas.load_strokes([])
-                self._load_notebook(uri)
+                self._load_notebook()
                 self._set_title_from_filename(display)
                 self._notify(f"PDF נפתח לכתיבה: {display}")
             except Exception as exc:
