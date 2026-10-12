@@ -22,7 +22,7 @@ source.exclude_exts = spec
 source.exclude_dirs = tests, bin, venv, .git, .github, .buildozer, __pycache__
 
 # (str) Application versioning (method 1)
-version = 0.6
+version = 0.7
 
 # (list) Application requirements
 # Kivy 2.3.1 supports Cython 0.29.x through 3.0.11 on Python 3.10.

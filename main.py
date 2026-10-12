@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
+from kivy.core.text import LabelBase
 from kivy.core.window import Window
 from kivy.graphics import (
     Color,
@@ -31,6 +32,7 @@ from kivy.graphics import (
     StencilUnUse,
     StencilUse,
     Translate,
+    Triangle,
 )
 from kivy.input.motionevent import MotionEvent
 from kivy.metrics import dp
@@ -96,6 +98,35 @@ SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
 
 def is_android() -> bool:
     return platform == "android"
+
+
+def resolve_ui_font() -> Optional[str]:
+    candidates = (
+        "/system/fonts/NotoSansHebrew-Regular.ttf",
+        "/system/fonts/NotoSansHebrew-VF.ttf",
+        "/system/fonts/SamsungOneUI-Regular.ttf",
+        "/system/fonts/SECCjk-Regular.ttf",
+        "/system/fonts/NotoSans-Regular.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def apply_ui_font() -> None:
+    path = resolve_ui_font()
+    if not path:
+        return
+    try:
+        LabelBase.register(name="UIFont", fn_regular=path)
+        Label.font_name = "UIFont"
+        Button.font_name = "UIFont"
+        TextInput.font_name = "UIFont"
+    except Exception:
+        pass
 
 
 def _dist2(left: Sequence[float], right: Sequence[float]) -> float:
@@ -205,18 +236,73 @@ def _jpeg_pages_to_pdf(pages: Sequence[Tuple[bytes, int, int]]) -> bytes:
     return header + body + xref + trailer
 
 
-class DarkToolButton(Button):
-    """Compact dark toolbar control styled like Samsung Notes."""
+class ToolIcon(ButtonBehavior, Widget):
+    """Vector toolbar icon that does not depend on device fonts."""
 
-    def __init__(self, **kwargs: Any) -> None:
-        kwargs.setdefault("color", (1, 1, 1, 1))
-        kwargs.setdefault("font_size", dp(13))
-        kwargs.setdefault("size_hint_x", None)
-        kwargs.setdefault("width", dp(64))
-        kwargs.setdefault("background_normal", "")
-        kwargs.setdefault("background_down", "")
-        kwargs.setdefault("background_color", TOOL_IDLE)
+    kind = StringProperty("pen")
+    selected = BooleanProperty(False)
+    on_dark = BooleanProperty(True)
+
+    def __init__(self, kind: str, **kwargs: Any) -> None:
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(44), dp(36)))
         super().__init__(**kwargs)
+        self.kind = kind
+        self.bind(pos=self._redraw, size=self._redraw, selected=self._redraw, on_dark=self._redraw)
+        Clock.schedule_once(lambda _dt: self._redraw(), 0)
+
+    def _redraw(self, *_args: Any) -> None:
+        self.canvas.clear()
+        pad = dp(8)
+        x, y = self.x + pad, self.y + pad
+        w, h = self.width - 2 * pad, self.height - 2 * pad
+        cx, cy = self.center_x, self.center_y
+        ink = (1, 1, 1, 1) if self.on_dark else (0.15, 0.15, 0.17, 1)
+        bg = TOOL_ACTIVE if self.selected else (TOOL_IDLE if self.on_dark else (1, 1, 1, 1))
+        with self.canvas:
+            Color(*bg)
+            Rectangle(pos=self.pos, size=self.size)
+            Color(*ink)
+            kind = self.kind
+            if kind == "pan":
+                Line(points=[cx - w * 0.35, cy, cx + w * 0.35, cy], width=1.4)
+                Line(points=[cx, cy - h * 0.35, cx, cy + h * 0.35], width=1.4)
+                Line(points=[cx - w * 0.35, cy, cx - w * 0.18, cy + h * 0.12], width=1.2)
+                Line(points=[cx - w * 0.35, cy, cx - w * 0.18, cy - h * 0.12], width=1.2)
+                Line(points=[cx + w * 0.35, cy, cx + w * 0.18, cy + h * 0.12], width=1.2)
+                Line(points=[cx + w * 0.35, cy, cx + w * 0.18, cy - h * 0.12], width=1.2)
+            elif kind == "pen":
+                Line(points=[x + w * 0.2, y + h * 0.15, x + w * 0.72, y + h * 0.72], width=1.5)
+                Triangle(
+                    points=[
+                        x + w * 0.72,
+                        y + h * 0.72,
+                        x + w * 0.88,
+                        y + h * 0.62,
+                        x + w * 0.82,
+                        y + h * 0.88,
+                    ]
+                )
+            elif kind == "dashed":
+                Line(points=[x, cy, x + w * 0.28, cy], width=1.4)
+                Line(points=[x + w * 0.42, cy, x + w * 0.62, cy], width=1.4)
+                Line(points=[x + w * 0.76, cy, x + w, cy], width=1.4)
+            elif kind == "eraser":
+                Line(rectangle=(x + w * 0.15, y + h * 0.25, w * 0.7, h * 0.5), width=1.3)
+            elif kind == "hide":
+                Line(points=[cx - w * 0.28, cy + h * 0.12, cx, cy - h * 0.18, cx + w * 0.28, cy + h * 0.12], width=1.4)
+            elif kind == "restore":
+                Line(points=[cx - w * 0.28, cy - h * 0.12, cx, cy + h * 0.18, cx + w * 0.28, cy - h * 0.12], width=1.4)
+            elif kind == "plus":
+                Line(points=[cx - w * 0.28, cy, cx + w * 0.28, cy], width=1.5)
+                Line(points=[cx, cy - h * 0.28, cx, cy + h * 0.28], width=1.5)
+            elif kind == "save":
+                Line(points=[cx, cy + h * 0.28, cx, cy - h * 0.1], width=1.5)
+                Line(points=[cx - w * 0.18, cy + h * 0.08, cx, cy - h * 0.12, cx + w * 0.18, cy + h * 0.08], width=1.3)
+                Line(points=[cx - w * 0.28, y + h * 0.08, cx + w * 0.28, y + h * 0.08], width=1.3)
+            elif kind == "notes":
+                Line(rectangle=(x + w * 0.08, y + h * 0.1, w * 0.35, h * 0.8), width=1.2)
+                Line(rectangle=(x + w * 0.55, y + h * 0.1, w * 0.35, h * 0.8), width=1.2)
 
 
 class ColorDot(ButtonBehavior, Widget):
@@ -257,6 +343,7 @@ class SPenAnnotationCanvas(Widget):
     max_width = NumericProperty(6.0)
     show_document_image = BooleanProperty(False)
     show_grid = BooleanProperty(False)
+    view_role = StringProperty("pdf")
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -272,14 +359,24 @@ class SPenAnnotationCanvas(Widget):
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self._on_geom, size=self._on_geom)
         app = App.get_running_app()
-        app.bind(
-            view_scale=self._on_view,
-            view_pan_x=self._on_view,
-            view_pan_y=self._on_view,
-            page_width=self._on_view,
-            page_height=self._on_view,
-            page_count=self._on_view,
-        )
+        if self.view_role == "notes":
+            app.bind(
+                notes_scale=self._on_view,
+                notes_pan_x=self._on_view,
+                notes_pan_y=self._on_view,
+                page_width=self._on_view,
+                page_height=self._on_view,
+                page_count=self._on_view,
+            )
+        else:
+            app.bind(
+                view_scale=self._on_pdf_view,
+                view_pan_x=self._on_pdf_view,
+                view_pan_y=self._on_pdf_view,
+                page_width=self._on_pdf_view,
+                page_height=self._on_pdf_view,
+                page_count=self._on_pdf_view,
+            )
         self.bind(show_grid=self._on_view, show_document_image=self._on_view)
         Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
 
@@ -291,6 +388,53 @@ class SPenAnnotationCanvas(Widget):
 
     def _on_view(self, *_args: Any) -> None:
         self.redraw_all()
+
+    def _on_pdf_view(self, *_args: Any) -> None:
+        self.redraw_all()
+        root = getattr(App.get_running_app(), "root_layout", None)
+        if root is not None:
+            root.dock_notes()
+
+    def _scale_value(self) -> float:
+        app = App.get_running_app()
+        if self.view_role == "notes":
+            return float(app.notes_scale)
+        return float(app.view_scale)
+
+    def _pan_value(self) -> Tuple[float, float]:
+        app = App.get_running_app()
+        if self.view_role == "notes":
+            return float(app.notes_pan_x), float(app.notes_pan_y)
+        return float(app.view_pan_x), float(app.view_pan_y)
+
+    def _set_scale(self, value: float) -> None:
+        app = App.get_running_app()
+        value = max(MIN_SCALE, min(MAX_SCALE, value))
+        if self.view_role == "notes":
+            app.notes_scale = value
+        else:
+            app.view_scale = value
+        app.clamp_view(self)
+
+    def _add_pan(self, dx: float, dy: float) -> None:
+        app = App.get_running_app()
+        if self.view_role == "notes":
+            app.notes_pan_x += dx
+            app.notes_pan_y += dy
+        else:
+            app.view_pan_x += dx
+            app.view_pan_y += dy
+        app.clamp_view(self)
+
+    def _set_pan(self, pan_x: float, pan_y: float) -> None:
+        app = App.get_running_app()
+        if self.view_role == "notes":
+            app.notes_pan_x = pan_x
+            app.notes_pan_y = pan_y
+        else:
+            app.view_pan_x = pan_x
+            app.view_pan_y = pan_y
+        app.clamp_view(self)
 
     def set_page_images(self, paths: Sequence[str]) -> None:
         textures: List[Any] = []
@@ -323,25 +467,19 @@ class SPenAnnotationCanvas(Widget):
         count = max(1, int(App.get_running_app().page_count))
         return (count - 1 - index) * (page_h + PAGE_GAP)
 
-    def _reference_width(self) -> float:
-        app = App.get_running_app()
-        root = getattr(app, "root_layout", None)
-        if root is not None and float(root.pdf_canvas.width) > 1.0:
-            return float(root.pdf_canvas.width)
-        return max(1.0, float(self.width))
-
     def _page_metrics(self) -> Tuple[float, float, float, float, float, float, float]:
         app = App.get_running_app()
         page_w = max(1.0, float(app.page_width))
         page_h = max(1.0, float(app.page_height))
         notebook_h = self._notebook_height(page_h)
         width, height = float(self.width), float(self.height)
-        fit = self._reference_width() / page_w if page_w else 1.0
-        scale = fit * float(app.view_scale)
+        fit = width / page_w if page_w else 1.0
+        scale = fit * self._scale_value()
         disp_w = page_w * scale
         disp_h = notebook_h * scale
-        origin_x = self.x + (width - disp_w) / 2.0 + float(app.view_pan_x)
-        origin_y = self.y + height - disp_h + float(app.view_pan_y)
+        pan_x, pan_y = self._pan_value()
+        origin_x = self.x + (width - disp_w) / 2.0 + pan_x
+        origin_y = self.y + height - disp_h + pan_y
         return origin_x, origin_y, disp_w, disp_h, scale, page_w, page_h
 
     def to_doc(self, x: float, y: float) -> Point:
@@ -358,24 +496,20 @@ class SPenAnnotationCanvas(Widget):
             return "finger"
         if bool(getattr(app, "has_finger_pointer", False)):
             return "finger"
-        button = str(getattr(touch, "button", None) or "").lower()
-        profile = getattr(touch, "profile", []) or []
         is_touch = bool(getattr(touch, "is_touch", True))
-        pressure = float(getattr(touch, "pressure", 1.0) or 1.0) if "pressure" in profile else None
-        tool = int(getattr(app, "down_tool_type", 0) or getattr(app, "tool_type", 0) or 0)
+        button = str(getattr(touch, "button", None) or "").lower()
+        tool = int(getattr(app, "down_tool_type", 0) or 0)
         if tool == TOOL_FINGER:
             return "finger"
-        if tool == TOOL_ERASER or button == "right" or getattr(app, "spen_button_held", False):
+        if tool == TOOL_ERASER:
             return "eraser"
         if tool == TOOL_STYLUS:
-            return "stylus"
-        if pressure is not None and 0.0 < pressure < 0.98:
-            return "stylus"
-        if not is_android():
-            return "finger" if is_touch else "stylus"
-        if not is_touch:
-            return "stylus"
-        return "finger"
+            return "eraser" if button == "right" or getattr(app, "spen_button_held", False) else "stylus"
+        if is_touch:
+            return "finger"
+        if button == "right" or getattr(app, "spen_button_held", False):
+            return "eraser"
+        return "stylus"
 
     def _line_width_for_touch(self, touch: MotionEvent) -> float:
         if "pressure" in getattr(touch, "profile", []):
@@ -510,7 +644,7 @@ class SPenAnnotationCanvas(Widget):
             return
         dist = math.hypot(points[0][0] - points[1][0], points[0][1] - points[1][1])
         app._pinch_dist = max(dist, 1.0)
-        app._pinch_scale = float(app.view_scale)
+        app._pinch_scale = self._scale_value()
         app._pinch_mid = (
             (points[0][0] + points[1][0]) / 2.0,
             (points[0][1] + points[1][1]) / 2.0,
@@ -530,15 +664,13 @@ class SPenAnnotationCanvas(Widget):
             MIN_SCALE,
             min(MAX_SCALE, app._pinch_scale * (dist / app._pinch_dist)),
         )
-        app.view_scale = new_scale
+        self._set_scale(new_scale)
         doc_x, doc_y = app._pinch_doc
         _ox, _oy, _dw, _dh, scale, page_w, page_h = self._page_metrics()
         notebook_h = self._notebook_height(page_h)
         fit_x = self.x + (self.width - page_w * scale) / 2.0
         fit_y = self.y + self.height - notebook_h * scale
-        app.view_pan_x = mid[0] - fit_x - doc_x * scale
-        app.view_pan_y = mid[1] - fit_y - doc_y * scale
-        app.clamp_view()
+        self._set_pan(mid[0] - fit_x - doc_x * scale, mid[1] - fit_y - doc_y * scale)
 
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if not self.collide_point(*touch.pos):
@@ -547,8 +679,7 @@ class SPenAnnotationCanvas(Widget):
         kind = self._classify(touch)
         if kind == "wheel":
             factor = 1.12 if touch.button == "scrollup" else 0.89
-            app.view_scale = max(MIN_SCALE, min(MAX_SCALE, app.view_scale * factor))
-            app.clamp_view()
+            self._set_scale(self._scale_value() * factor)
             return True
         tool_mode = str(getattr(app, "tool_mode", "none"))
         if kind == "finger" or tool_mode == "none":
@@ -579,9 +710,7 @@ class SPenAnnotationCanvas(Widget):
         mode = touch.ud.get("mode")
         if mode == "pan":
             last = touch.ud.get("last", (touch.x, touch.y))
-            app.view_pan_x += touch.x - last[0]
-            app.view_pan_y += touch.y - last[1]
-            app.clamp_view()
+            self._add_pan(touch.x - last[0], touch.y - last[1])
             touch.ud["last"] = (touch.x, touch.y)
             return True
         if mode == "pinch" or touch.uid in getattr(app, "_fingers", {}):
@@ -640,14 +769,18 @@ class RootLayout(FloatLayout):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.pdf_canvas = SPenAnnotationCanvas(show_document_image=True)
-        self.notes_canvas = SPenAnnotationCanvas(show_document_image=False, show_grid=True)
+        self.pdf_canvas = SPenAnnotationCanvas(show_document_image=True, view_role="pdf")
+        self.notes_canvas = SPenAnnotationCanvas(
+            show_document_image=False, show_grid=True, view_role="notes"
+        )
         self.side_panel = self.notes_canvas
-        self.tool_buttons: Dict[str, Button] = {}
+        self.tool_buttons: Dict[str, Any] = {}
         self.color_dots: Dict[str, ColorDot] = {}
-        self.workspace = BoxLayout(orientation="horizontal", spacing=0, padding=0)
-        self.workspace.add_widget(self.notes_canvas)
+        self.workspace = FloatLayout()
+        self.pdf_canvas.size_hint = (1, 1)
+        self.notes_canvas.size_hint = (None, 1)
         self.workspace.add_widget(self.pdf_canvas)
+        self.workspace.add_widget(self.notes_canvas)
         self.chrome = BoxLayout(
             orientation="vertical",
             size_hint=(1, None),
@@ -657,14 +790,15 @@ class RootLayout(FloatLayout):
         )
         self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
-        self.restore_btn = DarkToolButton(
-            text="כלים",
+        self.restore_btn = ToolIcon(
+            "restore",
+            on_dark=True,
             size_hint=(None, None),
-            size=(dp(72), dp(32)),
+            size=(dp(48), dp(32)),
             pos_hint={"center_x": 0.5, "top": 1},
-            opacity=0,
-            disabled=True,
         )
+        self.restore_btn.opacity = 0
+        self.restore_btn.disabled = True
         self.restore_btn.bind(on_release=self.show_toolbar)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
@@ -677,6 +811,9 @@ class RootLayout(FloatLayout):
     def _fit_workspace(self, *_args: Any) -> None:
         self.workspace.size = self.size
         self.workspace.pos = self.pos
+        self.pdf_canvas.size = self.size
+        self.pdf_canvas.pos = self.pos
+        self.dock_notes()
 
     def set_status(self, message: str) -> None:
         self.status_label.text = message
@@ -697,21 +834,12 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._header_bg, "pos", header.pos),
             size=lambda *_args: setattr(self._header_bg, "size", header.size),
         )
-        for key, label, handler, width in (
-            ("open", "פתח", app.open_pdf, dp(58)),
-            ("save_as", "שמור", app.save_document_as, dp(58)),
-            ("toggle", "הערות", self.toggle_notes, dp(64)),
+        for key, kind, handler in (
+            ("open", "plus", app.open_pdf),
+            ("save_as", "save", app.save_document_as),
+            ("toggle", "notes", self.toggle_notes),
         ):
-            button = Button(
-                text=label,
-                color=(0.15, 0.15, 0.17, 1),
-                font_size=dp(14),
-                size_hint_x=None,
-                width=width,
-                background_normal="",
-                background_down="",
-                background_color=(1, 1, 1, 1),
-            )
+            button = ToolIcon(kind, on_dark=False, size=(dp(44), dp(36)))
             button.bind(on_release=handler)
             header.add_widget(button)
             self.tool_buttons[key] = button
@@ -755,14 +883,14 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._toolbar_bg, "pos", toolbar.pos),
             size=lambda *_args: setattr(self._toolbar_bg, "size", toolbar.size),
         )
-        actions: Sequence[Tuple[str, str, Any, float]] = (
-            ("pan", "גלילה", app.clear_tool, dp(70)),
-            ("pen", "עט", app.select_pen, dp(52)),
-            ("dashed", "מקווקו", app.toggle_dashed, dp(76)),
-            ("eraser", "מחק", app.enable_eraser, dp(58)),
+        actions: Sequence[Tuple[str, str, Any]] = (
+            ("pan", "pan", app.clear_tool),
+            ("pen", "pen", app.select_pen),
+            ("dashed", "dashed", app.toggle_dashed),
+            ("eraser", "eraser", app.enable_eraser),
         )
-        for key, label, handler, width in actions:
-            button = DarkToolButton(text=label, width=width)
+        for key, kind, handler in actions:
+            button = ToolIcon(kind, on_dark=True)
             button.bind(on_release=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
@@ -771,7 +899,7 @@ class RootLayout(FloatLayout):
             dot.bind(on_release=lambda _dot, name=key: app.set_ink_color(name))
             toolbar.add_widget(dot)
             self.color_dots[key] = dot
-        hide_btn = DarkToolButton(text="הסתר", width=dp(64))
+        hide_btn = ToolIcon("hide", on_dark=True)
         hide_btn.bind(on_release=self.hide_toolbar)
         toolbar.add_widget(Widget())
         toolbar.add_widget(hide_btn)
@@ -806,7 +934,8 @@ class RootLayout(FloatLayout):
         for key, button in self.tool_buttons.items():
             if key in {"open", "save_as", "toggle", "hide"}:
                 continue
-            button.background_color = TOOL_ACTIVE if mapping.get(key, False) else TOOL_IDLE
+            if isinstance(button, ToolIcon):
+                button.selected = mapping.get(key, False)
         for key, rgba in INK_COLORS:
             dot = self.color_dots.get(key)
             if dot is None:
@@ -814,21 +943,29 @@ class RootLayout(FloatLayout):
             dot.selected = pen_on and tuple(app.current_color) == tuple(rgba)
 
     def apply_orientation(self, *_args: Any) -> None:
-        self.workspace.orientation = "horizontal"
+        self.pdf_canvas.size_hint = (1, 1)
+        self.dock_notes()
+
+    def dock_notes(self) -> None:
+        self.notes_canvas.size_hint = (None, None)
+        self.notes_canvas.height = self.height
+        self.notes_canvas.y = self.y
         if not self.notes_expanded:
             self.notes_canvas.opacity = 0
             self.notes_canvas.disabled = True
-            self.notes_canvas.size_hint = (0, 1)
-            self.pdf_canvas.size_hint = (1, 1)
+            self.notes_canvas.width = 0
+            self.notes_canvas.x = self.x - dp(4)
             return
         self.notes_canvas.opacity = 1
         self.notes_canvas.disabled = False
-        self.notes_canvas.size_hint = (0.38, 1)
-        self.pdf_canvas.size_hint = (0.62, 1)
+        width = min(dp(360), max(dp(170), self.width * 0.30))
+        self.notes_canvas.width = width
+        origin_x, _oy, _dw, _dh, _scale, _pw, _ph = self.pdf_canvas._page_metrics()
+        self.notes_canvas.x = max(self.x, origin_x - width)
 
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
-        self.apply_orientation()
+        self.dock_notes()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
     def refresh_title(self) -> None:
@@ -848,6 +985,9 @@ class SamsungNotesCompanionApp(App):
     view_scale = NumericProperty(1.0)
     view_pan_x = NumericProperty(0.0)
     view_pan_y = NumericProperty(0.0)
+    notes_scale = NumericProperty(1.0)
+    notes_pan_x = NumericProperty(0.0)
+    notes_pan_y = NumericProperty(0.0)
     page_width = NumericProperty(800.0)
     page_height = NumericProperty(1100.0)
     page_count = NumericProperty(1)
@@ -855,6 +995,7 @@ class SamsungNotesCompanionApp(App):
     document_title = StringProperty("כותרת")
 
     def build(self) -> RootLayout:
+        apply_ui_font()
         Window.clearcolor = LETTERBOX
         self.title = "Samsung Notes Companion"
         self.tool_mode: str = "none"
@@ -893,62 +1034,54 @@ class SamsungNotesCompanionApp(App):
         self.document_title = stem
         self.root_layout.refresh_title()
 
-    def clamp_view(self, *_args: Any) -> None:
+    def clamp_view(self, canvas: Optional[SPenAnnotationCanvas] = None, *_args: Any) -> None:
         root = getattr(self, "root_layout", None)
         if root is None:
             return
-        pdf = root.pdf_canvas
-        notes = root.notes_canvas
-        if pdf.width <= 1 or pdf.height <= 1:
-            return
+        targets = [canvas] if isinstance(canvas, SPenAnnotationCanvas) else [
+            root.pdf_canvas,
+            root.notes_canvas,
+        ]
+        for item in targets:
+            if item is None or item.width <= 1 or item.height <= 1:
+                continue
+            self._clamp_canvas(item)
+        if canvas is None or getattr(canvas, "view_role", "") == "pdf":
+            root.dock_notes()
 
-        def pan_range(
-            canvas: SPenAnnotationCanvas, board_x: float, board_y: float, board_w: float, board_h: float
-        ) -> Tuple[float, float, float, float]:
-            _ox, _oy, disp_w, disp_h, _scale, _pw, _ph = canvas._page_metrics()
-            base_x = canvas.x + (canvas.width - disp_w) / 2.0
-            base_y = canvas.y + canvas.height - disp_h
-            if disp_w <= board_w:
-                min_x, max_x = board_x - base_x, board_x + board_w - disp_w - base_x
-            else:
-                min_x, max_x = board_x + board_w - disp_w - base_x, board_x - base_x
-            if disp_h <= board_h:
-                min_y, max_y = board_y - base_y, board_y + board_h - disp_h - base_y
-            else:
-                min_y, max_y = board_y + board_h - disp_h - base_y, board_y - base_y
-            if min_x > max_x:
-                min_x, max_x = max_x, min_x
-            if min_y > max_y:
-                min_y, max_y = max_y, min_y
-            return min_x, max_x, min_y, max_y
-
-        if root.notes_expanded and notes.width > 1:
-            board_x = min(float(notes.x), float(pdf.x))
-            board_right = max(float(notes.right), float(pdf.right))
-            board_y = min(float(notes.y), float(pdf.y))
-            board_top = max(float(notes.top), float(pdf.top))
-            board_w = board_right - board_x
-            board_h = board_top - board_y
-            ranges = [
-                pan_range(pdf, board_x, board_y, board_w, board_h),
-                pan_range(notes, board_x, board_y, board_w, board_h),
-            ]
-            min_x = max(item[0] for item in ranges)
-            max_x = min(item[1] for item in ranges)
-            min_y = max(item[2] for item in ranges)
-            max_y = min(item[3] for item in ranges)
+    def _clamp_canvas(self, canvas: SPenAnnotationCanvas) -> None:
+        _ox, _oy, disp_w, disp_h, _scale, _pw, _ph = canvas._page_metrics()
+        board_x, board_y = float(canvas.x), float(canvas.y)
+        board_w, board_h = float(canvas.width), float(canvas.height)
+        base_x = canvas.x + (canvas.width - disp_w) / 2.0
+        base_y = canvas.y + canvas.height - disp_h
+        if disp_w <= board_w:
+            min_x, max_x = board_x - base_x, board_x + board_w - disp_w - base_x
         else:
-            min_x, max_x, min_y, max_y = pan_range(
-                pdf, float(pdf.x), float(pdf.y), float(pdf.width), float(pdf.height)
-            )
+            min_x, max_x = board_x + board_w - disp_w - base_x, board_x - base_x
+        if disp_h <= board_h:
+            min_y, max_y = board_y - base_y, board_y + board_h - disp_h - base_y
+        else:
+            min_y, max_y = board_y + board_h - disp_h - base_y, board_y - base_y
         if min_x > max_x:
-            self.view_pan_x = (min_x + max_x) / 2.0
-        else:
-            self.view_pan_x = min(max(float(self.view_pan_x), min_x), max_x)
+            min_x, max_x = max_x, min_x
         if min_y > max_y:
-            self.view_pan_y = (min_y + max_y) / 2.0
+            min_y, max_y = max_y, min_y
+        pan_x, pan_y = canvas._pan_value()
+        if min_x > max_x:
+            pan_x = (min_x + max_x) / 2.0
         else:
-            self.view_pan_y = min(max(float(self.view_pan_y), min_y), max_y)
+            pan_x = min(max(pan_x, min_x), max_x)
+        if min_y > max_y:
+            pan_y = (min_y + max_y) / 2.0
+        else:
+            pan_y = min(max(pan_y, min_y), max_y)
+        if canvas.view_role == "notes":
+            self.notes_pan_x = pan_x
+            self.notes_pan_y = pan_y
+        else:
+            self.view_pan_x = pan_x
+            self.view_pan_y = pan_y
 
     def rename_document(self, *_args: Any) -> None:
         field = TextInput(
@@ -1276,6 +1409,9 @@ class SamsungNotesCompanionApp(App):
         self.view_scale = 1.0
         self.view_pan_x = 0.0
         self.view_pan_y = 0.0
+        self.notes_scale = 1.0
+        self.notes_pan_x = 0.0
+        self.notes_pan_y = 0.0
         Clock.schedule_once(lambda _dt: self.clamp_view(), 0)
 
     def _load_notebook(self, uri: Any = None) -> None:
