@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import math
@@ -319,25 +320,41 @@ def focus_system_keyboard(field: TextInput) -> None:
             field.disabled = False
             field.readonly = False
             field.focus = True
+            if hasattr(field, "show_keyboard"):
+                field.show_keyboard()
         except Exception:
-            return
+            pass
+        try:
+            Window.request_keyboard(lambda: None, field, "text")
+        except Exception:
+            pass
         if not is_android():
             return
         try:
+            from android.runnable import run_on_ui_thread
             from jnius import autoclass
 
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
             Context = autoclass("android.content.Context")
+            InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
             imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-            view = activity.getCurrentFocus()
-            if view is None:
-                view = activity.getWindow().getDecorView()
-            imm.showSoftInput(view, 1)
+
+            @run_on_ui_thread
+            def _show() -> None:
+                view = activity.getCurrentFocus()
+                if view is None:
+                    view = activity.getWindow().getDecorView()
+                imm.restartInput(view)
+                imm.showSoftInput(view, InputMethodManager.SHOW_FORCED)
+                imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
+
+            _show()
         except Exception:
             pass
 
     Clock.schedule_once(_focus, 0.05)
-    Clock.schedule_once(_focus, 0.3)
+    Clock.schedule_once(_focus, 0.25)
+    Clock.schedule_once(_focus, 0.55)
 
 
 def mixed_markup(text: str) -> str:
@@ -660,6 +677,7 @@ class ToolIcon(ButtonBehavior, Widget):
     on_dark = BooleanProperty(True)
 
     def __init__(self, kind: str, **kwargs: Any) -> None:
+        self.trigger = kwargs.pop("trigger", None)
         kwargs.setdefault("size_hint", (None, None))
         kwargs.setdefault("size", (dp(48), dp(44)))
         super().__init__(**kwargs)
@@ -675,10 +693,28 @@ class ToolIcon(ButtonBehavior, Widget):
         )
         Clock.schedule_once(lambda _dt: self._redraw(), 0)
 
+    def collide_point(self, x: float, y: float) -> bool:
+        pad = dp(3)
+        return self.x - pad <= x <= self.right + pad and self.y - pad <= y <= self.top + pad
+
     def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
         if _is_hover_touch(touch):
             return False
-        return super().on_touch_down(touch)
+        if not self.collide_point(*touch.pos):
+            return False
+        touch.grab(self)
+        trigger = getattr(self, "trigger", None)
+        if callable(trigger):
+            trigger(self)
+        return True
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            return True
+        return super().on_touch_up(touch)
 
     def _sync_bg(self, *_args: Any) -> None:
         bg = TOOL_ACTIVE if self.selected else (TOOL_IDLE if self.on_dark else (1, 1, 1, 1))
@@ -1035,10 +1071,8 @@ class FloatingChip(ButtonBehavior, BoxLayout):
             return False
         if not self.collide_point(*touch.pos):
             return False
-        return ButtonBehavior.on_touch_down(self, touch)
-
-    def on_touch_up(self, touch: MotionEvent) -> bool:
-        return ButtonBehavior.on_touch_up(self, touch)
+        self.dispatch("on_release")
+        return True
 
 
 class ColorDot(ButtonBehavior, Widget):
@@ -1048,6 +1082,7 @@ class ColorDot(ButtonBehavior, Widget):
     selected = BooleanProperty(False)
 
     def __init__(self, rgba: Rgba, **kwargs: Any) -> None:
+        self.trigger = kwargs.pop("trigger", None)
         super().__init__(**kwargs)
         self.rgba = list(rgba)
         self.size_hint = (None, None)
@@ -1061,8 +1096,16 @@ class ColorDot(ButtonBehavior, Widget):
         Clock.schedule_once(lambda _dt: self._sync(), 0)
 
     def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
         if _is_hover_touch(touch):
             return False
+        if not self.collide_point(*touch.pos):
+            return False
+        trigger = getattr(self, "trigger", None)
+        if callable(trigger):
+            trigger(self)
+            return True
         return super().on_touch_down(touch)
 
     def _sync(self, *_args: Any) -> None:
@@ -2124,9 +2167,14 @@ class SPenAnnotationCanvas(Widget):
         self.selected_ids = []
         self.redraw_all()
 
+    def _snapshot_strokes(self) -> List[StrokeRecord]:
+        try:
+            return json.loads(json.dumps(self.strokes))
+        except Exception:
+            return copy.deepcopy(self.strokes)
+
     def push_history(self) -> None:
-        snapshot = json.loads(json.dumps(self.strokes))
-        self._undo_stack.append(snapshot)
+        self._undo_stack.append(self._snapshot_strokes())
         if len(self._undo_stack) > UNDO_LIMIT:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
@@ -2136,7 +2184,7 @@ class SPenAnnotationCanvas(Widget):
     def undo(self) -> bool:
         if not self._undo_stack:
             return False
-        self._redo_stack.append(json.loads(json.dumps(self.strokes)))
+        self._redo_stack.append(self._snapshot_strokes())
         self.strokes = self._undo_stack.pop()
         self.selected_ids = []
         self.redraw_all()
@@ -2145,7 +2193,7 @@ class SPenAnnotationCanvas(Widget):
     def redo(self) -> bool:
         if not self._redo_stack:
             return False
-        self._undo_stack.append(json.loads(json.dumps(self.strokes)))
+        self._undo_stack.append(self._snapshot_strokes())
         self.strokes = self._redo_stack.pop()
         self.selected_ids = []
         self.redraw_all()
@@ -2676,22 +2724,25 @@ class RootLayout(FloatLayout):
             size_hint=(None, None),
             size=(dp(48), dp(32)),
             pos_hint={"center_x": 0.5, "top": 1},
+            trigger=self.show_toolbar,
         )
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
-        self.restore_btn.bind(on_release=self.show_toolbar)
         self.copy_chip = FloatingChip("copy", "העתק")
         self.paste_chip = FloatingChip("paste", "הדבק")
         self.copy_chip.bind(on_release=self._on_copy_chip)
         self.paste_chip.bind(on_release=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
+        self.text_overlay = self._build_text_overlay()
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
         self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
+        self.add_widget(self.text_overlay)
         self.add_widget(self.restore_btn)
         self.hide_copy_chip()
         self.hide_paste_chip()
+        self.hide_text_overlay()
         self.refresh_tool_styles()
         app = App.get_running_app()
         app.bind(
@@ -2724,11 +2775,22 @@ class RootLayout(FloatLayout):
         self.paste_chip.pos = (-2000.0, -2000.0)
         self._paste_target = None
 
-    def _place_chip(self, chip: FloatingChip, widget: Widget, x: float, y: float) -> None:
+    def _place_chip(
+        self,
+        chip: FloatingChip,
+        widget: Widget,
+        x: float,
+        y: float,
+        lift: float = 12.0,
+        side: float = 0.0,
+    ) -> None:
         win_x, win_y = widget.to_window(x, y)
         local_x, local_y = self.to_widget(win_x, win_y)
-        chip.center_x = min(max(local_x, chip.width / 2.0 + dp(8)), self.width - chip.width / 2.0 - dp(8))
-        chip.y = local_y + dp(10)
+        chip.center_x = min(
+            max(local_x + side, chip.width / 2.0 + dp(8)),
+            self.width - chip.width / 2.0 - dp(8),
+        )
+        chip.y = local_y + lift
         if self.toolbar_visible and chip.top > self.chrome.y - dp(4):
             chip.y = self.chrome.y - chip.height - dp(6)
         if chip.y < dp(8):
@@ -2752,15 +2814,15 @@ class RootLayout(FloatLayout):
         if canvas is None or box is None:
             self.hide_copy_chip()
             return
-        sx, sy = canvas.from_doc(box[0] + box[2] / 2.0, box[1] + box[3])
-        self._place_chip(self.copy_chip, canvas, sx, sy + dp(8))
+        sx, sy = canvas.from_doc(box[0] + box[2], box[1] + box[3])
+        self._place_chip(self.copy_chip, canvas, sx, sy, lift=dp(72), side=dp(44))
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
         if not getattr(app, "_clipboard", None):
             return
         self._paste_target = (canvas, x, y)
-        self._place_chip(self.paste_chip, canvas, x, y)
+        self._place_chip(self.paste_chip, canvas, x, y, lift=dp(16), side=0.0)
 
     def _on_copy_chip(self, *_args: Any) -> None:
         App.get_running_app().copy_selection()
@@ -2768,6 +2830,94 @@ class RootLayout(FloatLayout):
     def _on_paste_chip(self, *_args: Any) -> None:
         App.get_running_app().paste_at_chip()
         self.hide_paste_chip()
+
+    def _build_text_overlay(self) -> AbsorbLayout:
+        box = AbsorbLayout(
+            orientation="vertical",
+            size_hint=(1, None),
+            height=dp(168),
+            pos_hint={"x": 0, "y": 0},
+            padding=dp(10),
+            spacing=dp(6),
+        )
+        with box.canvas.before:
+            Color(0.12, 0.12, 0.14, 0.97)
+            self._text_overlay_bg = Rectangle()
+        box.bind(
+            pos=lambda *_args: setattr(self._text_overlay_bg, "pos", box.pos),
+            size=lambda *_args: setattr(self._text_overlay_bg, "size", box.size),
+        )
+        self.text_field = TextInput(
+            text="",
+            multiline=True,
+            font_size=dp(18),
+            input_type="text",
+            write_tab=False,
+            size_hint_y=1,
+        )
+        if _HEBREW_FONT_READY:
+            self.text_field.font_name = "HebrewFont"
+        elif _LATIN_FONT_READY:
+            self.text_field.font_name = "LatinFont"
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        ok_btn = Button(text="אישור")
+        cancel_btn = Button(text="ביטול")
+        ok_btn.bind(on_release=self._commit_text_overlay)
+        cancel_btn.bind(on_release=lambda *_args: self.hide_text_overlay())
+        buttons.add_widget(ok_btn)
+        buttons.add_widget(cancel_btn)
+        hint = Label(
+            text=mixed_markup("כתבו טקסט בעברית או באנגלית"),
+            markup=True,
+            size_hint_y=None,
+            height=dp(24),
+            color=(1, 1, 1, 1),
+        )
+        box.add_widget(hint)
+        box.add_widget(self.text_field)
+        box.add_widget(buttons)
+        self._text_target: Optional[Tuple[Any, Point, Optional[int]]] = None
+        Clock.schedule_once(lambda _dt: apply_hebrew_ui(box), 0)
+        return box
+
+    def hide_text_overlay(self) -> None:
+        self.text_overlay.opacity = 0
+        self.text_overlay.disabled = True
+        self.text_overlay.y = -400.0
+        self.text_field.focus = False
+        self._text_target = None
+
+    def show_text_overlay(self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int] = None) -> None:
+        initial = ""
+        if existing is not None and 0 <= existing < len(canvas.strokes):
+            initial = str(canvas.strokes[existing].get("text") or "")
+        self._text_target = (canvas, doc, existing)
+        self.text_field.text = initial
+        self.text_overlay.disabled = False
+        self.text_overlay.opacity = 1
+        self.text_overlay.pos_hint = {"x": 0, "y": 0}
+        self.text_overlay.y = 0
+        self.text_overlay.height = dp(168)
+        Clock.schedule_once(lambda _dt: apply_hebrew_ui(self.text_overlay, "טקסט"), 0)
+        focus_system_keyboard(self.text_field)
+
+    def _commit_text_overlay(self, *_args: Any) -> None:
+        target = self._text_target
+        text = self.text_field.text.strip()
+        self.hide_text_overlay()
+        if not target or not text:
+            return
+        canvas, doc, existing = target
+        app = App.get_running_app()
+        color = list(getattr(app, "current_color", COLOR_BLACK))
+        font_size = 28.0
+        if existing is not None and 0 <= existing < len(canvas.strokes):
+            font_size = float(canvas.strokes[existing].get("font_size") or 28.0)
+        canvas.place_text_record(doc, text, color, font_size=font_size, index=existing)
+        app._history_role = canvas.view_role
+        app.tool_mode = "lasso"
+        self.refresh_tool_styles()
+        self.sync_floating_tools()
 
     def set_status(self, message: str) -> None:
         self.status_label.text = mixed_markup(message)
@@ -2794,8 +2944,7 @@ class RootLayout(FloatLayout):
             ("save_as", "save", app.save_document_as),
             ("toggle", "notes", self.toggle_notes),
         ):
-            button = ToolIcon(kind, on_dark=False, size=(dp(44), dp(36)))
-            button.bind(on_release=handler)
+            button = ToolIcon(kind, on_dark=False, size=(dp(44), dp(36)), trigger=handler)
             header.add_widget(button)
             self.tool_buttons[key] = button
         self.status_label = Label(
@@ -2853,21 +3002,17 @@ class RootLayout(FloatLayout):
             ("shapes", "shapes", app.toggle_shape_menu),
         )
         for key, kind, handler in actions:
-            button = ToolIcon(kind, on_dark=True, size=(dp(48), dp(44)))
-            button.bind(on_press=handler)
+            button = ToolIcon(kind, on_dark=True, size=(dp(48), dp(44)), trigger=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
         for key, rgba in INK_COLORS:
-            dot = ColorDot(rgba)
-            dot.bind(on_release=lambda _dot, name=key: app.set_ink_color(name))
+            dot = ColorDot(rgba, trigger=lambda _dot, name=key: app.set_ink_color(name))
             toolbar.add_widget(dot)
             self.color_dots[key] = dot
-        palette_btn = ToolIcon("palette", on_dark=True)
-        palette_btn.bind(on_release=app.open_color_picker)
+        palette_btn = ToolIcon("palette", on_dark=True, trigger=app.open_color_picker)
         toolbar.add_widget(palette_btn)
         self.tool_buttons["palette"] = palette_btn
-        hide_btn = ToolIcon("hide", on_dark=True)
-        hide_btn.bind(on_release=self.hide_toolbar)
+        hide_btn = ToolIcon("hide", on_dark=True, trigger=self.hide_toolbar)
         toolbar.add_widget(Widget())
         toolbar.add_widget(hide_btn)
         self.tool_buttons["hide"] = hide_btn
@@ -2890,8 +3035,12 @@ class RootLayout(FloatLayout):
             size=lambda *_args: setattr(self._shape_bg, "size", bar.size),
         )
         for kind in SHAPE_ORDER:
-            button = ToolIcon(kind, on_dark=True, size=(dp(32), dp(32)))
-            button.bind(on_press=lambda _btn, name=kind: app.select_shape(name))
+            button = ToolIcon(
+                kind,
+                on_dark=True,
+                size=(dp(36), dp(36)),
+                trigger=lambda _btn, name=kind: app.select_shape(name),
+            )
             bar.add_widget(button)
             self.tool_buttons[kind] = button
         bar.add_widget(Widget())
@@ -4454,6 +4603,7 @@ class SamsungNotesCompanionApp(App):
 
     def reset_view(self, *_args: Any) -> None:
         self._reset_view()
+        self._notify("תצוגה 100%")
 
     def set_custom_color(self, rgb: Sequence[float], *_args: Any) -> None:
         red, green, blue = [max(0.0, min(1.0, float(channel))) for channel in list(rgb)[:3]]
@@ -4519,18 +4669,30 @@ class SamsungNotesCompanionApp(App):
         return self.root_layout.pdf_canvas
 
     def undo(self, *_args: Any) -> None:
-        canvas = self._history_canvas()
-        if canvas.undo():
+        first = self._history_canvas()
+        second = (
+            self.root_layout.notes_canvas
+            if first is self.root_layout.pdf_canvas
+            else self.root_layout.pdf_canvas
+        )
+        if first.undo() or second.undo():
+            self.root_layout.sync_floating_tools()
+            self._notify("בוטל")
             return
-        other = self.root_layout.notes_canvas if canvas is self.root_layout.pdf_canvas else self.root_layout.pdf_canvas
-        other.undo()
+        self._notify("אין מה לבטל")
 
     def redo(self, *_args: Any) -> None:
-        canvas = self._history_canvas()
-        if canvas.redo():
+        first = self._history_canvas()
+        second = (
+            self.root_layout.notes_canvas
+            if first is self.root_layout.pdf_canvas
+            else self.root_layout.pdf_canvas
+        )
+        if first.redo() or second.redo():
+            self.root_layout.sync_floating_tools()
+            self._notify("בוצע שוב")
             return
-        other = self.root_layout.notes_canvas if canvas is self.root_layout.pdf_canvas else self.root_layout.pdf_canvas
-        other.redo()
+        self._notify("אין מה לבצע שוב")
 
     def select_lasso(self, *_args: Any) -> None:
         self.tool_mode = "lasso"
@@ -4546,61 +4708,13 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
 
-    def _text_dialog(self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int] = None) -> None:
-        initial = ""
-        font_size = 28.0
-        if existing is not None and 0 <= existing < len(canvas.strokes):
-            record = canvas.strokes[existing]
-            initial = str(record.get("text") or "")
-            font_size = float(record.get("font_size") or 28.0)
-        field = TextInput(
-            text=initial,
-            multiline=True,
-            font_size=dp(18),
-            input_type="text",
-            write_tab=False,
-        )
-        if _HEBREW_FONT_READY:
-            field.font_name = "HebrewFont"
-        elif _LATIN_FONT_READY:
-            field.font_name = "LatinFont"
-        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="", content=body, size_hint=(0.9, 0.55), auto_dismiss=False)
-
-        def _save(_btn: Button) -> None:
-            text = field.text.strip()
-            popup.dismiss()
-            if not text:
-                return
-            color = list(self.current_color)
-            canvas.place_text_record(doc, text, color, font_size=font_size, index=existing)
-            self._history_role = canvas.view_role
-            self.tool_mode = "lasso"
-            self.root_layout.refresh_tool_styles()
-            self.root_layout.sync_floating_tools()
-
-        save_btn = Button(text="אישור")
-        cancel_btn = Button(text="ביטול")
-        save_btn.bind(on_release=_save)
-        cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
-        buttons.add_widget(save_btn)
-        buttons.add_widget(cancel_btn)
-        body.add_widget(Label(text="כתבו טקסט בעברית או באנגלית", size_hint_y=None, height=dp(28)))
-        body.add_widget(field)
-        body.add_widget(buttons)
-        popup.bind(on_open=lambda *_args: focus_system_keyboard(field))
-        popup.open()
-        apply_hebrew_ui(popup, "טקסט")
-        focus_system_keyboard(field)
-
     def prompt_new_text(self, canvas: SPenAnnotationCanvas, doc: Point) -> None:
-        self._text_dialog(canvas, doc, None)
+        self.root_layout.show_text_overlay(canvas, doc, None)
 
     def prompt_text_record(self, canvas: SPenAnnotationCanvas, index: int) -> None:
         record = canvas.strokes[index]
         rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
-        self._text_dialog(canvas, (float(rect[0]), float(rect[1])), index)
+        self.root_layout.show_text_overlay(canvas, (float(rect[0]), float(rect[1])), index)
 
     def toggle_shape_menu(self, *_args: Any) -> None:
         self.root_layout.toggle_shape_menu()
@@ -4672,7 +4786,6 @@ class SamsungNotesCompanionApp(App):
             return
         self.tool_mode = kind
         self.is_eraser = False
-        self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
 
     def set_ink_color(self, name: str, *_args: Any) -> None:
