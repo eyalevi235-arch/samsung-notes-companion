@@ -187,12 +187,13 @@ def resolve_hebrew_font() -> Optional[str]:
         (
             r"C:\Windows\Fonts\arial.ttf",
             r"C:\Windows\Fonts\calibri.ttf",
-            "/system/fonts/NotoSansHebrew-Regular.ttf",
-            "/system/fonts/DroidSansHebrew.ttf",
-            "/system/fonts/NotoSerifHebrew-Regular.ttf",
             "/system/fonts/SamsungOneUI-Regular.ttf",
             "/system/fonts/SamsungOne-400.ttf",
             "/system/fonts/SamsungSans-Regular.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/NotoSansHebrew-Regular.ttf",
+            "/system/fonts/DroidSansHebrew.ttf",
+            "/system/fonts/NotoSerifHebrew-Regular.ttf",
         )
     )
 
@@ -230,26 +231,61 @@ def _strip_bidi_marks(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
 
 
+def _strip_markup_tags(text: str) -> str:
+    out: List[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "[":
+            close = text.find("]", index)
+            if close != -1:
+                index = close + 1
+                continue
+        out.append(text[index])
+        index += 1
+    return (
+        "".join(out)
+        .replace("&bl;", "[")
+        .replace("&br;", "]")
+        .replace("&amp;", "&")
+    )
+
+
+def _plain_user_text(text: str) -> str:
+    cleaned = _strip_markup_tags(_strip_bidi_marks(str(text or "")))
+    lowered = cleaned.lower()
+    if not cleaned.strip():
+        return ""
+    if cleaned.startswith("<") or "jnius" in lowered or "javaobject" in lowered or "nativeproxy" in lowered:
+        return ""
+    return cleaned.strip()
+
+
 def _java_chars(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, str):
+        return _plain_user_text(value)
+    parts: List[str] = []
     try:
         length = int(value.length())
-        return "".join(chr(int(value.charAt(index)) & 0xFFFF) for index in range(length))
+        for index in range(max(0, min(length, 8000))):
+            ch = value.charAt(index)
+            if isinstance(ch, str):
+                parts.append(ch)
+            else:
+                parts.append(chr(int(ch) & 0xFFFF))
+        text = "".join(parts)
+        if text:
+            return _plain_user_text(text)
     except Exception:
         pass
     try:
-        if hasattr(value, "toString"):
-            value = value.toString()
-    except Exception:
-        pass
-    try:
-        text = str(value)
+        converted = value.toString()
+        if isinstance(converted, str):
+            return _plain_user_text(converted)
+        return _plain_user_text(str(converted))
     except Exception:
         return ""
-    if text.startswith("<java") or text.startswith("org.jnius"):
-        return ""
-    return text
 
 
 def _has_hebrew(text: str) -> bool:
@@ -1701,41 +1737,25 @@ class SPenAnnotationCanvas(Widget):
         try:
             from kivy.core.text import Label as CoreLabel
 
+            plain = _plain_user_text(text)
             kwargs: Dict[str, Any] = {
-                "text": mixed_markup(_strip_bidi_marks(text)),
-                "markup": True,
+                "text": ui_text(plain),
+                "markup": False,
                 "font_size": font_size,
                 "color": color[:4] if len(color) > 3 else color + (1.0,),
-                "halign": "right" if _has_hebrew(text) else "left",
+                "halign": "right" if _has_hebrew(plain) else "left",
             }
-            if _LATIN_FONT_READY:
-                kwargs["font_name"] = "LatinFont"
-            elif _HEBREW_FONT_READY:
+            if _has_hebrew(plain) and _HEBREW_FONT_READY:
                 kwargs["font_name"] = "HebrewFont"
+            elif _LATIN_FONT_READY:
+                kwargs["font_name"] = "LatinFont"
             label = CoreLabel(**kwargs)
             label.refresh()
             texture = label.texture
             if texture is None or not texture.size[0] or not texture.size[1]:
                 raise RuntimeError("empty text texture")
         except Exception:
-            try:
-                from kivy.core.text import Label as CoreLabel
-
-                fallback: Dict[str, Any] = {
-                    "text": ui_text(_strip_bidi_marks(text)),
-                    "markup": False,
-                    "font_size": font_size,
-                    "color": color[:4] if len(color) > 3 else color + (1.0,),
-                }
-                if _LATIN_FONT_READY:
-                    fallback["font_name"] = "LatinFont"
-                elif _HEBREW_FONT_READY:
-                    fallback["font_name"] = "HebrewFont"
-                label = CoreLabel(**fallback)
-                label.refresh()
-                texture = label.texture
-            except Exception:
-                return None
+            return None
         if texture is None:
             return None
         self._text_textures[key] = texture
@@ -2725,9 +2745,10 @@ class SPenAnnotationCanvas(Widget):
 
     def place_text_record(self, doc: Point, text: str, color: Sequence[float], font_size: float = 28.0, index: Optional[int] = None) -> None:
         self.push_history()
+        plain = _plain_user_text(text)
         record: StrokeRecord = {
             "kind": "text",
-            "text": text,
+            "text": plain,
             "font_size": float(font_size),
             "color": list(color)[:4] if len(color) > 3 else list(color) + [1.0],
             "angle": 0.0,
@@ -2751,7 +2772,8 @@ class SPenAnnotationCanvas(Widget):
             if index is not None:
                 x, y = float(record["rect"][0]), float(record["rect"][1])
             else:
-                x, y = doc[0], doc[1] - height
+                x = doc[0] - width if _has_hebrew(plain) else doc[0]
+                y = doc[1] - height
             record["rect"] = [x, y, width, height]
             record["points"] = [[x, y], [x + width, y + height]]
         self.selected_ids = [target]
@@ -3029,7 +3051,7 @@ class RootLayout(FloatLayout):
 
     def _commit_text_overlay(self, *_args: Any) -> None:
         target = self._text_target
-        text = self.text_field.text.strip()
+        text = _plain_user_text(self.text_field.text)
         self.hide_text_overlay()
         if not target or not text:
             return
@@ -4943,15 +4965,13 @@ class SamsungNotesCompanionApp(App):
         return False
 
     def _capture_android_text(self, accept: bool) -> None:
-        typed = str(getattr(self, "_android_typed", "") or "")
+        typed = _plain_user_text(str(getattr(self, "_android_typed", "") or ""))
         field = ""
         try:
             field = _java_chars(self._android_edit.getText())
         except Exception:
             field = ""
-        text = typed if typed.strip() else field
-        if len(field.strip()) > len(_strip_bidi_marks(text).strip()):
-            text = field
+        text = field or typed
         try:
             dialog = getattr(self, "_android_dialog", None)
             if dialog is not None:
@@ -5081,9 +5101,9 @@ class SamsungNotesCompanionApp(App):
         self._android_dialog_result = None
         if not accept or not target:
             return
-        value = _strip_bidi_marks(text).strip()
+        value = _plain_user_text(text)
         if not value:
-            value = _strip_bidi_marks(str(getattr(self, "_android_typed", "") or "")).strip()
+            value = _plain_user_text(str(getattr(self, "_android_typed", "") or ""))
         if not value:
             self._notify("לא נשמר טקסט")
             return
