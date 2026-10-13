@@ -326,6 +326,8 @@ def _ui_text_body(text: str) -> str:
     text = _strip_bidi_marks(text)
     if not text or not _has_hebrew(text):
         return text
+    if "\n" in text:
+        return "\n".join(_ui_text_body(line) for line in text.split("\n"))
     chunks: List[str] = []
     buf: List[str] = []
     mode: Optional[bool] = None
@@ -1781,7 +1783,7 @@ class SPenAnnotationCanvas(Widget):
             plain = _plain_user_text(text)
             ink = color[:4] if len(color) > 3 else color + (1.0,)
             widget = UiLabel(
-                text=mixed_markup(plain),
+                text=mixed_markup_lines(plain),
                 markup=True,
                 font_size=font_size,
                 color=ink,
@@ -1806,7 +1808,7 @@ class SPenAnnotationCanvas(Widget):
 
                 plain = _plain_user_text(text)
                 kwargs: Dict[str, Any] = {
-                    "text": ui_text(plain),
+                    "text": "\n".join(ui_text(line) for line in plain.split("\n")),
                     "markup": False,
                     "font_size": font_size,
                     "color": color[:4] if len(color) > 3 else color + (1.0,),
@@ -5106,12 +5108,28 @@ class SamsungNotesCompanionApp(App):
         self._remove_android_text_panel()
         self._queue_android_text_result(accept, field)
 
-    def _dock_android_text_panel(self) -> None:
-        view = getattr(self, "_android_panel", None)
-        params = getattr(self, "_android_panel_params", None)
-        activity = getattr(self, "_android_activity", None)
-        if view is None or activity is None:
-            return
+    def _poll_android_ime_dock(self, _dt: float) -> bool:
+        if getattr(self, "_android_panel", None) is None:
+            return False
+        self._dock_android_text_panel()
+        return True
+
+    def _ime_overlap_px(self, activity: Any) -> int:
+        overlap = 0
+        try:
+            from jnius import autoclass
+
+            Type = autoclass("android.view.WindowInsets$Type")
+            insets = activity.getWindow().getDecorView().getRootWindowInsets()
+            if insets is not None:
+                overlap = max(overlap, int(insets.getInsets(Type.ime()).bottom))
+        except Exception:
+            pass
+        try:
+            imm = activity.getSystemService("input_method")
+            overlap = max(overlap, int(imm.getInputMethodWindowVisibleHeight()))
+        except Exception:
+            pass
         try:
             from jnius import autoclass
 
@@ -5120,21 +5138,43 @@ class SamsungNotesCompanionApp(App):
             decor = activity.getWindow().getDecorView()
             decor.getWindowVisibleDisplayFrame(frame)
             screen_h = int(decor.getRootView().getHeight())
-            overlap = int(screen_h - int(frame.bottom))
-            if overlap < 100:
-                overlap = 0
-            if params is not None:
-                if int(getattr(params, "y", 0)) == overlap:
-                    return
-                params.y = overlap
-                activity.getWindowManager().updateViewLayout(view, params)
-            elif int(getattr(self, "_android_panel_lift", -1)) != overlap:
-                self._android_panel_lift = overlap
-                view.setTranslationY(float(-overlap))
+            frame_overlap = int(screen_h - int(frame.bottom))
+            if frame_overlap > 80:
+                overlap = max(overlap, frame_overlap)
         except Exception:
             pass
+        return max(0, overlap)
+
+    def _dock_android_text_panel(self) -> None:
+        view = getattr(self, "_android_panel", None)
+        params = getattr(self, "_android_panel_params", None)
+        activity = getattr(self, "_android_activity", None)
+        if view is None or activity is None:
+            return
+        try:
+            from android.runnable import run_on_ui_thread
+        except Exception:
+            return
+
+        @run_on_ui_thread
+        def _apply() -> None:
+            try:
+                overlap = self._ime_overlap_px(activity)
+                if params is not None:
+                    if int(getattr(params, "y", 0)) == overlap:
+                        return
+                    params.y = overlap
+                    activity.getWindowManager().updateViewLayout(view, params)
+                elif int(getattr(self, "_android_panel_lift", -1)) != overlap:
+                    self._android_panel_lift = overlap
+                    view.setTranslationY(float(-overlap))
+            except Exception:
+                pass
+
+        _apply()
 
     def _remove_android_text_panel(self) -> None:
+        Clock.unschedule(self._poll_android_ime_dock)
         try:
             from android.runnable import run_on_ui_thread
         except Exception:
@@ -5204,6 +5244,8 @@ class SamsungNotesCompanionApp(App):
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
         Clock.schedule_interval(self._poll_android_text_dialog, 0.12)
+        Clock.unschedule(self._poll_android_ime_dock)
+        Clock.schedule_interval(self._poll_android_ime_dock, 0.08)
 
         @run_on_ui_thread
         def _open() -> None:
@@ -5293,7 +5335,8 @@ class SamsungNotesCompanionApp(App):
                 self._android_panel = box
                 self._android_panel_params = params
                 self._android_edit = edit
-                observer = box.getViewTreeObserver()
+                decor = activity.getWindow().getDecorView()
+                observer = decor.getViewTreeObserver()
                 observer.addOnGlobalLayoutListener(self._android_ime_dock)
                 self._android_ime_observer = observer
                 edit.requestFocus()
