@@ -1693,7 +1693,28 @@ class SPenAnnotationCanvas(Widget):
             label = CoreLabel(**kwargs)
             label.refresh()
             texture = label.texture
+            if texture is None or not texture.size[0] or not texture.size[1]:
+                raise RuntimeError("empty text texture")
         except Exception:
+            try:
+                from kivy.core.text import Label as CoreLabel
+
+                fallback: Dict[str, Any] = {
+                    "text": ui_text(_strip_bidi_marks(text)),
+                    "markup": False,
+                    "font_size": font_size,
+                    "color": color[:4] if len(color) > 3 else color + (1.0,),
+                }
+                if _LATIN_FONT_READY:
+                    fallback["font_name"] = "LatinFont"
+                elif _HEBREW_FONT_READY:
+                    fallback["font_name"] = "HebrewFont"
+                label = CoreLabel(**fallback)
+                label.refresh()
+                texture = label.texture
+            except Exception:
+                return None
+        if texture is None:
             return None
         self._text_textures[key] = texture
         return texture
@@ -4798,11 +4819,90 @@ class SamsungNotesCompanionApp(App):
                 pass
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
+    def _ensure_android_text_listeners(self) -> None:
+        if getattr(self, "_android_text_listeners_ready", False):
+            return
+        from jnius import PythonJavaClass, java_method
+
+        app = self
+
+        class DialogClick(PythonJavaClass):
+            __javacontext__ = "app"
+            __javainterfaces__ = ["android.content.DialogInterface$OnClickListener"]
+
+            def __init__(self, ok: bool) -> None:
+                super().__init__()
+                self.ok = ok
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, _dialog: Any, _which: int) -> None:
+                text = ""
+                if self.ok:
+                    try:
+                        text = str(app._android_edit.getText().toString())
+                    except Exception:
+                        text = ""
+                app._queue_android_text_result(self.ok, text)
+
+        class DialogShow(PythonJavaClass):
+            __javacontext__ = "app"
+            __javainterfaces__ = ["android.content.DialogInterface$OnShowListener"]
+
+            @java_method("(Landroid/content/DialogInterface;)V")
+            def onShow(self, _dialog: Any) -> None:
+                try:
+                    app._android_edit.requestFocus()
+                    from jnius import autoclass
+
+                    activity = autoclass("org.kivy.android.PythonActivity").mActivity
+                    Context = autoclass("android.content.Context")
+                    InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
+                    imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
+                    imm.showSoftInput(app._android_edit, InputMethodManager.SHOW_FORCED)
+                except Exception:
+                    pass
+
+        class DialogDismiss(PythonJavaClass):
+            __javacontext__ = "app"
+            __javainterfaces__ = ["android.content.DialogInterface$OnDismissListener"]
+
+            @java_method("(Landroid/content/DialogInterface;)V")
+            def onDismiss(self, _dialog: Any) -> None:
+                if getattr(app, "_android_dialog_result", None) is not None:
+                    return
+                text = ""
+                try:
+                    text = str(app._android_edit.getText().toString())
+                except Exception:
+                    pass
+                app._queue_android_text_result(bool(text.strip()), text)
+
+        self._android_click_ok = DialogClick(True)
+        self._android_click_cancel = DialogClick(False)
+        self._android_show = DialogShow()
+        self._android_dismiss = DialogDismiss()
+        self._android_text_listeners_ready = True
+
+    def _queue_android_text_result(self, accept: bool, text: str) -> None:
+        if getattr(self, "_android_dialog_result", None) is not None:
+            return
+        self._android_dialog_result = (bool(accept), str(text or ""))
+
+    def _poll_android_text_dialog(self, _dt: float) -> bool:
+        result = getattr(self, "_android_dialog_result", None)
+        if result is None:
+            self._android_poll_ticks = int(getattr(self, "_android_poll_ticks", 0)) + 1
+            return self._android_poll_ticks < 600
+        self._android_dialog_result = None
+        accept, text = result
+        Clock.schedule_once(lambda _t, ok=accept, value=text: self._finish_android_text(value, ok), 0)
+        return False
+
     def _show_android_text_dialog(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
         from android.runnable import run_on_ui_thread
-        from jnius import PythonJavaClass, autoclass, java_method
+        from jnius import autoclass
 
         initial = ""
         font_size = 28.0
@@ -4811,49 +4911,20 @@ class SamsungNotesCompanionApp(App):
             initial = str(record.get("text") or "")
             font_size = float(record.get("font_size") or 28.0)
 
+        self._ensure_android_text_listeners()
         activity = autoclass("org.kivy.android.PythonActivity").mActivity
         Builder = autoclass("android.app.AlertDialog$Builder")
         EditText = autoclass("android.widget.EditText")
         InputType = autoclass("android.text.InputType")
         View = autoclass("android.view.View")
-        Context = autoclass("android.content.Context")
-        InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
         String = autoclass("java.lang.String")
         Gravity = autoclass("android.view.Gravity")
 
-        app = self
-
-        class _Click(PythonJavaClass):
-            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
-            __javacontext__ = "app"
-
-            def __init__(self, ok: bool) -> None:
-                super().__init__()
-                self.ok = ok
-
-            @java_method("(Landroid/content/DialogInterface;I)V")
-            def onClick(self, dialog: Any, which: int) -> None:
-                text = str(app._android_edit.getText().toString()) if self.ok else ""
-                Clock.schedule_once(lambda _dt, value=text, accept=self.ok: app._finish_android_text(value, accept), 0)
-
-        class _Show(PythonJavaClass):
-            __javainterfaces__ = ["android/content/DialogInterface$OnShowListener"]
-            __javacontext__ = "app"
-
-            @java_method("(Landroid/content/DialogInterface;)V")
-            def onShow(self, dialog: Any) -> None:
-                edit = app._android_edit
-                edit.requestFocus()
-                try:
-                    imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-                    imm.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
-                except Exception:
-                    pass
-
         self._android_text_target = (canvas, doc, existing, font_size)
-        self._android_click_ok = _Click(True)
-        self._android_click_cancel = _Click(False)
-        self._android_show = _Show()
+        self._android_dialog_result = None
+        self._android_poll_ticks = 0
+        Clock.unschedule(self._poll_android_text_dialog)
+        Clock.schedule_interval(self._poll_android_text_dialog, 0.12)
 
         @run_on_ui_thread
         def _open() -> None:
@@ -4872,14 +4943,16 @@ class SamsungNotesCompanionApp(App):
                 edit.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
             except Exception:
                 pass
-            app._android_edit = edit
+            self._android_edit = edit
             builder = Builder(activity)
             builder.setTitle(String("טקסט"))
             builder.setView(edit)
-            builder.setPositiveButton(String("אישור"), app._android_click_ok)
-            builder.setNegativeButton(String("ביטול"), app._android_click_cancel)
+            builder.setPositiveButton(String("אישור"), self._android_click_ok)
+            builder.setNegativeButton(String("ביטול"), self._android_click_cancel)
+            builder.setCancelable(True)
             dialog = builder.create()
-            dialog.setOnShowListener(app._android_show)
+            dialog.setOnShowListener(self._android_show)
+            dialog.setOnDismissListener(self._android_dismiss)
             try:
                 LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
                 dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
@@ -4887,23 +4960,31 @@ class SamsungNotesCompanionApp(App):
                 pass
             dialog.show()
             edit.requestFocus()
+            self._android_dialog = dialog
 
         _open()
 
     def _finish_android_text(self, text: str, accept: bool) -> None:
+        Clock.unschedule(self._poll_android_text_dialog)
         target = getattr(self, "_android_text_target", None)
         self._android_text_target = None
+        self._android_dialog_result = None
         if not accept or not target:
             return
         value = _strip_bidi_marks(text).strip()
         if not value:
+            self._notify("לא נשמר טקסט")
             return
         canvas, doc, existing, font_size = target
-        canvas.place_text_record(doc, value, list(self.current_color), font_size=font_size, index=existing)
+        color = list(self.current_color)
+        if len(color) < 4:
+            color = list(color[:3]) + [1.0]
+        canvas.place_text_record(doc, value, color, font_size=font_size, index=existing)
         self._history_role = canvas.view_role
         self.tool_mode = "lasso"
         self.root_layout.refresh_tool_styles()
         self.root_layout.sync_floating_tools()
+        self._notify("הטקסט נוסף")
 
     def toggle_shape_menu(self, *_args: Any) -> None:
         self.root_layout.toggle_shape_menu()
