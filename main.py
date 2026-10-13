@@ -269,28 +269,17 @@ def _java_chars(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return _plain_user_text(value)
-    parts: List[str] = []
+        return value
     try:
-        length = int(value.length())
-        for index in range(max(0, min(length, 8000))):
-            ch = value.charAt(index)
-            if isinstance(ch, str):
-                parts.append(ch)
-            else:
-                parts.append(chr(int(ch) & 0xFFFF))
-        text = "".join(parts)
-        if text:
-            return _plain_user_text(text)
+        from jnius import autoclass
+
+        converted = autoclass("java.lang.String").valueOf(value)
+        return converted if isinstance(converted, str) else str(converted)
     except Exception:
-        pass
-    try:
-        converted = value.toString()
-        if isinstance(converted, str):
-            return _plain_user_text(converted)
-        return _plain_user_text(str(converted))
-    except Exception:
-        return ""
+        try:
+            return str(value.toString())
+        except Exception:
+            return ""
 
 
 def _has_hebrew(text: str) -> bool:
@@ -4908,6 +4897,7 @@ class SamsungNotesCompanionApp(App):
     ) -> None:
         if is_android():
             try:
+                self.root_layout.hide_text_overlay()
                 self._show_android_text_dialog(canvas, doc, existing)
                 return
             except Exception:
@@ -4915,7 +4905,7 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
-        if getattr(self, "_android_text_ui_ver", 0) == 5:
+        if getattr(self, "_android_text_ui_ver", 0) == 6:
             return
         from jnius import PythonJavaClass, java_method
 
@@ -4932,26 +4922,6 @@ class SamsungNotesCompanionApp(App):
             @java_method("(Landroid/view/View;)V")
             def onClick(self, _view: Any) -> None:
                 app._capture_android_text(self.ok)
-
-        class TextWatch(PythonJavaClass):
-            __javacontext__ = "app"
-            __javainterfaces__ = ["android.text.TextWatcher"]
-
-            @java_method("(Ljava/lang/CharSequence;III)V")
-            def beforeTextChanged(self, _s: Any, _start: int, _count: int, _after: int) -> None:
-                return
-
-            @java_method("(Ljava/lang/CharSequence;III)V")
-            def onTextChanged(self, sequence: Any, _start: int, _before: int, _count: int) -> None:
-                text = _java_chars(sequence)
-                if text:
-                    app._android_typed = text
-
-            @java_method("(Landroid/text/Editable;)V")
-            def afterTextChanged(self, editable: Any) -> None:
-                text = _java_chars(editable)
-                if text:
-                    app._android_typed = text
 
         class DialogShow(PythonJavaClass):
             __javacontext__ = "app"
@@ -4979,10 +4949,6 @@ class SamsungNotesCompanionApp(App):
         self._android_tap_ok = TextTap(True)
         self._android_tap_cancel = TextTap(False)
         try:
-            self._android_watcher = TextWatch()
-        except Exception:
-            self._android_watcher = None
-        try:
             self._android_show = DialogShow()
         except Exception:
             self._android_show = None
@@ -4990,7 +4956,7 @@ class SamsungNotesCompanionApp(App):
             self._android_dismiss = DialogDismiss()
         except Exception:
             self._android_dismiss = None
-        self._android_text_ui_ver = 5
+        self._android_text_ui_ver = 6
 
     def _queue_android_text_result(self, accept: bool, text: str) -> None:
         if getattr(self, "_android_dialog_result", None) is not None:
@@ -5028,13 +4994,12 @@ class SamsungNotesCompanionApp(App):
         return False
 
     def _capture_android_text(self, accept: bool) -> None:
-        typed = _plain_user_text(str(getattr(self, "_android_typed", "") or ""))
         field = ""
         try:
             field = _java_chars(self._android_edit.getText())
         except Exception:
             field = ""
-        text = field or typed
+        text = field
         try:
             dialog = getattr(self, "_android_dialog", None)
             if dialog is not None:
@@ -5075,7 +5040,6 @@ class SamsungNotesCompanionApp(App):
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
         self._android_dialog_visible = False
-        self._android_typed = initial
         self._pause_kivy_softinput()
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
@@ -5104,21 +5068,20 @@ class SamsungNotesCompanionApp(App):
                     edit.setImeOptions(EditorInfo.IME_FLAG_NO_ENTER_ACTION)
                 except Exception:
                     pass
-                edit.setMinLines(3)
+                edit.setMinLines(4)
                 edit.setGravity(Gravity.TOP | Gravity.LEFT)
                 edit.setFocusable(True)
                 edit.setFocusableInTouchMode(True)
+                try:
+                    edit.setHorizontallyScrolling(False)
+                except Exception:
+                    pass
                 try:
                     edit.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
                     edit.setTextDirection(View.TEXT_DIRECTION_LTR)
                     edit.setTextAlignment(View.TEXT_ALIGNMENT_GRAVITY)
                 except Exception:
                     pass
-                if self._android_watcher is not None:
-                    try:
-                        edit.addTextChangedListener(self._android_watcher)
-                    except Exception:
-                        pass
 
                 buttons = LinearLayout(activity)
                 buttons.setOrientation(LinearLayout.HORIZONTAL)
@@ -5167,10 +5130,7 @@ class SamsungNotesCompanionApp(App):
                 self._android_dialog_visible = True
             except Exception:
                 self._android_dialog_visible = False
-                Clock.schedule_once(
-                    lambda _dt: self.root_layout.show_text_overlay(canvas, doc, existing),
-                    0,
-                )
+                Clock.schedule_once(lambda _dt: self._restore_kivy_softinput(), 0)
 
         _open()
 
@@ -5183,8 +5143,6 @@ class SamsungNotesCompanionApp(App):
         if not accept or not target:
             return
         value = _plain_user_text(text)
-        if not value:
-            value = _plain_user_text(str(getattr(self, "_android_typed", "") or ""))
         if not value:
             self._notify("לא נשמר טקסט")
             return
