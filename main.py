@@ -26,7 +26,6 @@ from kivy.graphics.texture import Texture
 from kivy.graphics import (
     Color,
     Ellipse,
-    Fbo,
     Line,
     PopMatrix,
     PushMatrix,
@@ -292,6 +291,24 @@ def _strip_markup_tags(text: str) -> str:
     )
 
 
+def _strip_carried_lines(text: str) -> str:
+    """Drop a previous line that the IME prepended after Enter + Hebrew."""
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if len(lines) < 2:
+        return "\n".join(lines)
+    out: List[str] = [lines[0]]
+    for line in lines[1:]:
+        prev = out[-1]
+        stripped = line
+        if prev:
+            for prefix in (prev + " ", prev):
+                if stripped.startswith(prefix) and len(stripped) > len(prefix):
+                    stripped = stripped[len(prefix) :].lstrip()
+                    break
+        out.append(stripped)
+    return "\n".join(out)
+
+
 def _plain_user_text(text: str) -> str:
     cleaned = _strip_markup_tags(_strip_bidi_marks(str(text or "")))
     lowered = cleaned.lower()
@@ -299,7 +316,7 @@ def _plain_user_text(text: str) -> str:
         return ""
     if cleaned.startswith("<") or "jnius" in lowered or "javaobject" in lowered or "nativeproxy" in lowered:
         return ""
-    return cleaned.strip()
+    return _strip_carried_lines(cleaned.strip())
 
 
 def _java_chars(value: Any) -> str:
@@ -1817,33 +1834,27 @@ class SPenAnnotationCanvas(Widget):
         widget.texture_update()
         return widget
 
-    def _stack_line_textures(self, widgets: Sequence[Any], align_right: bool) -> Optional[Any]:
-        rows: List[Tuple[Any, int, int]] = []
+    def _stack_line_images(self, widgets: Sequence[Any], align_right: bool) -> Optional[Any]:
+        from PIL import Image
+
+        rows: List[Any] = []
         for widget in widgets:
             tex = widget.texture
             if tex is None or not tex.size[0] or not tex.size[1]:
                 continue
-            rows.append((tex, int(tex.size[0]), int(tex.size[1])))
+            raw = Image.frombytes("RGBA", tuple(tex.size), bytes(tex.pixels))
+            rows.append(raw.transpose(Image.FLIP_TOP_BOTTOM))
         if not rows:
             return None
-        max_w = max(width for _tex, width, _height in rows)
-        total_h = sum(height for _tex, _width, height in rows)
-        fbo = Fbo(size=(max_w, total_h), with_stencilbuffer=False)
-        with fbo:
-            Color(0, 0, 0, 0)
-            Rectangle(pos=(0, 0), size=(max_w, total_h))
-            cursor = float(total_h)
-            for tex, width, height in rows:
-                cursor -= float(height)
-                left = float(max_w - width) if align_right else 0.0
-                Color(1, 1, 1, 1)
-                Rectangle(texture=tex, pos=(left, cursor), size=(float(width), float(height)))
-        fbo.draw()
-        texture = fbo.texture
-        if texture is None:
-            return None
-        texture.flip_vertical()
-        return texture
+        max_w = max(image.size[0] for image in rows)
+        total_h = sum(image.size[1] for image in rows)
+        stacked = Image.new("RGBA", (max_w, total_h), (0, 0, 0, 0))
+        top = 0
+        for image in rows:
+            left = max_w - image.size[0] if align_right else 0
+            stacked.paste(image, (left, top), image)
+            top += image.size[1]
+        return _pil_to_texture(stacked)
 
     def _text_texture(self, record: StrokeRecord) -> Optional[Any]:
         text = str(record.get("text") or "")
@@ -1858,10 +1869,10 @@ class SPenAnnotationCanvas(Widget):
             ink = color[:4] if len(color) > 3 else color + (1.0,)
             lines = plain.split("\n") if plain else [""]
             widgets = [self._make_line_label(line, font_size, ink) for line in lines]
-            texture = self._stack_line_textures(widgets, align_right=_has_hebrew(plain))
+            texture = self._stack_line_images(widgets, align_right=_has_hebrew(plain))
             if texture is None:
                 raise RuntimeError("empty text texture")
-            self._text_texture_keepers[key] = (widgets, texture)
+            self._text_texture_keepers[key] = widgets
         except Exception:
             try:
                 from kivy.core.text import Label as CoreLabel
@@ -4368,17 +4379,20 @@ class SamsungNotesCompanionApp(App):
     def _write_android_uri(self, uri: Any, extension: str, mime: str) -> None:
         from jnius import autoclass
 
-        handle = tempfile.NamedTemporaryFile(delete=False, suffix=extension)
-        handle.close()
-        self._write_local_path(handle.name, extension)
-        activity = autoclass("org.kivy.android.PythonActivity").mActivity
-        resolver = activity.getContentResolver()
-        source = autoclass("java.io.FileInputStream")(handle.name)
-        dest = resolver.openOutputStream(uri)
-        autoclass("android.os.FileUtils").copy(source, dest)
-        source.close()
-        dest.close()
-        self._notify("הקובץ נשמר")
+        try:
+            handle = tempfile.NamedTemporaryFile(delete=False, suffix=extension)
+            handle.close()
+            self._write_local_path(handle.name, extension)
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            resolver = activity.getContentResolver()
+            source = autoclass("java.io.FileInputStream")(handle.name)
+            dest = resolver.openOutputStream(uri)
+            autoclass("android.os.FileUtils").copy(source, dest)
+            source.close()
+            dest.close()
+            self._notify("הקובץ נשמר")
+        except Exception as exc:
+            self._notify_long(f"לא ניתן לשמור: {exc}")
 
     def _document_bytes(self, extension: str) -> bytes:
         if extension == ".png":
@@ -5210,7 +5224,7 @@ class SamsungNotesCompanionApp(App):
     def _dock_android_text_panel(self) -> None:
         view = getattr(self, "_android_panel", None)
         params = getattr(self, "_android_panel_params", None)
-        activity = getattr(self, "_android_activity", None)
+        activity = getattr(self, "_android_text_activity", None)
         if view is None or activity is None:
             return
         try:
@@ -5246,7 +5260,7 @@ class SamsungNotesCompanionApp(App):
         @run_on_ui_thread
         def _close() -> None:
             view = getattr(self, "_android_panel", None)
-            activity = getattr(self, "_android_activity", None)
+            activity = getattr(self, "_android_text_activity", None)
             observer = getattr(self, "_android_ime_observer", None)
             listener = getattr(self, "_android_ime_dock", None)
             if observer is not None and listener is not None:
@@ -5302,7 +5316,7 @@ class SamsungNotesCompanionApp(App):
 
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
-        self._android_activity = activity
+        self._android_text_activity = activity
         self._android_center_lift = int(90 * density)
         self._pause_kivy_softinput()
         self._android_poll_ticks = 0
@@ -5339,6 +5353,7 @@ class SamsungNotesCompanionApp(App):
                     InputType.TYPE_CLASS_TEXT
                     | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                     | InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 )
                 edit.setMinLines(3)
                 edit.setMaxLines(6)
