@@ -125,7 +125,7 @@ SHAPE_ORDER: Sequence[str] = (
 )
 CHROME_HEIGHT_DP = 136.0
 SHAPE_BAR_DP = 40.0
-PASTE_HOLD_S = 3.0
+PASTE_HOLD_S = 1.5
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
 
@@ -309,6 +309,35 @@ def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
 
     Clock.schedule_once(_apply, 0)
     Clock.schedule_once(_apply, 0.05)
+
+
+def focus_system_keyboard(field: TextInput) -> None:
+    """Focus a TextInput and request the Android tablet keyboard."""
+
+    def _focus(_dt: float = 0.0) -> None:
+        try:
+            field.disabled = False
+            field.readonly = False
+            field.focus = True
+        except Exception:
+            return
+        if not is_android():
+            return
+        try:
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Context = autoclass("android.content.Context")
+            imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
+            view = activity.getCurrentFocus()
+            if view is None:
+                view = activity.getWindow().getDecorView()
+            imm.showSoftInput(view, 1)
+        except Exception:
+            pass
+
+    Clock.schedule_once(_focus, 0.05)
+    Clock.schedule_once(_focus, 0.3)
 
 
 def mixed_markup(text: str) -> str:
@@ -775,6 +804,19 @@ class ToolIcon(ButtonBehavior, Widget):
                     ],
                     width=1.2,
                 )
+            elif kind == "text":
+                Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.82], width=1.4)
+                Line(points=[cx, y + h * 0.82, cx, y + h * 0.22], width=1.4)
+                tex = self._caption_texture("א", ink)
+                if tex is not None:
+                    tw, th = float(tex.size[0]), float(tex.size[1])
+                    scale = min(w * 0.42 / max(1.0, tw), h * 0.32 / max(1.0, th))
+                    Color(*ink)
+                    Rectangle(
+                        texture=tex,
+                        pos=(x + w * 0.58, y + h * 0.04),
+                        size=(tw * scale, th * scale),
+                    )
             elif kind == "star":
                 outer = min(w, h) * 0.38
                 inner = outer * 0.42
@@ -1125,7 +1167,7 @@ class InkColorPicker(BoxLayout):
             Color(1, 1, 1, 1)
             Rectangle(texture=self._hue_texture(), pos=self.hue_bar.pos, size=self.hue_bar.size)
             Color(1, 1, 1, 1)
-            hy = self.hue_bar.y + (1.0 - self.hue) * max(1.0, self.hue_bar.height)
+            hy = self.hue_bar.y + self.hue * max(1.0, self.hue_bar.height)
             Line(
                 points=[self.hue_bar.x, hy, self.hue_bar.right, hy],
                 width=1.4,
@@ -1143,7 +1185,7 @@ class InkColorPicker(BoxLayout):
 
     def _handle_touch(self, touch: MotionEvent) -> bool:
         if self.hue_bar.collide_point(*touch.pos):
-            self.hue = max(0.0, min(1.0, 1.0 - (touch.y - self.hue_bar.y) / max(1.0, self.hue_bar.height)))
+            self.hue = max(0.0, min(1.0, (touch.y - self.hue_bar.y) / max(1.0, self.hue_bar.height)))
             return True
         if self.sv.collide_point(*touch.pos):
             self.sat = max(0.0, min(1.0, (touch.x - self.sv.x) / max(1.0, self.sv.width)))
@@ -1220,6 +1262,7 @@ class SPenAnnotationCanvas(Widget):
         self._queued_vis: Optional[Tuple[int, int]] = None
         self._stamp_textures: Dict[str, Any] = {}
         self._page_num_textures: Dict[int, Any] = {}
+        self._text_textures: Dict[Tuple[Any, ...], Any] = {}
         self.selected_ids: List[int] = []
         self._undo_stack: List[List[StrokeRecord]] = []
         self._redo_stack: List[List[StrokeRecord]] = []
@@ -1428,6 +1471,7 @@ class SPenAnnotationCanvas(Widget):
             if touch.ud.get("mode") in {"resize", "crop", "rotate", "endpoint", "move", "pinch"}:
                 return
             layout = getattr(app, "root_layout", None)
+            touch.ud["paste_hold"] = True
             if layout is not None:
                 layout.show_paste_chip(self, touch.x, touch.y)
 
@@ -1517,6 +1561,36 @@ class SPenAnnotationCanvas(Widget):
         self._stamp_textures[path] = texture
         return texture
 
+    def _text_texture(self, record: StrokeRecord) -> Optional[Any]:
+        text = str(record.get("text") or "")
+        font_size = max(10.0, float(record.get("font_size") or 28.0))
+        color = tuple(record.get("color") or COLOR_BLACK)
+        key = (text, round(font_size, 2), tuple(round(c, 4) for c in color[:4]))
+        cached = self._text_textures.get(key)
+        if cached is not None:
+            return cached
+        try:
+            from kivy.core.text import Label as CoreLabel
+
+            kwargs: Dict[str, Any] = {
+                "text": mixed_markup(text),
+                "markup": True,
+                "font_size": font_size,
+                "color": color[:4] if len(color) > 3 else color + (1.0,),
+                "halign": "right" if any("\u0590" <= ch <= "\u05ff" for ch in text) else "left",
+            }
+            if _HEBREW_FONT_READY:
+                kwargs["font_name"] = "HebrewFont"
+            elif _LATIN_FONT_READY:
+                kwargs["font_name"] = "LatinFont"
+            label = CoreLabel(**kwargs)
+            label.refresh()
+            texture = label.texture
+        except Exception:
+            return None
+        self._text_textures[key] = texture
+        return texture
+
     def _page_number_texture(self, number: int) -> Optional[Any]:
         cached = self._page_num_textures.get(number)
         if cached is not None:
@@ -1540,26 +1614,33 @@ class SPenAnnotationCanvas(Widget):
         return texture
 
     def _draw_record(self, record: StrokeRecord) -> None:
-        if record.get("kind") == "image":
+        if record.get("kind") in {"image", "text"}:
             rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
-            path = str(record.get("path") or "")
-            texture = self._stamp_texture(path) if path else None
-            if texture is None:
-                return
             x, y, width, height = [float(v) for v in rect[:4]]
             angle = float(record.get("angle") or 0.0)
+            if record.get("kind") == "text":
+                texture = self._text_texture(record)
+                tex_coords = None
+            else:
+                path = str(record.get("path") or "")
+                texture = self._stamp_texture(path) if path else None
+                tex_coords = _stamp_tex_coords(record.get("crop") or [0.0, 0.0, 1.0, 1.0])
+            if texture is None:
+                return
             Color(1, 1, 1, 1)
             PushMatrix()
             Translate(x + width / 2.0, y + height / 2.0)
             if abs(angle) > 0.01:
                 Rotate(angle=angle, axis=(0, 0, 1))
             Translate(-width / 2.0, -height / 2.0)
-            Rectangle(
-                texture=texture,
-                pos=(0.0, 0.0),
-                size=(width, height),
-                tex_coords=_stamp_tex_coords(record.get("crop") or [0.0, 0.0, 1.0, 1.0]),
-            )
+            kwargs: Dict[str, Any] = {
+                "texture": texture,
+                "pos": (0.0, 0.0),
+                "size": (width, height),
+            }
+            if tex_coords is not None:
+                kwargs["tex_coords"] = tex_coords
+            Rectangle(**kwargs)
             PopMatrix()
             return
         color = tuple(record.get("color", COLOR_BLACK))
@@ -1704,7 +1785,7 @@ class SPenAnnotationCanvas(Widget):
         kept: List[StrokeRecord] = []
         changed = False
         for record in self.strokes:
-            if record.get("kind") == "image":
+            if record.get("kind") in {"image", "text"}:
                 rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
                 x0, y0, width, height = [float(v) for v in rect[:4]]
                 if (
@@ -1888,6 +1969,10 @@ class SPenAnnotationCanvas(Widget):
         self._live_dashed = bool(getattr(app, "is_dashed", False))
         self._live_dash_len = float(getattr(app, "dash_length", DASH_LENGTH))
         self._live_gap_len = float(getattr(app, "dash_gap", GAP_LENGTH))
+        if tool_mode == "text":
+            touch.ud["mode"] = "text"
+            touch.ud["text_doc"] = doc
+            return True
         if tool_mode in SHAPE_TOOLS:
             touch.ud["shape"] = tool_mode
             touch.ud["shape_start"] = doc
@@ -1981,7 +2066,21 @@ class SPenAnnotationCanvas(Widget):
                 app._fingers = dict(app._pointers)
                 self._begin_pinch(app)
             return True
+        if touch.ud.get("paste_hold"):
+            self.current_stroke = []
+            return True
         if touch.ud.get("mode") in {"pan", "pinch", "move", "resize", "crop", "rotate", "endpoint"}:
+            return True
+        if touch.ud.get("mode") == "text":
+            origin = touch.ud.get("hold_origin", (touch.x, touch.y))
+            if math.hypot(touch.x - origin[0], touch.y - origin[1]) > dp(14):
+                return True
+            doc = touch.ud.get("text_doc", self.to_doc(touch.x, touch.y))
+            hit = self._hit_object(doc)
+            if hit is not None and self.strokes[hit].get("kind") == "text":
+                App.get_running_app().prompt_text_record(self, hit)
+            else:
+                App.get_running_app().prompt_new_text(self, doc)
             return True
         if touch.ud.get("mode") == "lasso":
             poly = list(self.current_stroke)
@@ -2053,7 +2152,7 @@ class SPenAnnotationCanvas(Widget):
         return True
 
     def _is_line(self, record: StrokeRecord) -> bool:
-        if record.get("kind") == "image":
+        if record.get("kind") in {"image", "text"}:
             return False
         if str(record.get("kind") or "") == "line":
             return True
@@ -2074,8 +2173,14 @@ class SPenAnnotationCanvas(Widget):
             return None
         return record
 
+    def _single_framed(self) -> Optional[StrokeRecord]:
+        record = self._single_selected()
+        if record is None or record.get("kind") not in {"image", "text"}:
+            return None
+        return record
+
     def _record_corners(self, record: StrokeRecord) -> List[Point]:
-        if record.get("kind") == "image":
+        if record.get("kind") in {"image", "text"}:
             rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
             x, y, width, height = [float(v) for v in rect[:4]]
             angle = float(record.get("angle") or 0.0)
@@ -2090,7 +2195,7 @@ class SPenAnnotationCanvas(Widget):
     def _record_bbox(self, record: StrokeRecord) -> Optional[Tuple[float, float, float, float]]:
         corners = self._record_corners(record)
         if len(corners) < 2:
-            if record.get("kind") == "image":
+            if record.get("kind") in {"image", "text"}:
                 rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
                 return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
             return None
@@ -2120,7 +2225,7 @@ class SPenAnnotationCanvas(Widget):
 
     def _handle_centers(self, box: Tuple[float, float, float, float]) -> Dict[str, Tuple[float, float]]:
         x, y, w, h = box
-        image = self._single_image()
+        image = self._single_framed()
         if image is not None:
             rect = [float(v) for v in (image.get("rect") or [0, 0, 1, 1])[:4]]
             angle = float(image.get("angle") or 0.0)
@@ -2203,7 +2308,7 @@ class SPenAnnotationCanvas(Widget):
             if box is None:
                 continue
             cx, cy = box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
-            if record.get("kind") == "image":
+            if record.get("kind") in {"image", "text"}:
                 corners = [
                     (box[0], box[1]),
                     (box[0] + box[2], box[1]),
@@ -2226,7 +2331,7 @@ class SPenAnnotationCanvas(Widget):
         pad = self._handle_size()
         for index in range(len(self.strokes) - 1, -1, -1):
             record = self.strokes[index]
-            if record.get("kind") == "image":
+            if record.get("kind") in {"image", "text"}:
                 rect = [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]]
                 angle = float(record.get("angle") or 0.0)
                 cx, cy = rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
@@ -2245,7 +2350,7 @@ class SPenAnnotationCanvas(Widget):
         return None
 
     def _translate_record(self, record: StrokeRecord, dx: float, dy: float) -> None:
-        if record.get("kind") == "image":
+        if record.get("kind") in {"image", "text"}:
             rect = [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]]
             rect[0] += dx
             rect[1] += dy
@@ -2273,6 +2378,7 @@ class SPenAnnotationCanvas(Widget):
                     "crop": [float(v) for v in (record.get("crop") or [0.0, 0.0, 1.0, 1.0])[:4]],
                     "points": [list(p) for p in (record.get("points") or [])],
                     "angle": float(record.get("angle") or 0.0),
+                    "font_size": float(record.get("font_size") or 28.0),
                     "kind": record.get("kind"),
                 }
             )
@@ -2315,7 +2421,7 @@ class SPenAnnotationCanvas(Widget):
         snap = getattr(self, "_resize_origin", None)
         if not snap:
             return
-        image = self._single_image()
+        image = self._single_framed()
         if image is not None and len(snap["items"]) == 1:
             item = snap["items"][0]
             ox, oy, ow, oh = item["rect"]
@@ -2325,6 +2431,9 @@ class SPenAnnotationCanvas(Widget):
             nx, ny, nw, nh = self._scaled_box(handle, item["rect"], local, handle in {"tl", "tr", "bl", "br"})
             image["rect"] = [nx, ny, nw, nh]
             image["points"] = [[nx, ny], [nx + nw, ny + nh]]
+            if image.get("kind") == "text":
+                image["font_size"] = max(10.0, float(item.get("font_size") or 28.0) * (nh / max(oh, 1.0)))
+                self._text_textures.clear()
             return
         ox, oy, ow, oh = [float(v) for v in snap["box"][:4]]
         nx, ny, nw, nh = self._scaled_box(handle, snap["box"], doc, handle in {"tl", "tr", "bl", "br"})
@@ -2332,11 +2441,14 @@ class SPenAnnotationCanvas(Widget):
         sy = nh / max(oh, 1e-3)
         for item in snap["items"]:
             record = self.strokes[item["index"]]
-            if item.get("kind") == "image":
+            if item.get("kind") in {"image", "text"}:
                 rx, ry, rw, rh = item["rect"]
                 record["rect"] = [nx + (rx - ox) * sx, ny + (ry - oy) * sy, rw * sx, rh * sy]
                 rect = record["rect"]
                 record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+                if item.get("kind") == "text":
+                    record["font_size"] = max(10.0, float(item.get("font_size") or 28.0) * sy)
+                    self._text_textures.clear()
                 continue
             record["points"] = [
                 [nx + (float(p[0]) - ox) * sx, ny + (float(p[1]) - oy) * sy] for p in item["points"]
@@ -2388,7 +2500,7 @@ class SPenAnnotationCanvas(Widget):
         delta = now - start
         for item in snap["items"]:
             record = self.strokes[item["index"]]
-            if item.get("kind") == "image":
+            if item.get("kind") in {"image", "text"}:
                 rx, ry, rw, rh = item["rect"]
                 icx, icy = rx + rw / 2.0, ry + rh / 2.0
                 ncx, ncy = _rotate_point(icx, icy, cx, cy, delta)
@@ -2432,6 +2544,40 @@ class SPenAnnotationCanvas(Widget):
             self.strokes.append(clone)
             new_ids.append(len(self.strokes) - 1)
         self.selected_ids = new_ids
+        self.redraw_all()
+
+    def place_text_record(self, doc: Point, text: str, color: Sequence[float], font_size: float = 28.0, index: Optional[int] = None) -> None:
+        self.push_history()
+        record: StrokeRecord = {
+            "kind": "text",
+            "text": text,
+            "font_size": float(font_size),
+            "color": list(color)[:4] if len(color) > 3 else list(color) + [1.0],
+            "angle": 0.0,
+            "rect": [doc[0], doc[1], 80.0, 32.0],
+            "points": [[doc[0], doc[1]], [doc[0] + 80.0, doc[1] + 32.0]],
+            "width": 1.0,
+            "dashed": False,
+            "eraser": False,
+        }
+        if index is not None and 0 <= index < len(self.strokes) and self.strokes[index].get("kind") == "text":
+            record["angle"] = float(self.strokes[index].get("angle") or 0.0)
+            record["rect"] = list(self.strokes[index].get("rect") or record["rect"])
+            self.strokes[index] = record
+            target = index
+        else:
+            self.strokes.append(record)
+            target = len(self.strokes) - 1
+        texture = self._text_texture(record)
+        if texture is not None:
+            width, height = max(24.0, float(texture.size[0])), max(18.0, float(texture.size[1]))
+            if index is not None:
+                x, y = float(record["rect"][0]), float(record["rect"][1])
+            else:
+                x, y = doc[0], doc[1] - height
+            record["rect"] = [x, y, width, height]
+            record["points"] = [[x, y], [x + width, y + height]]
+        self.selected_ids = [target]
         self.redraw_all()
 
     def paste_records_at(self, records: Sequence[StrokeRecord], doc: Point) -> None:
@@ -2703,11 +2849,12 @@ class RootLayout(FloatLayout):
             ("dashed", "dashed", app.toggle_dashed),
             ("eraser", "eraser", app.enable_eraser),
             ("lasso", "lasso", app.select_lasso),
+            ("text", "text", app.select_text),
             ("shapes", "shapes", app.toggle_shape_menu),
         )
         for key, kind, handler in actions:
             button = ToolIcon(kind, on_dark=True, size=(dp(48), dp(44)))
-            button.bind(on_release=handler)
+            button.bind(on_press=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
         for key, rgba in INK_COLORS:
@@ -2744,7 +2891,7 @@ class RootLayout(FloatLayout):
         )
         for kind in SHAPE_ORDER:
             button = ToolIcon(kind, on_dark=True, size=(dp(32), dp(32)))
-            button.bind(on_release=lambda _btn, name=kind: app.select_shape(name))
+            button.bind(on_press=lambda _btn, name=kind: app.select_shape(name))
             bar.add_widget(button)
             self.tool_buttons[kind] = button
         bar.add_widget(Widget())
@@ -2824,13 +2971,14 @@ class RootLayout(FloatLayout):
     def refresh_tool_styles(self) -> None:
         app = App.get_running_app()
         pen_on = app.tool_mode == "pen"
-        drawing = pen_on or app.tool_mode in SHAPE_TOOLS
+        drawing = pen_on or app.tool_mode in SHAPE_TOOLS or app.tool_mode == "text"
         mapping = {
             "pan": app.tool_mode == "none",
             "pen": pen_on and not app.is_dashed,
             "dashed": pen_on and bool(app.is_dashed),
             "eraser": app.tool_mode == "eraser",
             "lasso": app.tool_mode == "lasso",
+            "text": app.tool_mode == "text",
             "shapes": app.tool_mode in SHAPE_TOOLS or self._shapes_open,
         }
         for shape in SHAPE_TOOLS:
@@ -2913,6 +3061,7 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             pass
         Window.clearcolor = LETTERBOX
+        Window.softinput_mode = "pan"
         self.title = "Samsung Notes Companion"
         self.tool_mode: str = "none"
         self.current_color: Rgba = COLOR_BLACK
@@ -3042,11 +3191,17 @@ class SamsungNotesCompanionApp(App):
             multiline=False,
             font_size=dp(18),
             size_hint_y=None,
-            height=dp(44),
+            height=dp(48),
+            input_type="text",
+            write_tab=False,
         )
+        if _HEBREW_FONT_READY:
+            field.font_name = "HebrewFont"
+        elif _LATIN_FONT_READY:
+            field.font_name = "LatinFont"
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
         buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="", content=body, size_hint=(0.8, 0.4))
+        popup = Popup(title="", content=body, size_hint=(0.88, 0.42), auto_dismiss=False)
 
         def _save(_btn: Button) -> None:
             name = field.text.strip() or "כותרת"
@@ -3063,8 +3218,10 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(Label(text="בחרו שם למסמך", size_hint_y=None, height=dp(28)))
         body.add_widget(field)
         body.add_widget(buttons)
+        popup.bind(on_open=lambda *_args: focus_system_keyboard(field))
         popup.open()
         apply_hebrew_ui(popup, "שם המסמך")
+        focus_system_keyboard(field)
 
     def _notify(self, message: str) -> None:
         self.root_layout.set_status(message)
@@ -3811,6 +3968,34 @@ class SamsungNotesCompanionApp(App):
                 except Exception:
                     pass
                 continue
+            if record.get("kind") == "text":
+                try:
+                    canvas = self.root_layout.pdf_canvas
+                    texture = canvas._text_texture(record)
+                    if texture is None:
+                        continue
+                    raw = Image.frombytes("RGBA", tuple(texture.size), bytes(texture.pixels))
+                    stamp = raw.transpose(Image.FLIP_TOP_BOTTOM)
+                    rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
+                    sized = stamp.resize(
+                        (
+                            max(1, int(float(rect[2]) * scale_x)),
+                            max(1, int(float(rect[3]) * scale_y)),
+                        )
+                    )
+                    angle = float(record.get("angle") or 0.0)
+                    if abs(angle) > 0.05:
+                        sized = sized.rotate(-angle, expand=True, resample=Image.BICUBIC)
+                    cx = (float(rect[0]) + float(rect[2]) / 2.0) * scale_x
+                    cy = height - (float(rect[1]) + float(rect[3]) / 2.0) * scale_y
+                    box = (
+                        int(cx - sized.size[0] / 2.0),
+                        int(cy - sized.size[1] / 2.0),
+                    )
+                    overlay.paste(sized, box, sized)
+                except Exception:
+                    pass
+                continue
             points = record.get("points") or []
             if len(points) < 2:
                 continue
@@ -4348,14 +4533,74 @@ class SamsungNotesCompanionApp(App):
         other.redo()
 
     def select_lasso(self, *_args: Any) -> None:
-        if self.tool_mode == "lasso":
-            self.clear_tool()
-            return
         self.tool_mode = "lasso"
         self.is_eraser = False
         self.is_dashed = False
         self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
+
+    def select_text(self, *_args: Any) -> None:
+        self.tool_mode = "text"
+        self.is_eraser = False
+        self.is_dashed = False
+        self.root_layout.set_shapes_open(False)
+        self.root_layout.refresh_tool_styles()
+
+    def _text_dialog(self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int] = None) -> None:
+        initial = ""
+        font_size = 28.0
+        if existing is not None and 0 <= existing < len(canvas.strokes):
+            record = canvas.strokes[existing]
+            initial = str(record.get("text") or "")
+            font_size = float(record.get("font_size") or 28.0)
+        field = TextInput(
+            text=initial,
+            multiline=True,
+            font_size=dp(18),
+            input_type="text",
+            write_tab=False,
+        )
+        if _HEBREW_FONT_READY:
+            field.font_name = "HebrewFont"
+        elif _LATIN_FONT_READY:
+            field.font_name = "LatinFont"
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(title="", content=body, size_hint=(0.9, 0.55), auto_dismiss=False)
+
+        def _save(_btn: Button) -> None:
+            text = field.text.strip()
+            popup.dismiss()
+            if not text:
+                return
+            color = list(self.current_color)
+            canvas.place_text_record(doc, text, color, font_size=font_size, index=existing)
+            self._history_role = canvas.view_role
+            self.tool_mode = "lasso"
+            self.root_layout.refresh_tool_styles()
+            self.root_layout.sync_floating_tools()
+
+        save_btn = Button(text="אישור")
+        cancel_btn = Button(text="ביטול")
+        save_btn.bind(on_release=_save)
+        cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
+        buttons.add_widget(save_btn)
+        buttons.add_widget(cancel_btn)
+        body.add_widget(Label(text="כתבו טקסט בעברית או באנגלית", size_hint_y=None, height=dp(28)))
+        body.add_widget(field)
+        body.add_widget(buttons)
+        popup.bind(on_open=lambda *_args: focus_system_keyboard(field))
+        popup.open()
+        apply_hebrew_ui(popup, "טקסט")
+        focus_system_keyboard(field)
+
+    def prompt_new_text(self, canvas: SPenAnnotationCanvas, doc: Point) -> None:
+        self._text_dialog(canvas, doc, None)
+
+    def prompt_text_record(self, canvas: SPenAnnotationCanvas, index: int) -> None:
+        record = canvas.strokes[index]
+        rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
+        self._text_dialog(canvas, (float(rect[0]), float(rect[1])), index)
 
     def toggle_shape_menu(self, *_args: Any) -> None:
         self.root_layout.toggle_shape_menu()
@@ -4407,12 +4652,10 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.refresh_tool_styles()
 
     def select_pen(self, *_args: Any) -> None:
-        if self.tool_mode == "pen" and not self.is_dashed:
-            self.clear_tool()
-            return
         self.tool_mode = "pen"
         self.is_eraser = False
         self.is_dashed = False
+        self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
 
     def set_ink_width(self, value: float, *_args: Any) -> None:
@@ -4427,9 +4670,6 @@ class SamsungNotesCompanionApp(App):
     def select_shape(self, kind: str, *_args: Any) -> None:
         if kind not in SHAPE_TOOLS:
             return
-        if self.tool_mode == kind:
-            self.clear_tool()
-            return
         self.tool_mode = kind
         self.is_eraser = False
         self.root_layout.set_shapes_open(False)
@@ -4438,10 +4678,6 @@ class SamsungNotesCompanionApp(App):
     def set_ink_color(self, name: str, *_args: Any) -> None:
         color_map = dict(INK_COLORS)
         color = color_map.get(name, COLOR_BLACK)
-        same = tuple(self.current_color[:3]) == tuple(color[:3])
-        if self.tool_mode == "pen" and same:
-            self.clear_tool()
-            return
         self.current_color = color
         if self.tool_mode in {"none", "eraser"}:
             self.tool_mode = "pen"
@@ -4458,20 +4694,16 @@ class SamsungNotesCompanionApp(App):
         self.set_ink_color("blue")
 
     def toggle_dashed(self, *_args: Any) -> None:
-        if self.tool_mode == "pen" and self.is_dashed:
-            self.clear_tool()
-            return
         self.is_dashed = True
         self.tool_mode = "pen"
         self.is_eraser = False
+        self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
 
     def enable_eraser(self, *_args: Any) -> None:
-        if self.tool_mode == "eraser":
-            self.clear_tool()
-            return
         self.tool_mode = "eraser"
         self.is_eraser = True
+        self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
 
 
