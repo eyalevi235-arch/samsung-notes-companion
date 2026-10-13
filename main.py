@@ -78,6 +78,8 @@ MAX_GPU_PAGES = 5
 PAGE_GAP = 28.0
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
+UNDO_LIMIT = 40
+HANDLE_SIZE = 16.0
 COLOR_BLACK: Rgba = (0.0, 0.0, 0.0, 1.0)
 COLOR_BLUE: Rgba = (0.10, 0.38, 0.92, 1.0)
 COLOR_GREEN: Rgba = (0.22, 0.70, 0.32, 1.0)
@@ -230,6 +232,41 @@ def set_hebrew_font(widget: Any) -> None:
         widget.font_name = "HebrewFont"
     except Exception:
         pass
+
+
+def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
+    """Enable mixed Hebrew/Latin markup on popups, labels, and buttons."""
+    if title is not None and hasattr(root, "title"):
+        try:
+            root.title = mixed_markup(title)
+        except Exception:
+            pass
+
+    def _apply(_dt: float = 0.0) -> None:
+        try:
+            widgets = list(root.walk()) if hasattr(root, "walk") else [root]
+        except Exception:
+            widgets = [root]
+        for widget in widgets:
+            try:
+                if isinstance(widget, TextInput):
+                    if _HEBREW_FONT_READY:
+                        widget.font_name = "HebrewFont"
+                    elif _LATIN_FONT_READY:
+                        widget.font_name = "LatinFont"
+                    continue
+                if "filechooser" in type(widget).__module__:
+                    continue
+                if isinstance(widget, (Label, Button)):
+                    widget.markup = True
+                    text = str(getattr(widget, "text", "") or "")
+                    if text and "[font=" not in text:
+                        widget.text = mixed_markup(text)
+            except Exception:
+                continue
+
+    Clock.schedule_once(_apply, 0)
+    Clock.schedule_once(_apply, 0.05)
 
 
 def mixed_markup(text: str) -> str:
@@ -595,6 +632,32 @@ class ToolIcon(ButtonBehavior, Widget):
             elif kind == "palette":
                 Line(circle=(cx, cy, min(w, h) * 0.34), width=1.3)
                 Line(circle=(cx, cy, min(w, h) * 0.16), width=1.2)
+            elif kind == "lasso":
+                Line(
+                    points=[
+                        x + w * 0.18,
+                        y + h * 0.28,
+                        x + w * 0.12,
+                        y + h * 0.55,
+                        x + w * 0.38,
+                        y + h * 0.86,
+                        x + w * 0.78,
+                        y + h * 0.72,
+                        x + w * 0.86,
+                        y + h * 0.38,
+                        x + w * 0.58,
+                        y + h * 0.16,
+                        x + w * 0.18,
+                        y + h * 0.28,
+                    ],
+                    width=1.2,
+                )
+            elif kind == "undo":
+                Line(circle=(cx + w * 0.06, cy, min(w, h) * 0.28), width=1.3)
+                Line(points=[x + w * 0.08, cy + h * 0.12, x + w * 0.08, y + h * 0.78, x + w * 0.38, y + h * 0.58], width=1.3)
+            elif kind == "redo":
+                Line(circle=(cx - w * 0.06, cy, min(w, h) * 0.28), width=1.3)
+                Line(points=[x + w * 0.92, cy + h * 0.12, x + w * 0.92, y + h * 0.78, x + w * 0.62, y + h * 0.58], width=1.3)
 
 
 class ColorDot(ButtonBehavior, Widget):
@@ -813,6 +876,10 @@ class SPenAnnotationCanvas(Widget):
         self._queued_vis: Optional[Tuple[int, int]] = None
         self._stamp_textures: Dict[str, Any] = {}
         self._page_num_textures: Dict[int, Any] = {}
+        self.selected_ids: List[int] = []
+        self._undo_stack: List[List[StrokeRecord]] = []
+        self._redo_stack: List[List[StrokeRecord]] = []
+        self._gesture_snapshot = False
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -1107,11 +1174,14 @@ class SPenAnnotationCanvas(Widget):
             texture = self._stamp_texture(path) if path else None
             if texture is None:
                 return
+            crop = record.get("crop") or [0.0, 0.0, 1.0, 1.0]
+            u0, v0, u1, v1 = [float(v) for v in crop[:4]]
             Color(1, 1, 1, 1)
             Rectangle(
                 texture=texture,
                 pos=(float(rect[0]), float(rect[1])),
                 size=(float(rect[2]), float(rect[3])),
+                tex_coords=[u0, v0, u1, v0, u1, v1, u0, v1],
             )
             return
         color = tuple(record.get("color", COLOR_BLACK))
@@ -1224,6 +1294,7 @@ class SPenAnnotationCanvas(Widget):
                     )
             for record in self.strokes:
                 self._draw_record(record)
+            self._draw_selection()
             self._live_color_instr = Color(*self._live_color)
             self._live_line = Line(
                 points=self._live_points_flat(),
@@ -1348,8 +1419,56 @@ class SPenAnnotationCanvas(Widget):
             return True
         tool_mode = str(getattr(app, "tool_mode", "none"))
         doc = self.to_doc(touch.x, touch.y)
+        if tool_mode == "lasso":
+            handle = self._hit_handle(doc)
+            if handle in {"tl", "tr", "bl", "br"}:
+                self.push_history()
+                touch.ud["mode"] = "resize"
+                touch.ud["handle"] = handle
+                index = self.selected_ids[0]
+                self._resize_origin = list(self.strokes[index].get("rect") or [0, 0, 1, 1])
+                return True
+            if handle in {"l", "r", "t", "b"}:
+                self.push_history()
+                touch.ud["mode"] = "crop"
+                touch.ud["handle"] = handle
+                rec = self.strokes[self.selected_ids[0]]
+                self._crop_origin = (
+                    [float(v) for v in (rec.get("rect") or [0, 0, 1, 1])[:4]],
+                    [float(v) for v in (rec.get("crop") or [0.0, 0.0, 1.0, 1.0])[:4]],
+                )
+                return True
+            box = self._selection_bbox()
+            if box is not None:
+                pad = self._handle_size()
+                if (
+                    box[0] - pad <= doc[0] <= box[0] + box[2] + pad
+                    and box[1] - pad <= doc[1] <= box[1] + box[3] + pad
+                ):
+                    self.push_history()
+                    touch.ud["mode"] = "move"
+                    touch.ud["last_doc"] = doc
+                    return True
+            hit = self._hit_object(doc)
+            if hit is not None:
+                self.selected_ids = [hit]
+                self.push_history()
+                touch.ud["mode"] = "move"
+                touch.ud["last_doc"] = doc
+                self.redraw_all()
+                return True
+            self.selected_ids = []
+            self._live_dashed = True
+            self._live_color = (0.12, 0.45, 0.95, 0.9)
+            self._live_width = 1.2
+            self.current_stroke = [doc]
+            touch.ud["mode"] = "lasso"
+            self.redraw_all()
+            return True
         if kind == "eraser" or tool_mode == "eraser" or bool(getattr(app, "is_eraser", False)):
             touch.ud["erasing"] = True
+            self.push_history()
+            touch.ud["hist"] = True
             _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
             radius = max(SPEN_ERASER_WIDTH, 36.0) / max(scale, 0.01)
             self._erase_at(doc[0], doc[1], radius)
@@ -1392,7 +1511,25 @@ class SPenAnnotationCanvas(Widget):
             self._add_pan(touch.x - last[0], touch.y - last[1])
             touch.ud["last"] = (touch.x, touch.y)
             return True
+        if touch.ud.get("mode") == "move":
+            doc = self.to_doc(touch.x, touch.y)
+            last = touch.ud.get("last_doc", doc)
+            self._translate_selected(doc[0] - last[0], doc[1] - last[1])
+            touch.ud["last_doc"] = doc
+            self.redraw_all()
+            return True
+        if touch.ud.get("mode") == "resize":
+            self._resize_image(str(touch.ud.get("handle")), self.to_doc(touch.x, touch.y))
+            self.redraw_all()
+            return True
+        if touch.ud.get("mode") == "crop":
+            self._crop_image(str(touch.ud.get("handle")), self.to_doc(touch.x, touch.y))
+            self.redraw_all()
+            return True
         if touch.ud.get("erasing"):
+            if not touch.ud.get("hist"):
+                self.push_history()
+                touch.ud["hist"] = True
             doc = self.to_doc(touch.x, touch.y)
             _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
             radius = max(SPEN_ERASER_WIDTH, 36.0) / max(scale, 0.01)
@@ -1427,11 +1564,25 @@ class SPenAnnotationCanvas(Widget):
                 app._fingers = dict(app._pointers)
                 self._begin_pinch(app)
             return True
-        if touch.ud.get("mode") in {"pan", "pinch"}:
+        if touch.ud.get("mode") in {"pan", "pinch", "move", "resize", "crop"}:
+            return True
+        if touch.ud.get("mode") == "lasso":
+            poly = list(self.current_stroke)
+            self.current_stroke = []
+            length = 0.0
+            for i in range(1, len(poly)):
+                length += math.hypot(poly[i][0] - poly[i - 1][0], poly[i][1] - poly[i - 1][1])
+            if length < 24 and poly:
+                hit = self._hit_object(poly[-1])
+                self.selected_ids = [hit] if hit is not None else []
+            else:
+                self._select_with_lasso(poly)
+            self.redraw_all()
             return True
         if touch.ud.get("erasing"):
             return True
         if len(self.current_stroke) >= 2:
+            self.push_history()
             self.strokes.append(
                 {
                     "points": [list(point) for point in self.current_stroke],
@@ -1452,7 +1603,259 @@ class SPenAnnotationCanvas(Widget):
 
     def load_strokes(self, records: Sequence[StrokeRecord]) -> None:
         self.strokes = [dict(record) for record in records]
+        self.selected_ids = []
         self.redraw_all()
+
+    def push_history(self) -> None:
+        snapshot = json.loads(json.dumps(self.strokes))
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        app = App.get_running_app()
+        app._history_role = self.view_role
+
+    def undo(self) -> bool:
+        if not self._undo_stack:
+            return False
+        self._redo_stack.append(json.loads(json.dumps(self.strokes)))
+        self.strokes = self._undo_stack.pop()
+        self.selected_ids = []
+        self.redraw_all()
+        return True
+
+    def redo(self) -> bool:
+        if not self._redo_stack:
+            return False
+        self._undo_stack.append(json.loads(json.dumps(self.strokes)))
+        self.strokes = self._redo_stack.pop()
+        self.selected_ids = []
+        self.redraw_all()
+        return True
+
+    def _record_bbox(self, record: StrokeRecord) -> Optional[Tuple[float, float, float, float]]:
+        if record.get("kind") == "image":
+            rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
+            return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+        points = record.get("points") or []
+        if len(points) < 2:
+            return None
+        xs = [float(p[0]) for p in points]
+        ys = [float(p[1]) for p in points]
+        left, bottom = min(xs), min(ys)
+        return (left, bottom, max(xs) - left, max(ys) - bottom)
+
+    def _selection_bbox(self) -> Optional[Tuple[float, float, float, float]]:
+        boxes = []
+        for index in self.selected_ids:
+            if 0 <= index < len(self.strokes):
+                box = self._record_bbox(self.strokes[index])
+                if box is not None:
+                    boxes.append(box)
+        if not boxes:
+            return None
+        left = min(box[0] for box in boxes)
+        bottom = min(box[1] for box in boxes)
+        right = max(box[0] + box[2] for box in boxes)
+        top = max(box[1] + box[3] for box in boxes)
+        return (left, bottom, right - left, top - bottom)
+
+    def _handle_size(self) -> float:
+        _ox, _oy, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+        return HANDLE_SIZE / max(scale, 0.05)
+
+    def _handle_centers(self, box: Tuple[float, float, float, float]) -> Dict[str, Tuple[float, float]]:
+        x, y, w, h = box
+        return {
+            "bl": (x, y),
+            "br": (x + w, y),
+            "tl": (x, y + h),
+            "tr": (x + w, y + h),
+            "l": (x, y + h / 2.0),
+            "r": (x + w, y + h / 2.0),
+            "b": (x + w / 2.0, y),
+            "t": (x + w / 2.0, y + h),
+        }
+
+    def _hit_handle(self, doc: Point) -> Optional[str]:
+        if len(self.selected_ids) != 1:
+            return None
+        index = self.selected_ids[0]
+        if not (0 <= index < len(self.strokes)):
+            return None
+        if self.strokes[index].get("kind") != "image":
+            return None
+        box = self._record_bbox(self.strokes[index])
+        if box is None:
+            return None
+        size = self._handle_size()
+        for name, center in self._handle_centers(box).items():
+            if abs(doc[0] - center[0]) <= size and abs(doc[1] - center[1]) <= size:
+                return name
+        return None
+
+    def _point_in_poly(self, x: float, y: float, poly: Sequence[Point]) -> bool:
+        inside = False
+        j = len(poly) - 1
+        for i, point in enumerate(poly):
+            xi, yi = float(point[0]), float(point[1])
+            xj, yj = float(poly[j][0]), float(poly[j][1])
+            intersect = ((yi > y) != (yj > y)) and (
+                x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-9) + xi
+            )
+            if intersect:
+                inside = not inside
+            j = i
+        return inside
+
+    def _select_with_lasso(self, poly: Sequence[Point]) -> None:
+        if len(poly) < 3:
+            self.selected_ids = []
+            return
+        chosen: List[int] = []
+        for index, record in enumerate(self.strokes):
+            box = self._record_bbox(record)
+            if box is None:
+                continue
+            cx, cy = box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
+            if record.get("kind") == "image":
+                corners = [
+                    (box[0], box[1]),
+                    (box[0] + box[2], box[1]),
+                    (box[0] + box[2], box[1] + box[3]),
+                    (box[0], box[1] + box[3]),
+                ]
+                if self._point_in_poly(cx, cy, poly) or any(
+                    self._point_in_poly(px, py, poly) for px, py in corners
+                ):
+                    chosen.append(index)
+                continue
+            points = record.get("points") or []
+            hits = sum(1 for point in points if self._point_in_poly(float(point[0]), float(point[1]), poly))
+            if hits >= max(1, len(points) // 3):
+                chosen.append(index)
+        self.selected_ids = chosen
+
+    def _hit_object(self, doc: Point) -> Optional[int]:
+        x, y = doc
+        pad = self._handle_size()
+        for index in range(len(self.strokes) - 1, -1, -1):
+            box = self._record_bbox(self.strokes[index])
+            if box is None:
+                continue
+            if box[0] - pad <= x <= box[0] + box[2] + pad and box[1] - pad <= y <= box[1] + box[3] + pad:
+                return index
+        return None
+
+    def _translate_selected(self, dx: float, dy: float) -> None:
+        for index in self.selected_ids:
+            if not (0 <= index < len(self.strokes)):
+                continue
+            record = self.strokes[index]
+            if record.get("kind") == "image":
+                rect = [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]]
+                rect[0] += dx
+                rect[1] += dy
+                record["rect"] = rect
+                record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+                continue
+            points = record.get("points") or []
+            record["points"] = [[float(p[0]) + dx, float(p[1]) + dy] for p in points]
+
+    def _resize_image(self, handle: str, doc: Point) -> None:
+        if len(self.selected_ids) != 1:
+            return
+        record = self.strokes[self.selected_ids[0]]
+        if record.get("kind") != "image":
+            return
+        ox, oy, ow, oh = [float(v) for v in getattr(self, "_resize_origin", record.get("rect") or [0, 0, 1, 1])[:4]]
+        min_size = MIN_SCALE * 20.0
+        nx, ny, nw, nh = ox, oy, ow, oh
+        if "l" in handle:
+            nx = min(doc[0], ox + ow - min_size)
+            nw = ox + ow - nx
+        if "r" in handle:
+            nw = max(min_size, doc[0] - ox)
+        if "b" in handle:
+            ny = min(doc[1], oy + oh - min_size)
+            nh = oy + oh - ny
+        if "t" in handle:
+            nh = max(min_size, doc[1] - oy)
+        if handle in {"tl", "tr", "bl", "br"} and oh > 1:
+            ratio = ow / oh
+            if handle in {"tr", "br"}:
+                nh = max(min_size, nw / ratio)
+                if handle == "tr":
+                    ny = oy + oh - nh
+            else:
+                nw = max(min_size, nh * ratio)
+                if handle == "tl":
+                    nx = ox + ow - nw
+                    ny = oy + oh - nh
+                elif handle == "bl":
+                    nx = ox + ow - nw
+        record["rect"] = [nx, ny, nw, nh]
+        record["points"] = [[nx, ny], [nx + nw, ny + nh]]
+
+    def _crop_image(self, handle: str, doc: Point) -> None:
+        if len(self.selected_ids) != 1:
+            return
+        record = self.strokes[self.selected_ids[0]]
+        if record.get("kind") != "image":
+            return
+        origin = getattr(self, "_crop_origin", None)
+        if origin is None:
+            origin = (
+                list(record.get("rect") or [0, 0, 1, 1]),
+                list(record.get("crop") or [0.0, 0.0, 1.0, 1.0]),
+            )
+        x, y, w, h = [float(v) for v in origin[0][:4]]
+        u0, v0, u1, v1 = [float(v) for v in origin[1][:4]]
+        min_frac = 0.08
+        if handle == "l":
+            frac = max(0.0, min(1.0 - min_frac, (doc[0] - x) / max(w, 1.0)))
+            record["rect"] = [x + frac * w, y, w * (1.0 - frac), h]
+            record["crop"] = [u0 + frac * (u1 - u0), v0, u1, v1]
+        elif handle == "r":
+            frac = max(min_frac, min(1.0, (doc[0] - x) / max(w, 1.0)))
+            record["rect"] = [x, y, w * frac, h]
+            record["crop"] = [u0, v0, u0 + frac * (u1 - u0), v1]
+        elif handle == "b":
+            frac = max(0.0, min(1.0 - min_frac, (doc[1] - y) / max(h, 1.0)))
+            record["rect"] = [x, y + frac * h, w, h * (1.0 - frac)]
+            record["crop"] = [u0, v0 + frac * (v1 - v0), u1, v1]
+        elif handle == "t":
+            frac = max(min_frac, min(1.0, (doc[1] - y) / max(h, 1.0)))
+            record["rect"] = [x, y, w, h * frac]
+            record["crop"] = [u0, v0, u1, v0 + frac * (v1 - v0)]
+        rect = record["rect"]
+        record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+
+    def _draw_selection(self) -> None:
+        if str(getattr(App.get_running_app(), "tool_mode", "")) != "lasso":
+            return
+        box = self._selection_bbox()
+        if box is None:
+            return
+        x, y, w, h = box
+        Color(0.15, 0.45, 0.95, 0.9)
+        Line(rectangle=(x, y, w, h), width=1.1)
+        size = self._handle_size()
+        if len(self.selected_ids) == 1 and 0 <= self.selected_ids[0] < len(self.strokes):
+            record = self.strokes[self.selected_ids[0]]
+            if record.get("kind") == "image":
+                handles = self._handle_centers(box)
+                for name, center in handles.items():
+                    hx, hy = center
+                    if name in {"tl", "tr", "bl", "br"}:
+                        Color(0.12, 0.46, 0.95, 1)
+                        Rectangle(pos=(hx - size / 2.0, hy - size / 2.0), size=(size, size))
+                    else:
+                        Color(0.95, 0.55, 0.12, 1)
+                        Line(
+                            rectangle=(hx - size / 2.5, hy - size / 2.5, size * 0.8, size * 0.8),
+                            width=1.2,
+                        )
 
 
 class RootLayout(FloatLayout):
@@ -1585,9 +1988,12 @@ class RootLayout(FloatLayout):
         actions: Sequence[Tuple[str, str, Any]] = (
             ("pan", "pan", app.clear_tool),
             ("fit", "fit", app.reset_view),
+            ("undo", "undo", app.undo),
+            ("redo", "redo", app.redo),
             ("pen", "pen", app.select_pen),
             ("dashed", "dashed", app.toggle_dashed),
             ("eraser", "eraser", app.enable_eraser),
+            ("lasso", "lasso", app.select_lasso),
         )
         for key, kind, handler in actions:
             button = ToolIcon(kind, on_dark=True)
@@ -1696,11 +2102,12 @@ class RootLayout(FloatLayout):
             "pen": pen_on and not app.is_dashed,
             "dashed": pen_on and bool(app.is_dashed),
             "eraser": app.tool_mode == "eraser",
+            "lasso": app.tool_mode == "lasso",
         }
         for shape in SHAPE_TOOLS:
             mapping[shape] = app.tool_mode == shape
         for key, button in self.tool_buttons.items():
-            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette"}:
+            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette", "undo", "redo"}:
                 continue
             if isinstance(button, ToolIcon):
                 button.selected = mapping.get(key, False)
@@ -1809,6 +2216,7 @@ class SamsungNotesCompanionApp(App):
         self._notes_strokes: Dict[int, List[StrokeRecord]] = {}
         self._pending_save: Optional[Tuple[str, str]] = None
         self._stylus_listener: Any = None
+        self._history_role: str = "pdf"
         self.document_title = "כותרת"
         self.root_layout = RootLayout()
         Window.bind(on_key_down=self._on_key_down, on_key_up=self._on_key_up)
@@ -1908,7 +2316,7 @@ class SamsungNotesCompanionApp(App):
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
         buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title=ui_text("שם המסמך"), content=body, size_hint=(0.8, 0.4))
+        popup = Popup(title="", content=body, size_hint=(0.8, 0.4))
 
         def _save(_btn: Button) -> None:
             name = field.text.strip() or "כותרת"
@@ -1916,16 +2324,17 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.refresh_title()
             popup.dismiss()
 
-        save_btn = Button(text=ui_text("שמירה"))
-        cancel_btn = Button(text=ui_text("ביטול"))
+        save_btn = Button(text="שמירה")
+        cancel_btn = Button(text="ביטול")
         save_btn.bind(on_release=_save)
         cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
         buttons.add_widget(save_btn)
         buttons.add_widget(cancel_btn)
-        body.add_widget(Label(text=ui_text("בחרו שם למסמך"), size_hint_y=None, height=dp(28)))
+        body.add_widget(Label(text="בחרו שם למסמך", size_hint_y=None, height=dp(28)))
         body.add_widget(field)
         body.add_widget(buttons)
         popup.open()
+        apply_hebrew_ui(popup, "שם המסמך")
 
     def _notify(self, message: str) -> None:
         self.root_layout.set_status(message)
@@ -1951,7 +2360,9 @@ class SamsungNotesCompanionApp(App):
         self._notify(message)
         field = TextInput(text=message, readonly=True, multiline=True)
         set_hebrew_font(field)
-        Popup(title=ui_text("שגיאה"), content=field, size_hint=(0.94, 0.6)).open()
+        popup = Popup(title="", content=field, size_hint=(0.94, 0.6))
+        popup.open()
+        apply_hebrew_ui(popup, "שגיאה")
 
     def _on_key_down(self, *_args: Any, **kwargs: Any) -> bool:
         key = _args[1] if len(_args) > 1 else None
@@ -2634,6 +3045,13 @@ class SamsungNotesCompanionApp(App):
                     continue
                 try:
                     stamp = _image_rgb_on_white(path).convert("RGBA")
+                    u0, v0, u1, v1 = [float(v) for v in (record.get("crop") or [0.0, 0.0, 1.0, 1.0])[:4]]
+                    pw, ph = stamp.size
+                    left = int(max(0, min(pw - 1, u0 * pw)))
+                    right = int(max(left + 1, min(pw, u1 * pw)))
+                    top = int(max(0, min(ph - 1, (1.0 - v1) * ph)))
+                    bottom = int(max(top + 1, min(ph, (1.0 - v0) * ph)))
+                    stamp = stamp.crop((left, top, right, bottom))
                     box = (
                         int(float(rect[0]) * scale_x),
                         int(height - (float(rect[1]) + float(rect[3])) * scale_y),
@@ -2884,7 +3302,7 @@ class SamsungNotesCompanionApp(App):
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        popup = Popup(title="Open file", content=body, size_hint=(0.94, 0.94))
+        popup = Popup(title="", content=body, size_hint=(0.94, 0.94))
 
         def _load(_instance: Button) -> None:
             if chooser.selection:
@@ -2900,6 +3318,7 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(chooser)
         body.add_widget(buttons)
         popup.open()
+        apply_hebrew_ui(popup, "פתיחת קובץ")
 
     def _open_local_path(self, path: str) -> None:
         lower = path.lower()
@@ -2943,7 +3362,7 @@ class SamsungNotesCompanionApp(App):
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        popup = Popup(title="Save As", content=body, size_hint=(0.94, 0.94))
+        popup = Popup(title="", content=body, size_hint=(0.94, 0.94))
 
         def _ext_for_label(label: str) -> Tuple[str, str]:
             for ext, mime, title in SAVE_TYPES:
@@ -2981,6 +3400,7 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(name_input)
         body.add_widget(buttons)
         popup.open()
+        apply_hebrew_ui(popup, "שמירה בשם")
 
     def _write_local_path(self, path: str, extension: str) -> None:
         data = self._document_bytes(extension)
@@ -3024,11 +3444,13 @@ class SamsungNotesCompanionApp(App):
         page_y = canvas._page_origin_y(first, page_h)
         x = (page_w - tw) / 2.0
         y = page_y + (page_h - th) / 2.0
+        canvas.push_history()
         canvas.strokes.append(
             {
                 "kind": "image",
                 "path": stored.name,
                 "rect": [x, y, tw, th],
+                "crop": [0.0, 0.0, 1.0, 1.0],
                 "points": [[x, y], [x + tw, y + th]],
                 "color": [0.0, 0.0, 0.0, 1.0],
                 "width": 1.0,
@@ -3036,7 +3458,13 @@ class SamsungNotesCompanionApp(App):
                 "eraser": False,
             }
         )
+        canvas.selected_ids = [len(canvas.strokes) - 1]
+        self.tool_mode = "lasso"
+        self.is_eraser = False
+        self.is_dashed = False
         canvas.redraw_all()
+        self.root_layout.refresh_tool_styles()
+        self._notify("גררו להזזה, פינות לשינוי גודל, קצוות כתומים לחיתוך")
 
     def _open_android_image_uri(self, uri: Any) -> None:
         display = self._uri_display_name(uri)
@@ -3071,7 +3499,7 @@ class SamsungNotesCompanionApp(App):
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        popup = Popup(title="Import image", content=body, size_hint=(0.94, 0.94))
+        popup = Popup(title="", content=body, size_hint=(0.94, 0.94))
 
         def _load(_instance: Button) -> None:
             if chooser.selection:
@@ -3091,6 +3519,7 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(chooser)
         body.add_widget(buttons)
         popup.open()
+        apply_hebrew_ui(popup, "ייבוא תמונה")
 
     def reset_view(self, *_args: Any) -> None:
         self._reset_view()
@@ -3107,14 +3536,14 @@ class SamsungNotesCompanionApp(App):
         picker = InkColorPicker(self.current_color)
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        popup = Popup(title=ui_text("בחירת צבע"), content=body, size_hint=(0.84, 0.64))
+        popup = Popup(title="", content=body, size_hint=(0.84, 0.64))
 
         def _ok(_btn: Button) -> None:
             self.set_custom_color(picker.rgb())
             popup.dismiss()
 
-        ok_btn = Button(text=ui_text("אישור"))
-        cancel_btn = Button(text=ui_text("ביטול"))
+        ok_btn = Button(text="אישור")
+        cancel_btn = Button(text="ביטול")
         ok_btn.bind(on_release=_ok)
         cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
         buttons.add_widget(ok_btn)
@@ -3122,6 +3551,7 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(picker)
         body.add_widget(buttons)
         popup.open()
+        apply_hebrew_ui(popup, "בחירת צבע")
 
     def open_pdf(self, *_args: Any) -> None:
         if is_android():
@@ -3139,11 +3569,9 @@ class SamsungNotesCompanionApp(App):
             return
 
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        popup = Popup(title="Save As", content=body, size_hint=(0.75, 0.7))
-        set_latin_font(popup)
+        popup = Popup(title="", content=body, size_hint=(0.75, 0.7))
         for ext, mime, title in SAVE_TYPES:
             button = Button(text=title, size_hint_y=None, height=dp(44))
-            set_latin_font(button)
 
             def _pick(_btn: Button, extension: str = ext, media: str = mime) -> None:
                 popup.dismiss()
@@ -3152,6 +3580,35 @@ class SamsungNotesCompanionApp(App):
             button.bind(on_release=_pick)
             body.add_widget(button)
         popup.open()
+        apply_hebrew_ui(popup, "שמירה בשם")
+
+    def _history_canvas(self) -> SPenAnnotationCanvas:
+        if getattr(self, "_history_role", "pdf") == "notes":
+            return self.root_layout.notes_canvas
+        return self.root_layout.pdf_canvas
+
+    def undo(self, *_args: Any) -> None:
+        canvas = self._history_canvas()
+        if canvas.undo():
+            return
+        other = self.root_layout.notes_canvas if canvas is self.root_layout.pdf_canvas else self.root_layout.pdf_canvas
+        other.undo()
+
+    def redo(self, *_args: Any) -> None:
+        canvas = self._history_canvas()
+        if canvas.redo():
+            return
+        other = self.root_layout.notes_canvas if canvas is self.root_layout.pdf_canvas else self.root_layout.pdf_canvas
+        other.redo()
+
+    def select_lasso(self, *_args: Any) -> None:
+        if self.tool_mode == "lasso":
+            self.clear_tool()
+            return
+        self.tool_mode = "lasso"
+        self.is_eraser = False
+        self.is_dashed = False
+        self.root_layout.refresh_tool_styles()
 
     def clear_tool(self, *_args: Any) -> None:
         self.tool_mode = "none"
