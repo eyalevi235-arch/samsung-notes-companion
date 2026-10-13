@@ -29,6 +29,7 @@ from kivy.graphics import (
     PopMatrix,
     PushMatrix,
     Rectangle,
+    Rotate,
     Scale,
     StencilPop,
     StencilPush,
@@ -92,8 +93,38 @@ INK_COLORS: Sequence[Tuple[str, Rgba]] = (
     ("red", COLOR_RED),
     ("purple", COLOR_PURPLE),
 )
-SHAPE_TOOLS = frozenset({"line", "square", "rectangle", "circle", "triangle", "star"})
-CHROME_HEIGHT_DP = 164.0
+SHAPE_TOOLS = frozenset(
+    {
+        "line",
+        "square",
+        "rectangle",
+        "circle",
+        "ellipse",
+        "triangle",
+        "diamond",
+        "pentagon",
+        "hexagon",
+        "star",
+        "arrow",
+        "heart",
+    }
+)
+SHAPE_ORDER: Sequence[str] = (
+    "line",
+    "square",
+    "rectangle",
+    "circle",
+    "ellipse",
+    "triangle",
+    "diamond",
+    "pentagon",
+    "hexagon",
+    "star",
+    "arrow",
+    "heart",
+)
+CHROME_HEIGHT_DP = 124.0
+SHAPE_BAR_DP = 40.0
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
 
@@ -348,10 +379,27 @@ def _dist_point_seg2(
     return (px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2
 
 
+def _rotate_point(px: float, py: float, cx: float, cy: float, angle_deg: float) -> Point:
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    dx, dy = px - cx, py - cy
+    return (cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a)
+
+
+def _stamp_tex_coords(crop: Sequence[float]) -> List[float]:
+    """Map crop UVs so PIL-uploaded textures are not shown upside-down."""
+    u0, v0, u1, v1 = [float(v) for v in list(crop)[:4]]
+    return [u0, 1.0 - v0, u1, 1.0 - v0, u1, 1.0 - v1, u0, 1.0 - v1]
+
+
 def _image_rgb_on_white(source: Any) -> Any:
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     image = Image.open(source) if isinstance(source, (str, Path)) else source
+    try:
+        image = ImageOps.exif_transpose(image) or image
+    except Exception:
+        pass
     if image.mode == "RGB":
         return image
     rgba = image.convert("RGBA")
@@ -385,14 +433,60 @@ def shape_points(kind: str, start: Point, end: Point) -> List[Point]:
     cy = (bottom + top) / 2.0
     rx = max(1.0, (right - left) / 2.0)
     ry = max(1.0, (top - bottom) / 2.0)
-    if kind == "circle":
-        points = [
-            (cx + rx * math.cos(step), cy + ry * math.sin(step))
-            for step in (i * 2.0 * math.pi / 64.0 for i in range(65))
+    if kind in {"circle", "ellipse"}:
+        steps = 64 if kind == "circle" else 48
+        return [
+            (cx + rx * math.cos(i * 2.0 * math.pi / steps), cy + ry * math.sin(i * 2.0 * math.pi / steps))
+            for i in range(steps + 1)
         ]
-        return points
     if kind == "triangle":
         return [(cx, top), (left, bottom), (right, bottom), (cx, top)]
+    if kind == "diamond":
+        return [(cx, top), (right, cy), (cx, bottom), (left, cy), (cx, top)]
+    if kind == "pentagon":
+        points = [
+            (
+                cx + rx * math.cos(math.pi / 2.0 + i * 2.0 * math.pi / 5.0),
+                cy + ry * math.sin(math.pi / 2.0 + i * 2.0 * math.pi / 5.0),
+            )
+            for i in range(5)
+        ]
+        points.append(points[0])
+        return points
+    if kind == "hexagon":
+        points = [
+            (cx + rx * math.cos(i * math.pi / 3.0), cy + ry * math.sin(i * math.pi / 3.0))
+            for i in range(6)
+        ]
+        points.append(points[0])
+        return points
+    if kind == "arrow":
+        dx, dy = x1 - x0, y1 - y0
+        length = max(1.0, math.hypot(dx, dy))
+        ux, uy = dx / length, dy / length
+        px, py = -uy, ux
+        head = min(max(18.0, length * 0.22), length * 0.45)
+        wing = head * 0.55
+        return [
+            (x0, y0),
+            (x1, y1),
+            (x1 - ux * head + px * wing, y1 - uy * head + py * wing),
+            (x1, y1),
+            (x1 - ux * head - px * wing, y1 - uy * head - py * wing),
+        ]
+    if kind == "heart":
+        points = []
+        for index in range(49):
+            t = index * 2.0 * math.pi / 48.0
+            hx = 16.0 * math.sin(t) ** 3
+            hy = (
+                13.0 * math.cos(t)
+                - 5.0 * math.cos(2.0 * t)
+                - 2.0 * math.cos(3.0 * t)
+                - math.cos(4.0 * t)
+            )
+            points.append((cx + rx * hx / 16.0, cy + ry * hy / 16.0))
+        return points
     if kind == "star":
         outer = min(rx, ry)
         inner = outer * 0.42
@@ -594,10 +688,64 @@ class ToolIcon(ButtonBehavior, Widget):
                 Line(rectangle=(x + w * 0.08, y + h * 0.22, w * 0.84, h * 0.56), width=1.3)
             elif kind == "circle":
                 Line(circle=(cx, cy, min(w, h) * 0.34), width=1.3)
+            elif kind == "ellipse":
+                oval: List[float] = []
+                rx, ry = w * 0.42, h * 0.28
+                for index in range(25):
+                    angle = index * 2.0 * math.pi / 24.0
+                    oval.extend([cx + rx * math.cos(angle), cy + ry * math.sin(angle)])
+                Line(points=oval, width=1.3)
             elif kind == "triangle":
                 Line(
                     points=[cx, y + h * 0.82, x + w * 0.12, y + h * 0.16, x + w * 0.88, y + h * 0.16, cx, y + h * 0.82],
                     width=1.3,
+                )
+            elif kind == "diamond":
+                Line(points=[cx, y + h * 0.88, x + w * 0.92, cy, cx, y + h * 0.12, x + w * 0.08, cy, cx, y + h * 0.88], width=1.3)
+            elif kind == "pentagon":
+                pent: List[float] = []
+                for index in range(6):
+                    angle = math.pi / 2.0 + index * 2.0 * math.pi / 5.0
+                    pent.extend([cx + min(w, h) * 0.38 * math.cos(angle), cy + min(w, h) * 0.38 * math.sin(angle)])
+                Line(points=pent, width=1.2)
+            elif kind == "hexagon":
+                hexp: List[float] = []
+                for index in range(7):
+                    angle = index * math.pi / 3.0
+                    hexp.extend([cx + min(w, h) * 0.36 * math.cos(angle), cy + min(w, h) * 0.36 * math.sin(angle)])
+                Line(points=hexp, width=1.2)
+            elif kind == "arrow":
+                Line(points=[x + w * 0.08, y + h * 0.22, x + w * 0.92, y + h * 0.78], width=1.4)
+                Line(
+                    points=[
+                        x + w * 0.62,
+                        y + h * 0.82,
+                        x + w * 0.92,
+                        y + h * 0.78,
+                        x + w * 0.78,
+                        y + h * 0.48,
+                    ],
+                    width=1.3,
+                )
+            elif kind == "heart":
+                Line(
+                    points=[
+                        cx,
+                        y + h * 0.12,
+                        x + w * 0.08,
+                        y + h * 0.48,
+                        x + w * 0.18,
+                        y + h * 0.82,
+                        cx,
+                        y + h * 0.58,
+                        x + w * 0.82,
+                        y + h * 0.82,
+                        x + w * 0.92,
+                        y + h * 0.48,
+                        cx,
+                        y + h * 0.12,
+                    ],
+                    width=1.2,
                 )
             elif kind == "star":
                 outer = min(w, h) * 0.38
@@ -626,38 +774,128 @@ class ToolIcon(ButtonBehavior, Widget):
                     width=1.2,
                 )
             elif kind == "fit":
-                Line(rectangle=(x + w * 0.18, y + h * 0.18, w * 0.64, h * 0.64), width=1.2)
-                Line(points=[cx, y + h * 0.08, cx, y + h * 0.28], width=1.3)
-                Line(points=[cx, y + h * 0.72, cx, y + h * 0.92], width=1.3)
+                mx, my = x + w * 0.38, y + h * 0.58
+                radius = min(w, h) * 0.26
+                Line(circle=(mx, my, radius), width=1.3)
+                Line(
+                    points=[
+                        mx + radius * 0.62,
+                        my - radius * 0.62,
+                        x + w * 0.92,
+                        y + h * 0.08,
+                    ],
+                    width=1.5,
+                )
+                tex = self._caption_texture("100%", ink)
+                if tex is not None:
+                    tw, th = float(tex.size[0]), float(tex.size[1])
+                    scale = min(w * 0.72 / max(1.0, tw), h * 0.34 / max(1.0, th))
+                    Color(*ink)
+                    Rectangle(
+                        texture=tex,
+                        pos=(cx - tw * scale / 2.0, y + h * 0.02),
+                        size=(tw * scale, th * scale),
+                    )
             elif kind == "palette":
                 Line(circle=(cx, cy, min(w, h) * 0.34), width=1.3)
                 Line(circle=(cx, cy, min(w, h) * 0.16), width=1.2)
-            elif kind == "lasso":
+            elif kind == "shapes":
+                Line(rectangle=(x + w * 0.08, y + h * 0.12, w * 0.42, h * 0.42), width=1.2)
+                Line(circle=(x + w * 0.72, y + h * 0.32, min(w, h) * 0.16), width=1.2)
                 Line(
-                    points=[
-                        x + w * 0.18,
-                        y + h * 0.28,
-                        x + w * 0.12,
-                        y + h * 0.55,
-                        x + w * 0.38,
-                        y + h * 0.86,
-                        x + w * 0.78,
-                        y + h * 0.72,
-                        x + w * 0.86,
-                        y + h * 0.38,
-                        x + w * 0.58,
-                        y + h * 0.16,
-                        x + w * 0.18,
-                        y + h * 0.28,
-                    ],
+                    points=[cx, y + h * 0.92, x + w * 0.18, y + h * 0.52, x + w * 0.82, y + h * 0.52, cx, y + h * 0.92],
                     width=1.2,
                 )
+            elif kind == "lasso":
+                box_x, box_y, box_w, box_h = x + w * 0.04, y + h * 0.28, w * 0.62, h * 0.58
+                dash = max(3.0, box_w / 9.0)
+                for edge in (
+                    (box_x, box_y + box_h, box_x + box_w, box_y + box_h),
+                    (box_x + box_w, box_y + box_h, box_x + box_w, box_y),
+                    (box_x + box_w, box_y, box_x, box_y),
+                    (box_x, box_y, box_x, box_y + box_h),
+                ):
+                    x0, y0, x1, y1 = edge
+                    length = max(1.0, math.hypot(x1 - x0, y1 - y0))
+                    ux, uy = (x1 - x0) / length, (y1 - y0) / length
+                    t = 0.0
+                    drawing = True
+                    while t < length:
+                        nxt = min(length, t + dash)
+                        if drawing:
+                            Line(
+                                points=[x0 + ux * t, y0 + uy * t, x0 + ux * nxt, y0 + uy * nxt],
+                                width=1.15,
+                            )
+                        drawing = not drawing
+                        t = nxt
+                hx, hy = x + w * 0.78, y + h * 0.22
+                Line(circle=(hx, hy + h * 0.16, min(w, h) * 0.07), width=1.15)
+                Line(rectangle=(hx - w * 0.08, hy, w * 0.16, h * 0.18), width=1.15)
+                Line(points=[hx - w * 0.08, hy + h * 0.08, hx - w * 0.18, hy + h * 0.18], width=1.1)
             elif kind == "undo":
-                Line(circle=(cx + w * 0.06, cy, min(w, h) * 0.28), width=1.3)
-                Line(points=[x + w * 0.08, cy + h * 0.12, x + w * 0.08, y + h * 0.78, x + w * 0.38, y + h * 0.58], width=1.3)
+                self._horseshoe(cx, cy, min(w, h) * 0.34, True)
             elif kind == "redo":
-                Line(circle=(cx - w * 0.06, cy, min(w, h) * 0.28), width=1.3)
-                Line(points=[x + w * 0.92, cy + h * 0.12, x + w * 0.92, y + h * 0.78, x + w * 0.62, y + h * 0.58], width=1.3)
+                self._horseshoe(cx, cy, min(w, h) * 0.34, False)
+            elif kind == "copy":
+                Line(rectangle=(x + w * 0.08, y + h * 0.22, w * 0.58, h * 0.62), width=1.2)
+                Line(rectangle=(x + w * 0.32, y + h * 0.08, w * 0.58, h * 0.62), width=1.2)
+            elif kind == "paste":
+                Line(rectangle=(x + w * 0.18, y + h * 0.08, w * 0.64, h * 0.72), width=1.2)
+                Line(rectangle=(x + w * 0.32, y + h * 0.68, w * 0.36, h * 0.22), width=1.2)
+
+    def _horseshoe(self, cx: float, cy: float, radius: float, undo: bool) -> None:
+        points: List[float] = []
+        start = math.radians(40.0 if undo else 140.0)
+        sweep = math.radians(230.0)
+        direction = 1.0 if undo else -1.0
+        steps = 18
+        for index in range(steps + 1):
+            angle = start + direction * sweep * index / steps
+            points.extend([cx + radius * math.cos(angle), cy + radius * math.sin(angle)])
+        Line(points=points, width=1.45)
+        end_angle = start + direction * sweep
+        ex = cx + radius * math.cos(end_angle)
+        ey = cy + radius * math.sin(end_angle)
+        tangent = end_angle + (math.pi / 2.0 if undo else -math.pi / 2.0)
+        head = radius * 0.55
+        wing = radius * 0.32
+        tx, ty = math.cos(tangent), math.sin(tangent)
+        px, py = -ty, tx
+        Triangle(
+            points=[
+                ex + tx * head * 0.15,
+                ey + ty * head * 0.15,
+                ex - tx * head + px * wing,
+                ey - ty * head + py * wing,
+                ex - tx * head - px * wing,
+                ey - ty * head - py * wing,
+            ]
+        )
+
+    def _caption_texture(self, text: str, color: Sequence[float]) -> Any:
+        key = (text, tuple(color), int(self.width), int(self.height))
+        cached = getattr(self, "_caption_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        try:
+            from kivy.core.text import Label as CoreLabel
+
+            kwargs: Dict[str, Any] = {
+                "text": text,
+                "font_size": 11,
+                "color": tuple(color),
+                "bold": True,
+            }
+            if _LATIN_FONT_READY:
+                kwargs["font_name"] = "LatinFont"
+            label = CoreLabel(**kwargs)
+            label.refresh()
+            texture = label.texture
+        except Exception:
+            texture = None
+        self._caption_cache = (key, texture)
+        return texture
 
 
 class ColorDot(ButtonBehavior, Widget):
@@ -1174,15 +1412,21 @@ class SPenAnnotationCanvas(Widget):
             texture = self._stamp_texture(path) if path else None
             if texture is None:
                 return
-            crop = record.get("crop") or [0.0, 0.0, 1.0, 1.0]
-            u0, v0, u1, v1 = [float(v) for v in crop[:4]]
+            x, y, width, height = [float(v) for v in rect[:4]]
+            angle = float(record.get("angle") or 0.0)
             Color(1, 1, 1, 1)
+            PushMatrix()
+            Translate(x + width / 2.0, y + height / 2.0)
+            if abs(angle) > 0.01:
+                Rotate(angle=angle, axis=(0, 0, 1))
+            Translate(-width / 2.0, -height / 2.0)
             Rectangle(
                 texture=texture,
-                pos=(float(rect[0]), float(rect[1])),
-                size=(float(rect[2]), float(rect[3])),
-                tex_coords=[u0, v0, u1, v0, u1, v1, u0, v1],
+                pos=(0.0, 0.0),
+                size=(width, height),
+                tex_coords=_stamp_tex_coords(record.get("crop") or [0.0, 0.0, 1.0, 1.0]),
             )
+            PopMatrix()
             return
         color = tuple(record.get("color", COLOR_BLACK))
         width = float(record.get("width", self.ink_width))
@@ -1421,22 +1665,41 @@ class SPenAnnotationCanvas(Widget):
         doc = self.to_doc(touch.x, touch.y)
         if tool_mode == "lasso":
             handle = self._hit_handle(doc)
+            if handle in {"p0", "p1"}:
+                self.push_history()
+                touch.ud["mode"] = "endpoint"
+                touch.ud["handle"] = handle
+                return True
+            if handle == "rot":
+                self.push_history()
+                box = self._selection_bbox()
+                cx = box[0] + box[2] / 2.0 if box else doc[0]
+                cy = box[1] + box[3] / 2.0 if box else doc[1]
+                touch.ud["mode"] = "rotate"
+                touch.ud["rot_center"] = (cx, cy)
+                touch.ud["rot_start"] = math.degrees(math.atan2(doc[1] - cy, doc[0] - cx))
+                self._rotate_origin = self._snapshot_selected()
+                return True
             if handle in {"tl", "tr", "bl", "br"}:
                 self.push_history()
                 touch.ud["mode"] = "resize"
                 touch.ud["handle"] = handle
-                index = self.selected_ids[0]
-                self._resize_origin = list(self.strokes[index].get("rect") or [0, 0, 1, 1])
+                self._resize_origin = self._snapshot_selected()
                 return True
             if handle in {"l", "r", "t", "b"}:
                 self.push_history()
-                touch.ud["mode"] = "crop"
                 touch.ud["handle"] = handle
-                rec = self.strokes[self.selected_ids[0]]
-                self._crop_origin = (
-                    [float(v) for v in (rec.get("rect") or [0, 0, 1, 1])[:4]],
-                    [float(v) for v in (rec.get("crop") or [0.0, 0.0, 1.0, 1.0])[:4]],
-                )
+                self._resize_origin = self._snapshot_selected()
+                if self._single_image() is not None:
+                    rec = self._single_image()
+                    touch.ud["mode"] = "crop"
+                    self._crop_origin = (
+                        [float(v) for v in (rec.get("rect") or [0, 0, 1, 1])[:4]],
+                        [float(v) for v in (rec.get("crop") or [0.0, 0.0, 1.0, 1.0])[:4]],
+                        float(rec.get("angle") or 0.0),
+                    )
+                else:
+                    touch.ud["mode"] = "resize"
                 return True
             box = self._selection_bbox()
             if box is not None:
@@ -1519,11 +1782,19 @@ class SPenAnnotationCanvas(Widget):
             self.redraw_all()
             return True
         if touch.ud.get("mode") == "resize":
-            self._resize_image(str(touch.ud.get("handle")), self.to_doc(touch.x, touch.y))
+            self._resize_selected(str(touch.ud.get("handle")), self.to_doc(touch.x, touch.y))
             self.redraw_all()
             return True
         if touch.ud.get("mode") == "crop":
             self._crop_image(str(touch.ud.get("handle")), self.to_doc(touch.x, touch.y))
+            self.redraw_all()
+            return True
+        if touch.ud.get("mode") == "rotate":
+            self._rotate_selected(self.to_doc(touch.x, touch.y), touch.ud)
+            self.redraw_all()
+            return True
+        if touch.ud.get("mode") == "endpoint":
+            self._move_line_endpoint(str(touch.ud.get("handle")), self.to_doc(touch.x, touch.y))
             self.redraw_all()
             return True
         if touch.ud.get("erasing"):
@@ -1564,7 +1835,7 @@ class SPenAnnotationCanvas(Widget):
                 app._fingers = dict(app._pointers)
                 self._begin_pinch(app)
             return True
-        if touch.ud.get("mode") in {"pan", "pinch", "move", "resize", "crop"}:
+        if touch.ud.get("mode") in {"pan", "pinch", "move", "resize", "crop", "rotate", "endpoint"}:
             return True
         if touch.ud.get("mode") == "lasso":
             poly = list(self.current_stroke)
@@ -1583,17 +1854,19 @@ class SPenAnnotationCanvas(Widget):
             return True
         if len(self.current_stroke) >= 2:
             self.push_history()
-            self.strokes.append(
-                {
-                    "points": [list(point) for point in self.current_stroke],
-                    "color": list(self._live_color),
-                    "width": self._live_width,
-                    "dashed": self._live_dashed,
-                    "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
-                    "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
-                    "eraser": False,
-                }
-            )
+            record: StrokeRecord = {
+                "points": [list(point) for point in self.current_stroke],
+                "color": list(self._live_color),
+                "width": self._live_width,
+                "dashed": self._live_dashed,
+                "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
+                "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
+                "eraser": False,
+            }
+            shape = touch.ud.get("shape")
+            if shape:
+                record["kind"] = str(shape)
+            self.strokes.append(record)
         self.current_stroke = []
         self.redraw_all()
         return True
@@ -1633,15 +1906,50 @@ class SPenAnnotationCanvas(Widget):
         self.redraw_all()
         return True
 
-    def _record_bbox(self, record: StrokeRecord) -> Optional[Tuple[float, float, float, float]]:
+    def _is_line(self, record: StrokeRecord) -> bool:
+        if record.get("kind") == "image":
+            return False
+        if str(record.get("kind") or "") == "line":
+            return True
+        points = record.get("points") or []
+        return len(points) == 2
+
+    def _single_selected(self) -> Optional[StrokeRecord]:
+        if len(self.selected_ids) != 1:
+            return None
+        index = self.selected_ids[0]
+        if not (0 <= index < len(self.strokes)):
+            return None
+        return self.strokes[index]
+
+    def _single_image(self) -> Optional[StrokeRecord]:
+        record = self._single_selected()
+        if record is None or record.get("kind") != "image":
+            return None
+        return record
+
+    def _record_corners(self, record: StrokeRecord) -> List[Point]:
         if record.get("kind") == "image":
             rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
-            return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+            x, y, width, height = [float(v) for v in rect[:4]]
+            angle = float(record.get("angle") or 0.0)
+            cx, cy = x + width / 2.0, y + height / 2.0
+            local = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
+            if abs(angle) < 0.01:
+                return local
+            return [_rotate_point(px, py, cx, cy, angle) for px, py in local]
         points = record.get("points") or []
-        if len(points) < 2:
+        return [(float(p[0]), float(p[1])) for p in points]
+
+    def _record_bbox(self, record: StrokeRecord) -> Optional[Tuple[float, float, float, float]]:
+        corners = self._record_corners(record)
+        if len(corners) < 2:
+            if record.get("kind") == "image":
+                rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
+                return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
             return None
-        xs = [float(p[0]) for p in points]
-        ys = [float(p[1]) for p in points]
+        xs = [p[0] for p in corners]
+        ys = [p[1] for p in corners]
         left, bottom = min(xs), min(ys)
         return (left, bottom, max(xs) - left, max(ys) - bottom)
 
@@ -1666,7 +1974,30 @@ class SPenAnnotationCanvas(Widget):
 
     def _handle_centers(self, box: Tuple[float, float, float, float]) -> Dict[str, Tuple[float, float]]:
         x, y, w, h = box
-        return {
+        image = self._single_image()
+        if image is not None:
+            rect = [float(v) for v in (image.get("rect") or [0, 0, 1, 1])[:4]]
+            angle = float(image.get("angle") or 0.0)
+            cx, cy = rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
+            local = {
+                "bl": (rect[0], rect[1]),
+                "br": (rect[0] + rect[2], rect[1]),
+                "tl": (rect[0], rect[1] + rect[3]),
+                "tr": (rect[0] + rect[2], rect[1] + rect[3]),
+                "l": (rect[0], rect[1] + rect[3] / 2.0),
+                "r": (rect[0] + rect[2], rect[1] + rect[3] / 2.0),
+                "b": (rect[0] + rect[2] / 2.0, rect[1]),
+                "t": (rect[0] + rect[2] / 2.0, rect[1] + rect[3]),
+            }
+            world = {
+                name: _rotate_point(px, py, cx, cy, angle) for name, (px, py) in local.items()
+            }
+            top = world["t"]
+            upx, upy = _rotate_point(cx, cy + rect[3] / 2.0 + self._handle_size() * 1.8, cx, cy, angle)
+            world["rot"] = (upx, upy)
+            world["_top"] = top
+            return world
+        centers = {
             "bl": (x, y),
             "br": (x + w, y),
             "tl": (x, y + h),
@@ -1676,20 +2007,28 @@ class SPenAnnotationCanvas(Widget):
             "b": (x + w / 2.0, y),
             "t": (x + w / 2.0, y + h),
         }
+        centers["rot"] = (x + w / 2.0, y + h + self._handle_size() * 1.8)
+        record = self._single_selected()
+        if record is not None and self._is_line(record):
+            points = record.get("points") or []
+            if len(points) >= 2:
+                centers["p0"] = (float(points[0][0]), float(points[0][1]))
+                centers["p1"] = (float(points[-1][0]), float(points[-1][1]))
+        return centers
 
     def _hit_handle(self, doc: Point) -> Optional[str]:
-        if len(self.selected_ids) != 1:
+        if not self.selected_ids:
             return None
-        index = self.selected_ids[0]
-        if not (0 <= index < len(self.strokes)):
-            return None
-        if self.strokes[index].get("kind") != "image":
-            return None
-        box = self._record_bbox(self.strokes[index])
+        box = self._selection_bbox()
         if box is None:
             return None
         size = self._handle_size()
-        for name, center in self._handle_centers(box).items():
+        centers = self._handle_centers(box)
+        priority = ("p0", "p1", "rot", "tl", "tr", "bl", "br", "l", "r", "t", "b")
+        for name in priority:
+            center = centers.get(name)
+            if center is None:
+                continue
             if abs(doc[0] - center[0]) <= size and abs(doc[1] - center[1]) <= size:
                 return name
         return None
@@ -1740,96 +2079,214 @@ class SPenAnnotationCanvas(Widget):
         x, y = doc
         pad = self._handle_size()
         for index in range(len(self.strokes) - 1, -1, -1):
-            box = self._record_bbox(self.strokes[index])
+            record = self.strokes[index]
+            if record.get("kind") == "image":
+                rect = [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]]
+                angle = float(record.get("angle") or 0.0)
+                cx, cy = rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
+                lx, ly = _rotate_point(x, y, cx, cy, -angle)
+                if (
+                    rect[0] - pad <= lx <= rect[0] + rect[2] + pad
+                    and rect[1] - pad <= ly <= rect[1] + rect[3] + pad
+                ):
+                    return index
+                continue
+            box = self._record_bbox(record)
             if box is None:
                 continue
             if box[0] - pad <= x <= box[0] + box[2] + pad and box[1] - pad <= y <= box[1] + box[3] + pad:
                 return index
         return None
 
+    def _translate_record(self, record: StrokeRecord, dx: float, dy: float) -> None:
+        if record.get("kind") == "image":
+            rect = [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]]
+            rect[0] += dx
+            rect[1] += dy
+            record["rect"] = rect
+            record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+            return
+        points = record.get("points") or []
+        record["points"] = [[float(p[0]) + dx, float(p[1]) + dy] for p in points]
+
     def _translate_selected(self, dx: float, dy: float) -> None:
+        for index in self.selected_ids:
+            if 0 <= index < len(self.strokes):
+                self._translate_record(self.strokes[index], dx, dy)
+
+    def _snapshot_selected(self) -> Dict[str, Any]:
+        items = []
         for index in self.selected_ids:
             if not (0 <= index < len(self.strokes)):
                 continue
             record = self.strokes[index]
-            if record.get("kind") == "image":
-                rect = [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]]
-                rect[0] += dx
-                rect[1] += dy
-                record["rect"] = rect
-                record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
-                continue
-            points = record.get("points") or []
-            record["points"] = [[float(p[0]) + dx, float(p[1]) + dy] for p in points]
+            items.append(
+                {
+                    "index": index,
+                    "rect": [float(v) for v in (record.get("rect") or [0, 0, 0, 0])[:4]],
+                    "crop": [float(v) for v in (record.get("crop") or [0.0, 0.0, 1.0, 1.0])[:4]],
+                    "points": [list(p) for p in (record.get("points") or [])],
+                    "angle": float(record.get("angle") or 0.0),
+                    "kind": record.get("kind"),
+                }
+            )
+        box = self._selection_bbox() or (0.0, 0.0, 1.0, 1.0)
+        return {"box": list(box), "items": items}
 
-    def _resize_image(self, handle: str, doc: Point) -> None:
-        if len(self.selected_ids) != 1:
-            return
-        record = self.strokes[self.selected_ids[0]]
-        if record.get("kind") != "image":
-            return
-        ox, oy, ow, oh = [float(v) for v in getattr(self, "_resize_origin", record.get("rect") or [0, 0, 1, 1])[:4]]
-        min_size = MIN_SCALE * 20.0
+    def _scaled_box(
+        self, handle: str, origin: Sequence[float], doc: Point, keep_aspect: bool
+    ) -> List[float]:
+        ox, oy, ow, oh = [float(v) for v in origin[:4]]
+        min_size = 12.0
         nx, ny, nw, nh = ox, oy, ow, oh
+        local = doc
         if "l" in handle:
-            nx = min(doc[0], ox + ow - min_size)
+            nx = min(local[0], ox + ow - min_size)
             nw = ox + ow - nx
         if "r" in handle:
-            nw = max(min_size, doc[0] - ox)
+            nw = max(min_size, local[0] - ox)
         if "b" in handle:
-            ny = min(doc[1], oy + oh - min_size)
+            ny = min(local[1], oy + oh - min_size)
             nh = oy + oh - ny
         if "t" in handle:
-            nh = max(min_size, doc[1] - oy)
-        if handle in {"tl", "tr", "bl", "br"} and oh > 1:
+            nh = max(min_size, local[1] - oy)
+        if keep_aspect and oh > 1:
             ratio = ow / oh
             if handle in {"tr", "br"}:
                 nh = max(min_size, nw / ratio)
                 if handle == "tr":
                     ny = oy + oh - nh
-            else:
+            elif handle in {"tl", "bl"}:
                 nw = max(min_size, nh * ratio)
                 if handle == "tl":
                     nx = ox + ow - nw
                     ny = oy + oh - nh
                 elif handle == "bl":
                     nx = ox + ow - nw
-        record["rect"] = [nx, ny, nw, nh]
-        record["points"] = [[nx, ny], [nx + nw, ny + nh]]
+        return [nx, ny, nw, nh]
+
+    def _resize_selected(self, handle: str, doc: Point) -> None:
+        snap = getattr(self, "_resize_origin", None)
+        if not snap:
+            return
+        image = self._single_image()
+        if image is not None and len(snap["items"]) == 1:
+            item = snap["items"][0]
+            ox, oy, ow, oh = item["rect"]
+            cx, cy = ox + ow / 2.0, oy + oh / 2.0
+            angle = item["angle"]
+            local = _rotate_point(doc[0], doc[1], cx, cy, -angle)
+            nx, ny, nw, nh = self._scaled_box(handle, item["rect"], local, handle in {"tl", "tr", "bl", "br"})
+            image["rect"] = [nx, ny, nw, nh]
+            image["points"] = [[nx, ny], [nx + nw, ny + nh]]
+            return
+        ox, oy, ow, oh = [float(v) for v in snap["box"][:4]]
+        nx, ny, nw, nh = self._scaled_box(handle, snap["box"], doc, handle in {"tl", "tr", "bl", "br"})
+        sx = nw / max(ow, 1e-3)
+        sy = nh / max(oh, 1e-3)
+        for item in snap["items"]:
+            record = self.strokes[item["index"]]
+            if item.get("kind") == "image":
+                rx, ry, rw, rh = item["rect"]
+                record["rect"] = [nx + (rx - ox) * sx, ny + (ry - oy) * sy, rw * sx, rh * sy]
+                rect = record["rect"]
+                record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+                continue
+            record["points"] = [
+                [nx + (float(p[0]) - ox) * sx, ny + (float(p[1]) - oy) * sy] for p in item["points"]
+            ]
 
     def _crop_image(self, handle: str, doc: Point) -> None:
-        if len(self.selected_ids) != 1:
-            return
-        record = self.strokes[self.selected_ids[0]]
-        if record.get("kind") != "image":
+        record = self._single_image()
+        if record is None:
             return
         origin = getattr(self, "_crop_origin", None)
         if origin is None:
             origin = (
                 list(record.get("rect") or [0, 0, 1, 1]),
                 list(record.get("crop") or [0.0, 0.0, 1.0, 1.0]),
+                float(record.get("angle") or 0.0),
             )
         x, y, w, h = [float(v) for v in origin[0][:4]]
         u0, v0, u1, v1 = [float(v) for v in origin[1][:4]]
+        angle = float(origin[2]) if len(origin) > 2 else float(record.get("angle") or 0.0)
+        cx, cy = x + w / 2.0, y + h / 2.0
+        local = _rotate_point(doc[0], doc[1], cx, cy, -angle)
         min_frac = 0.08
         if handle == "l":
-            frac = max(0.0, min(1.0 - min_frac, (doc[0] - x) / max(w, 1.0)))
+            frac = max(0.0, min(1.0 - min_frac, (local[0] - x) / max(w, 1.0)))
             record["rect"] = [x + frac * w, y, w * (1.0 - frac), h]
             record["crop"] = [u0 + frac * (u1 - u0), v0, u1, v1]
         elif handle == "r":
-            frac = max(min_frac, min(1.0, (doc[0] - x) / max(w, 1.0)))
+            frac = max(min_frac, min(1.0, (local[0] - x) / max(w, 1.0)))
             record["rect"] = [x, y, w * frac, h]
             record["crop"] = [u0, v0, u0 + frac * (u1 - u0), v1]
         elif handle == "b":
-            frac = max(0.0, min(1.0 - min_frac, (doc[1] - y) / max(h, 1.0)))
+            frac = max(0.0, min(1.0 - min_frac, (local[1] - y) / max(h, 1.0)))
             record["rect"] = [x, y + frac * h, w, h * (1.0 - frac)]
             record["crop"] = [u0, v0 + frac * (v1 - v0), u1, v1]
         elif handle == "t":
-            frac = max(min_frac, min(1.0, (doc[1] - y) / max(h, 1.0)))
+            frac = max(min_frac, min(1.0, (local[1] - y) / max(h, 1.0)))
             record["rect"] = [x, y, w, h * frac]
             record["crop"] = [u0, v0, u1, v0 + frac * (v1 - v0)]
         rect = record["rect"]
         record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+
+    def _rotate_selected(self, doc: Point, ud: Dict[str, Any]) -> None:
+        snap = getattr(self, "_rotate_origin", None)
+        if not snap:
+            return
+        cx, cy = ud.get("rot_center", (doc[0], doc[1]))
+        start = float(ud.get("rot_start", 0.0))
+        now = math.degrees(math.atan2(doc[1] - cy, doc[0] - cx))
+        delta = now - start
+        for item in snap["items"]:
+            record = self.strokes[item["index"]]
+            if item.get("kind") == "image":
+                rx, ry, rw, rh = item["rect"]
+                icx, icy = rx + rw / 2.0, ry + rh / 2.0
+                ncx, ncy = _rotate_point(icx, icy, cx, cy, delta)
+                record["rect"] = [ncx - rw / 2.0, ncy - rh / 2.0, rw, rh]
+                record["angle"] = item["angle"] + delta
+                rect = record["rect"]
+                record["points"] = [[rect[0], rect[1]], [rect[0] + rect[2], rect[1] + rect[3]]]
+                continue
+            record["points"] = [
+                list(_rotate_point(float(p[0]), float(p[1]), cx, cy, delta)) for p in item["points"]
+            ]
+
+    def _move_line_endpoint(self, handle: str, doc: Point) -> None:
+        record = self._single_selected()
+        if record is None or not self._is_line(record):
+            return
+        points = [list(p) for p in (record.get("points") or [])]
+        if len(points) < 2:
+            return
+        if handle == "p0":
+            points[0] = [doc[0], doc[1]]
+        else:
+            points[-1] = [doc[0], doc[1]]
+        record["points"] = points
+
+    def copy_selected(self) -> List[StrokeRecord]:
+        payload = []
+        for index in self.selected_ids:
+            if 0 <= index < len(self.strokes):
+                payload.append(json.loads(json.dumps(self.strokes[index])))
+        return payload
+
+    def paste_records(self, records: Sequence[StrokeRecord], dx: float = 36.0, dy: float = -36.0) -> None:
+        if not records:
+            return
+        self.push_history()
+        new_ids: List[int] = []
+        for record in records:
+            clone = json.loads(json.dumps(record))
+            self._translate_record(clone, dx, dy)
+            self.strokes.append(clone)
+            new_ids.append(len(self.strokes) - 1)
+        self.selected_ids = new_ids
+        self.redraw_all()
 
     def _draw_selection(self) -> None:
         if str(getattr(App.get_running_app(), "tool_mode", "")) != "lasso":
@@ -1841,21 +2298,30 @@ class SPenAnnotationCanvas(Widget):
         Color(0.15, 0.45, 0.95, 0.9)
         Line(rectangle=(x, y, w, h), width=1.1)
         size = self._handle_size()
-        if len(self.selected_ids) == 1 and 0 <= self.selected_ids[0] < len(self.strokes):
-            record = self.strokes[self.selected_ids[0]]
-            if record.get("kind") == "image":
-                handles = self._handle_centers(box)
-                for name, center in handles.items():
-                    hx, hy = center
-                    if name in {"tl", "tr", "bl", "br"}:
-                        Color(0.12, 0.46, 0.95, 1)
-                        Rectangle(pos=(hx - size / 2.0, hy - size / 2.0), size=(size, size))
-                    else:
-                        Color(0.95, 0.55, 0.12, 1)
-                        Line(
-                            rectangle=(hx - size / 2.5, hy - size / 2.5, size * 0.8, size * 0.8),
-                            width=1.2,
-                        )
+        handles = self._handle_centers(box)
+        for name, center in handles.items():
+            if name.startswith("_"):
+                continue
+            hx, hy = center
+            if name in {"p0", "p1"}:
+                Color(0.18, 0.72, 0.32, 1)
+                Ellipse(pos=(hx - size / 2.0, hy - size / 2.0), size=(size, size))
+            elif name == "rot":
+                top = handles.get("t") or handles.get("_top")
+                if top is not None:
+                    Color(0.12, 0.46, 0.95, 0.95)
+                    Line(points=[top[0], top[1], hx, hy], width=1.1)
+                Color(0.45, 0.22, 0.86, 1)
+                Ellipse(pos=(hx - size / 2.0, hy - size / 2.0), size=(size, size))
+            elif name in {"tl", "tr", "bl", "br"}:
+                Color(0.12, 0.46, 0.95, 1)
+                Rectangle(pos=(hx - size / 2.0, hy - size / 2.0), size=(size, size))
+            else:
+                Color(0.95, 0.55, 0.12, 1)
+                Line(
+                    rectangle=(hx - size / 2.5, hy - size / 2.5, size * 0.8, size * 0.8),
+                    width=1.2,
+                )
 
 
 class RootLayout(FloatLayout):
@@ -1885,9 +2351,14 @@ class RootLayout(FloatLayout):
             pos_hint={"x": 0, "top": 1},
             spacing=0,
         )
+        self._shapes_open = False
         self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
-        self.chrome.add_widget(self._build_shape_bar())
+        self.shape_bar = self._build_shape_bar()
+        self.shape_bar.height = 0
+        self.shape_bar.opacity = 0
+        self.shape_bar.disabled = True
+        self.chrome.add_widget(self.shape_bar)
         self.chrome.add_widget(self._build_slider_bar())
         self.restore_btn = ToolIcon(
             "restore",
@@ -1994,6 +2465,9 @@ class RootLayout(FloatLayout):
             ("dashed", "dashed", app.toggle_dashed),
             ("eraser", "eraser", app.enable_eraser),
             ("lasso", "lasso", app.select_lasso),
+            ("copy", "copy", app.copy_selection),
+            ("paste", "paste", app.paste_selection),
+            ("shapes", "shapes", app.toggle_shape_menu),
         )
         for key, kind, handler in actions:
             button = ToolIcon(kind, on_dark=True)
@@ -2032,8 +2506,8 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._shape_bg, "pos", bar.pos),
             size=lambda *_args: setattr(self._shape_bg, "size", bar.size),
         )
-        for kind in ("line", "square", "rectangle", "circle", "triangle", "star"):
-            button = ToolIcon(kind, on_dark=True, size=(dp(36), dp(32)))
+        for kind in SHAPE_ORDER:
+            button = ToolIcon(kind, on_dark=True, size=(dp(32), dp(32)))
             button.bind(on_press=lambda _btn, name=kind: app.select_shape(name))
             bar.add_widget(button)
             self.tool_buttons[kind] = button
@@ -2073,7 +2547,25 @@ class RootLayout(FloatLayout):
         bar.add_widget(Widget())
         return bar
 
+    def _chrome_height(self) -> float:
+        extra = dp(SHAPE_BAR_DP) if self._shapes_open else 0.0
+        return dp(CHROME_HEIGHT_DP) + extra
+
+    def set_shapes_open(self, open_menu: bool) -> None:
+        self._shapes_open = bool(open_menu)
+        self.shape_bar.height = dp(SHAPE_BAR_DP) if self._shapes_open else 0
+        self.shape_bar.opacity = 1 if self._shapes_open else 0
+        self.shape_bar.disabled = not self._shapes_open
+        if self.toolbar_visible:
+            self.chrome.height = self._chrome_height()
+            self._fit_workspace()
+        self.refresh_tool_styles()
+
+    def toggle_shape_menu(self, *_args: Any) -> None:
+        self.set_shapes_open(not self._shapes_open)
+
     def hide_toolbar(self, *_args: Any) -> None:
+        self.set_shapes_open(False)
         self.toolbar_visible = False
         self.chrome.opacity = 0
         self.chrome.disabled = True
@@ -2087,7 +2579,7 @@ class RootLayout(FloatLayout):
         self.toolbar_visible = True
         self.chrome.opacity = 1
         self.chrome.disabled = False
-        self.chrome.height = dp(CHROME_HEIGHT_DP)
+        self.chrome.height = self._chrome_height()
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
         self._fit_workspace()
@@ -2103,11 +2595,12 @@ class RootLayout(FloatLayout):
             "dashed": pen_on and bool(app.is_dashed),
             "eraser": app.tool_mode == "eraser",
             "lasso": app.tool_mode == "lasso",
+            "shapes": app.tool_mode in SHAPE_TOOLS or self._shapes_open,
         }
         for shape in SHAPE_TOOLS:
             mapping[shape] = app.tool_mode == shape
         for key, button in self.tool_buttons.items():
-            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette", "undo", "redo"}:
+            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette", "undo", "redo", "copy", "paste"}:
                 continue
             if isinstance(button, ToolIcon):
                 button.selected = mapping.get(key, False)
@@ -2217,6 +2710,7 @@ class SamsungNotesCompanionApp(App):
         self._pending_save: Optional[Tuple[str, str]] = None
         self._stylus_listener: Any = None
         self._history_role: str = "pdf"
+        self._clipboard: List[StrokeRecord] = []
         self.document_title = "כותרת"
         self.root_layout = RootLayout()
         Window.bind(on_key_down=self._on_key_down, on_key_up=self._on_key_up)
@@ -2366,7 +2860,17 @@ class SamsungNotesCompanionApp(App):
 
     def _on_key_down(self, *_args: Any, **kwargs: Any) -> bool:
         key = _args[1] if len(_args) > 1 else None
+        modifiers = _args[4] if len(_args) > 4 else []
         code = key[0] if isinstance(key, (tuple, list)) else key
+        name = key[1] if isinstance(key, (tuple, list)) and len(key) > 1 else ""
+        mods = {str(item).lower() for item in (modifiers or [])}
+        if "ctrl" in mods or "meta" in mods:
+            if name in {"c", "C"} or str(getattr(_args[3] if len(_args) > 3 else "", "")).lower() == "c":
+                self.copy_selection()
+                return True
+            if name in {"v", "V"} or str(getattr(_args[3] if len(_args) > 3 else "", "")).lower() == "v":
+                self.paste_selection()
+                return True
         try:
             if int(code) in SPEN_KEYCODES:
                 self.spen_button_held = True
@@ -3052,15 +3556,20 @@ class SamsungNotesCompanionApp(App):
                     top = int(max(0, min(ph - 1, (1.0 - v1) * ph)))
                     bottom = int(max(top + 1, min(ph, (1.0 - v0) * ph)))
                     stamp = stamp.crop((left, top, right, bottom))
-                    box = (
-                        int(float(rect[0]) * scale_x),
-                        int(height - (float(rect[1]) + float(rect[3])) * scale_y),
-                    )
                     sized = stamp.resize(
                         (
                             max(1, int(float(rect[2]) * scale_x)),
                             max(1, int(float(rect[3]) * scale_y)),
                         )
+                    )
+                    angle = float(record.get("angle") or 0.0)
+                    if abs(angle) > 0.05:
+                        sized = sized.rotate(-angle, expand=True, resample=Image.BICUBIC)
+                    cx = (float(rect[0]) + float(rect[2]) / 2.0) * scale_x
+                    cy = height - (float(rect[1]) + float(rect[3]) / 2.0) * scale_y
+                    box = (
+                        int(cx - sized.size[0] / 2.0),
+                        int(cy - sized.size[1] / 2.0),
                     )
                     overlay.paste(sized, box, sized)
                 except Exception:
@@ -3451,6 +3960,7 @@ class SamsungNotesCompanionApp(App):
                 "path": stored.name,
                 "rect": [x, y, tw, th],
                 "crop": [0.0, 0.0, 1.0, 1.0],
+                "angle": 0.0,
                 "points": [[x, y], [x + tw, y + th]],
                 "color": [0.0, 0.0, 0.0, 1.0],
                 "width": 1.0,
@@ -3608,7 +4118,41 @@ class SamsungNotesCompanionApp(App):
         self.tool_mode = "lasso"
         self.is_eraser = False
         self.is_dashed = False
+        self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
+
+    def toggle_shape_menu(self, *_args: Any) -> None:
+        self.root_layout.toggle_shape_menu()
+
+    def copy_selection(self, *_args: Any) -> None:
+        canvas = self._history_canvas()
+        payload = canvas.copy_selected()
+        if not payload:
+            other = (
+                self.root_layout.notes_canvas
+                if canvas is self.root_layout.pdf_canvas
+                else self.root_layout.pdf_canvas
+            )
+            payload = other.copy_selected()
+            if payload:
+                self._history_role = other.view_role
+        if not payload:
+            self._notify("אין בחירה להעתקה")
+            return
+        self._clipboard = payload
+        self._notify("הועתק")
+
+    def paste_selection(self, *_args: Any) -> None:
+        if not self._clipboard:
+            self._notify("אין מה להדביק")
+            return
+        canvas = self._history_canvas()
+        canvas.paste_records(self._clipboard)
+        self.tool_mode = "lasso"
+        self.is_eraser = False
+        self.is_dashed = False
+        self.root_layout.refresh_tool_styles()
+        self._notify("הודבק")
 
     def clear_tool(self, *_args: Any) -> None:
         self.tool_mode = "none"
@@ -3641,6 +4185,7 @@ class SamsungNotesCompanionApp(App):
             return
         self.tool_mode = kind
         self.is_eraser = False
+        self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
 
     def set_ink_color(self, name: str, *_args: Any) -> None:
