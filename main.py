@@ -360,6 +360,13 @@ def _java_chars(value: Any) -> str:
             return ""
 
 
+def _short_label(text: str, limit: int = 11) -> str:
+    value = str(text or "").strip() or "מסמך"
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "…"
+
+
 def _folder_rgba(color: str) -> Rgba:
     for _key, hex_color, rgba in FOLDER_PALETTE:
         if color in {hex_color, _key}:
@@ -3027,8 +3034,8 @@ class SPenAnnotationCanvas(Widget):
                 )
 
 
-class _HoldButton(ButtonBehavior, BoxLayout):
-    """Tap or long-press card used by the document library."""
+class _HoldButton(ButtonBehavior, FloatLayout):
+    """Tap or long-press tile used by the document library."""
 
     def __init__(self, on_tap: Any, on_hold: Optional[Any] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -3040,6 +3047,8 @@ class _HoldButton(ButtonBehavior, BoxLayout):
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if self.disabled or not self.collide_point(*touch.pos) or _is_hover_touch(touch):
             return False
+        if super().on_touch_down(touch):
+            return True
         touch.grab(self)
         self._held = False
         if callable(self._on_hold):
@@ -3047,6 +3056,8 @@ class _HoldButton(ButtonBehavior, BoxLayout):
         return True
 
     def on_touch_up(self, touch: MotionEvent) -> bool:
+        if super().on_touch_up(touch):
+            return True
         if touch.grab_current is not self:
             return False
         touch.ungrab(self)
@@ -3064,211 +3075,310 @@ class _HoldButton(ButtonBehavior, BoxLayout):
             self._on_hold()
 
 
-class FolderChip(_HoldButton):
-    """Colored folder pill on the library screen."""
+class FolderGlyph(Widget):
+    """Samsung Notes-style colored folder."""
 
-    def __init__(self, folder_id: str, title: str, color: str, selected: bool, **kwargs: Any) -> None:
+    def __init__(self, color: str, selected: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.color_key = color
+        self.selected = selected
+        self.size_hint = (None, None)
+        self.size = (dp(74), dp(58))
+        with self.canvas:
+            self._shadow = Color(0.12, 0.14, 0.18, 0.10)
+            self._shadow_body = RoundedRectangle(radius=[dp(8)])
+            self._tab_c = Color(1, 1, 1, 1)
+            self._tab = RoundedRectangle(radius=[dp(6)])
+            self._body_c = Color(1, 1, 1, 1)
+            self._body = RoundedRectangle(radius=[dp(10)])
+        self.bind(pos=self._sync, size=self._sync)
+        self._sync()
+
+    def _sync(self, *_args: Any) -> None:
+        rgba = _folder_rgba(self.color_key)
+        shade = tuple(max(0.0, c * 0.82) for c in rgba[:3]) + (1.0,)
+        self._tab_c.rgba = shade
+        self._body_c.rgba = rgba
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self._shadow_body.pos = (x + dp(2), y - dp(2))
+        self._shadow_body.size = (w, h * 0.78)
+        self._tab.pos = (x + w * 0.08, y + h * 0.62)
+        self._tab.size = (w * 0.42, h * 0.28)
+        self._body.pos = (x, y)
+        self._body.size = (w, h * 0.72)
+
+
+class NoteGlyph(Widget):
+    """Small rounded page thumbnail."""
+
+    def __init__(self, accent: str = "#9AA0A8", checked: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.accent = accent
+        self.checked = checked
+        self.size_hint = (None, None)
+        self.size = (dp(62), dp(78))
+        with self.canvas:
+            self._shadow = Color(0.12, 0.14, 0.18, 0.10)
+            self._shadow_body = RoundedRectangle(radius=[dp(8)])
+            self._page_c = Color(1, 1, 1, 1)
+            self._page = RoundedRectangle(radius=[dp(8)])
+            self._line_c = Color(0.82, 0.84, 0.87, 1)
+            self._l1 = Line(width=1.1)
+            self._l2 = Line(width=1.1)
+            self._l3 = Line(width=1.1)
+            self._fold_c = Color(0.93, 0.94, 0.96, 1)
+            self._fold = Triangle()
+            self._ring_c = Color(0.18, 0.50, 0.93, 0)
+            self._ring = Line(width=1.6)
+        self.bind(pos=self._sync, size=self._sync)
+        self._sync()
+
+    def _sync(self, *_args: Any) -> None:
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self._shadow_body.pos = (x + dp(2), y - dp(2))
+        self._shadow_body.size = (w, h)
+        self._page.pos = (x, y)
+        self._page.size = (w, h)
+        inset = dp(10)
+        self._l1.points = [x + inset, y + h * 0.58, x + w - inset, y + h * 0.58]
+        self._l2.points = [x + inset, y + h * 0.44, x + w - inset * 1.4, y + h * 0.44]
+        self._l3.points = [x + inset, y + h * 0.30, x + w - inset * 0.8, y + h * 0.30]
+        fold = dp(16)
+        self._fold.points = [x + w - fold, y + h, x + w, y + h, x + w, y + h - fold]
+        self._ring_c.a = 1.0 if self.checked else 0.0
+        self._ring.circle = (x + w - dp(11), y + h - dp(11), dp(8))
+
+
+class FolderTile(_HoldButton):
+    """Folder icon + truncated name, Samsung Notes style."""
+
+    def __init__(self, folder_id: str, title: str, color: str, selected: bool = False, **kwargs: Any) -> None:
         app = App.get_running_app()
         super().__init__(
             on_tap=lambda: app.select_library_folder(folder_id),
             on_hold=None if folder_id == LIBRARY_ALL else lambda: app.edit_library_folder(folder_id),
-            orientation="horizontal",
-            size_hint=(None, None),
-            height=dp(40),
-            padding=(dp(12), dp(6)),
-            spacing=dp(8),
+            size_hint_y=None,
+            height=dp(124),
             **kwargs,
         )
-        self.folder_id = folder_id
-        rgba = _folder_rgba(color)
-        self.width = dp(28) + min(dp(168), max(dp(72), len(title) * dp(11)))
-        with self.canvas.before:
-            self._bg = Color(*(rgba[:3] + ((0.28 if selected else 0.16),)))
-            self._rect = RoundedRectangle(radius=[dp(14)])
-            self._bar_c = Color(*rgba)
-            self._bar = RoundedRectangle(radius=[dp(4)])
-        self.bind(pos=self._sync, size=self._sync)
-        label = Label(
-            text=mixed_markup(title),
+        glyph = FolderGlyph(color, selected=selected)
+        glyph.pos_hint = {"center_x": 0.5, "top": 0.92}
+        name = Label(
+            text=mixed_markup(_short_label(title)),
             markup=True,
-            color=(0.12, 0.12, 0.14, 1),
-            font_size=dp(14),
+            color=(0.16, 0.17, 0.20, 1) if selected else (0.28, 0.30, 0.34, 1),
+            font_size=dp(13),
             halign="center",
-            valign="middle",
+            valign="top",
+            size_hint=(1, None),
+            height=dp(36),
+            pos_hint={"x": 0, "y": 0.02},
         )
-        self.add_widget(label)
-        Clock.schedule_once(lambda _dt: self._sync(), 0)
-
-    def _sync(self, *_args: Any) -> None:
-        self._rect.pos = self.pos
-        self._rect.size = self.size
-        self._bar.pos = (self.x + dp(8), self.y + dp(10))
-        self._bar.size = (dp(8), self.height - dp(20))
+        name.bind(size=lambda inst, _v: setattr(inst, "text_size", (inst.width, inst.height)))
+        self.add_widget(glyph)
+        self.add_widget(name)
 
 
-class DocumentCard(_HoldButton):
-    """Document tile with a folder-color stripe."""
+class NoteTile(_HoldButton):
+    """Note page icon + truncated name, with a move control."""
 
-    def __init__(self, doc: Dict[str, Any], color: str, **kwargs: Any) -> None:
+    def __init__(self, doc: Dict[str, Any], color: str, checked: bool = False, **kwargs: Any) -> None:
         app = App.get_running_app()
         doc_id = str(doc.get("id") or "")
         super().__init__(
-            on_tap=lambda: app.open_library_document(doc_id),
+            on_tap=lambda: app.on_library_note_tap(doc_id),
             on_hold=lambda: app.place_library_document(doc_id),
-            orientation="vertical",
             size_hint_y=None,
-            height=dp(128),
-            padding=(dp(12), dp(10)),
-            spacing=dp(4),
+            height=dp(136),
             **kwargs,
         )
-        rgba = _folder_rgba(color)
-        with self.canvas.before:
-            Color(1, 1, 1, 1)
-            self._body = RoundedRectangle(radius=[dp(16)])
-            Color(*rgba)
-            self._stripe = RoundedRectangle(radius=[dp(16), dp(16), 0, 0])
-        self.bind(pos=self._sync, size=self._sync)
-        title = str(doc.get("title") or "מסמך")
-        updated = float(doc.get("updated") or 0.0)
-        pages = int(doc.get("pages") or 1)
-        stamp = time.strftime("%d.%m.%Y  %H:%M", time.localtime(updated)) if updated else ""
-        self.add_widget(
-            Label(
-                text=mixed_markup(title),
-                markup=True,
-                color=(0.12, 0.12, 0.16, 1),
-                font_size=dp(17),
-                bold=True,
-                halign="right",
-                valign="middle",
-                size_hint_y=None,
-                height=dp(36),
-            )
+        glyph = NoteGlyph(color, checked=checked)
+        glyph.pos_hint = {"center_x": 0.5, "top": 0.94}
+        name = Label(
+            text=mixed_markup(_short_label(str(doc.get("title") or "מסמך"))),
+            markup=True,
+            color=(0.16, 0.17, 0.20, 1),
+            font_size=dp(13),
+            halign="center",
+            valign="top",
+            size_hint=(1, None),
+            height=dp(36),
+            pos_hint={"x": 0, "y": 0.0},
         )
-        self.add_widget(
-            Label(
-                text=mixed_markup(stamp),
-                markup=True,
-                color=(0.42, 0.44, 0.48, 1),
-                font_size=dp(13),
-                halign="right",
-                size_hint_y=None,
-                height=dp(22),
-            )
+        name.bind(size=lambda inst, _v: setattr(inst, "text_size", (inst.width, inst.height)))
+        move = ToolIcon(
+            "folder",
+            on_dark=False,
+            size=(dp(30), dp(28)),
+            pos_hint={"x": 0.04, "top": 0.98},
+            trigger=lambda *_a: app.place_library_document(doc_id),
         )
-        self.add_widget(
-            Label(
-                text=mixed_markup(f"{pages} עמודים"),
-                markup=True,
-                color=(0.50, 0.52, 0.56, 1),
-                font_size=dp(12),
-                halign="right",
-                size_hint_y=None,
-                height=dp(20),
-            )
-        )
-        Clock.schedule_once(lambda _dt: self._sync(), 0)
-
-    def _sync(self, *_args: Any) -> None:
-        self._body.pos = self.pos
-        self._body.size = self.size
-        self._stripe.pos = (self.x, self.top - dp(10))
-        self._stripe.size = (self.width, dp(10))
+        self.add_widget(glyph)
+        self.add_widget(name)
+        if not checked:
+            self.add_widget(move)
 
 
 class LibraryScreen(Screen):
-    """Home screen: colored folders and recently edited documents."""
+    """Samsung Notes-style library of folder and note icons."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        root = BoxLayout(orientation="vertical", padding=(dp(18), dp(16), dp(18), dp(12)), spacing=dp(12))
+        root = BoxLayout(orientation="vertical", padding=(dp(16), dp(14), dp(16), dp(10)), spacing=dp(6))
         with root.canvas.before:
-            Color(0.93, 0.94, 0.96, 1)
+            Color(0.94, 0.95, 0.97, 1)
             self._bg = Rectangle()
-        root.bind(pos=lambda *_a: setattr(self._bg, "pos", root.pos), size=lambda *_a: setattr(self._bg, "size", root.size))
-        header = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
-        title = Label(
+        root.bind(
+            pos=lambda *_a: setattr(self._bg, "pos", root.pos),
+            size=lambda *_a: setattr(self._bg, "size", root.size),
+        )
+        self.header = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+        self.title = Label(
             text=mixed_markup("המסמכים שלי"),
             markup=True,
             color=(0.11, 0.12, 0.16, 1),
-            font_size=dp(26),
+            font_size=dp(24),
             bold=True,
             halign="right",
             valign="middle",
         )
-        header.add_widget(title)
-        header.add_widget(Widget())
-        header.add_widget(ToolIcon("folder", on_dark=False, size=(dp(44), dp(40)), trigger=lambda *_a: App.get_running_app().create_library_folder()))
-        header.add_widget(ToolIcon("plus", on_dark=False, size=(dp(44), dp(40)), trigger=lambda *_a: App.get_running_app().library_new_menu()))
-        root.add_widget(header)
-        self.hint = Label(
-            text=mixed_markup("בחרו תיקייה או פתחו מסמך"),
+        self.header.add_widget(self.title)
+        self.header.add_widget(Widget())
+        self.move_btn = Button(
+            text=mixed_markup("העברה"),
             markup=True,
-            color=(0.40, 0.42, 0.46, 1),
+            size_hint=(None, 1),
+            width=dp(78),
+            background_normal="",
+            background_down="",
+            background_color=(0.91, 0.93, 0.96, 1),
+            color=(0.18, 0.42, 0.86, 1),
             font_size=dp(14),
+        )
+        self.move_btn.bind(on_release=lambda *_a: App.get_running_app().toggle_library_move_mode())
+        self.header.add_widget(self.move_btn)
+        self.header.add_widget(
+            ToolIcon("folder", on_dark=False, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().create_library_folder())
+        )
+        self.header.add_widget(
+            ToolIcon("plus", on_dark=False, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().library_new_menu())
+        )
+        root.add_widget(self.header)
+        self.hint = Label(
+            text=mixed_markup("הקשה פותחת · אייקון תיקייה מעביר"),
+            markup=True,
+            color=(0.45, 0.47, 0.52, 1),
+            font_size=dp(13),
             size_hint_y=None,
             height=dp(22),
             halign="right",
         )
         root.add_widget(self.hint)
-        self.folder_row = BoxLayout(
-            orientation="horizontal",
-            size_hint=(None, None),
-            height=dp(48),
-            spacing=dp(8),
-        )
-        folder_scroll = ScrollView(size_hint_y=None, height=dp(52), do_scroll_y=False, bar_width=0)
-        folder_scroll.add_widget(self.folder_row)
-        root.add_widget(folder_scroll)
-        self.grid = GridLayout(cols=2, spacing=dp(12), size_hint_y=None, padding=(0, dp(4)))
-        self.grid.bind(minimum_height=self.grid.setter("height"))
-        docs_scroll = ScrollView(do_scroll_x=False)
-        docs_scroll.add_widget(self.grid)
-        root.add_widget(docs_scroll)
+        self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8), padding=(0, dp(4)))
+        self.body.bind(minimum_height=self.body.setter("height"))
+        scroller = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        scroller.add_widget(self.body)
+        root.add_widget(scroller)
         self.add_widget(root)
-        self.bind(size=self._fit_grid)
+        self.bind(size=lambda *_a: self.refresh())
 
     def set_hint(self, message: str) -> None:
         self.hint.text = mixed_markup(message)
 
-    def _fit_grid(self, *_args: Any) -> None:
-        self.grid.cols = 3 if self.width >= dp(860) else 2
-        for child in self.grid.children:
-            child.height = dp(128)
+    def _section(self, title: str) -> Label:
+        label = Label(
+            text=mixed_markup(title),
+            markup=True,
+            color=(0.38, 0.40, 0.45, 1),
+            font_size=dp(13),
+            bold=True,
+            size_hint_y=None,
+            height=dp(26),
+            halign="right",
+        )
+        label.bind(size=lambda inst, _v: setattr(inst, "text_size", inst.size))
+        return label
+
+    def _grid(self) -> GridLayout:
+        cols = 4 if self.width >= dp(900) else 3
+        grid = GridLayout(cols=cols, spacing=dp(8), size_hint_y=None, padding=(0, dp(2)))
+        grid.bind(minimum_height=grid.setter("height"))
+        return grid
 
     def refresh(self) -> None:
         app = App.get_running_app()
         data = app.library_data()
         selected = str(getattr(app, "_library_folder", LIBRARY_ALL) or LIBRARY_ALL)
-        self.folder_row.clear_widgets()
-        chips = [("הכל", LIBRARY_ALL, "#9AA0A8")] + [
-            (str(folder.get("name") or "תיקייה"), str(folder.get("id") or ""), str(folder.get("color") or "#9AA0A8"))
-            for folder in data.get("folders") or []
-        ]
-        width = dp(12)
-        for title, folder_id, color in chips:
-            chip = FolderChip(folder_id, title, color, selected=folder_id == selected)
-            self.folder_row.add_widget(chip)
-            width += chip.width + dp(8)
-        self.folder_row.width = max(width, self.width or dp(320))
-        self.grid.clear_widgets()
-        folders = {str(folder.get("id")): folder for folder in data.get("folders") or []}
+        moving = bool(getattr(app, "_library_moving", False))
+        picked = set(getattr(app, "_library_move_ids", set()) or [])
+        self.body.clear_widgets()
+        folders = list(data.get("folders") or [])
         docs = list(data.get("documents") or [])
         docs.sort(key=lambda item: float(item.get("updated") or 0.0), reverse=True)
-        shown = 0
-        for doc in docs:
-            folder_id = str(doc.get("folder_id") or "")
-            if selected != LIBRARY_ALL and folder_id != selected:
-                continue
-            color = str((folders.get(folder_id) or {}).get("color") or "#9AA0A8")
-            self.grid.add_widget(DocumentCard(doc, color))
-            shown += 1
-        if shown == 0:
-            self.set_hint("אין מסמכים בתיקייה זו. לחצו + למסמך חדש או לייבוא PDF")
+        self.move_btn.text = mixed_markup("ביטול" if moving else "העברה")
+        if selected == LIBRARY_ALL:
+            self.title.text = mixed_markup("המסמכים שלי")
+            if folders:
+                self.body.add_widget(self._section("תיקיות"))
+                folder_grid = self._grid()
+                for folder in folders:
+                    folder_grid.add_widget(
+                        FolderTile(
+                            str(folder.get("id") or ""),
+                            str(folder.get("name") or "תיקייה"),
+                            str(folder.get("color") or "#9AA0A8"),
+                        )
+                    )
+                self.body.add_widget(folder_grid)
+            self.body.add_widget(self._section("מסמכים"))
+            visible = docs
         else:
-            self.set_hint("הקשה פותחת, לחיצה ארוכה מעבירה לתיקייה")
-        self._fit_grid()
+            folder = next((item for item in folders if str(item.get("id")) == selected), None)
+            name = str((folder or {}).get("name") or "תיקייה")
+            self.title.text = mixed_markup(_short_label(name, 16))
+            back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+            back = Button(
+                text=mixed_markup("הכל"),
+                markup=True,
+                size_hint=(None, 1),
+                width=dp(72),
+                background_normal="",
+                background_down="",
+                background_color=(0.91, 0.93, 0.96, 1),
+                color=(0.18, 0.42, 0.86, 1),
+            )
+            back.bind(on_release=lambda *_a: app.select_library_folder(LIBRARY_ALL))
+            edit = Button(
+                text=mixed_markup("עריכה"),
+                markup=True,
+                size_hint=(None, 1),
+                width=dp(72),
+                background_normal="",
+                background_down="",
+                background_color=(0.91, 0.93, 0.96, 1),
+                color=(0.18, 0.42, 0.86, 1),
+            )
+            edit.bind(on_release=lambda *_a: app.edit_library_folder(selected))
+            back_row.add_widget(Widget())
+            back_row.add_widget(edit)
+            back_row.add_widget(back)
+            self.body.add_widget(back_row)
+            visible = [doc for doc in docs if str(doc.get("folder_id") or "") == selected]
+        note_grid = self._grid()
+        folder_map = {str(folder.get("id")): folder for folder in folders}
+        for doc in visible:
+            folder_id = str(doc.get("folder_id") or "")
+            color = str((folder_map.get(folder_id) or {}).get("color") or "#2F80ED")
+            note_grid.add_widget(NoteTile(doc, color, checked=str(doc.get("id")) in picked))
+        self.body.add_widget(note_grid)
+        if moving:
+            self.set_hint("בחרו מסמכים ואז לחצו שוב על העברה כדי לבחור תיקייה")
+        elif not visible and selected != LIBRARY_ALL:
+            self.set_hint("התיקייה ריקה. לחצו + או העבירו לכאן מסמך")
+        elif not visible and not folders:
+            self.set_hint("לחצו + למסמך חדש, או על אייקון התיקייה ליצירת תיקייה")
+        else:
+            self.set_hint("הקשה פותחת · אייקון תיקייה על המסמך מעביר")
 
 
 class RootLayout(FloatLayout):
@@ -3918,6 +4028,8 @@ class SamsungNotesCompanionApp(App):
         self.document_title = "כותרת"
         self._current_doc_id: Optional[str] = None
         self._library_folder = LIBRARY_ALL
+        self._library_moving = False
+        self._library_move_ids: set = set()
         self._sm = ScreenManager(transition=FadeTransition(duration=0.12))
         self.library_screen = LibraryScreen(name="library")
         editor = Screen(name="editor")
@@ -3977,6 +4089,29 @@ class SamsungNotesCompanionApp(App):
     def select_library_folder(self, folder_id: str) -> None:
         self._library_folder = str(folder_id or LIBRARY_ALL)
         self.library_screen.refresh()
+
+    def on_library_note_tap(self, doc_id: str) -> None:
+        if self._library_moving:
+            if doc_id in self._library_move_ids:
+                self._library_move_ids.discard(doc_id)
+            else:
+                self._library_move_ids.add(doc_id)
+            self.library_screen.refresh()
+            return
+        self.open_library_document(doc_id)
+
+    def toggle_library_move_mode(self, *_args: Any) -> None:
+        if self._library_moving:
+            if self._library_move_ids:
+                self.place_library_documents(list(self._library_move_ids))
+            self._library_moving = False
+            self._library_move_ids = set()
+            self.library_screen.refresh()
+            return
+        self._library_moving = True
+        self._library_move_ids = set()
+        self.library_screen.refresh()
+        self._notify("בחרו מסמכים ואז לחצו העברה שוב")
 
     def library_new_menu(self, *_args: Any) -> None:
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
@@ -4097,23 +4232,83 @@ class SamsungNotesCompanionApp(App):
             self._notify(f"לא ניתן לפתוח את המסמך: {exc}")
 
     def place_library_document(self, doc_id: str) -> None:
-        data = self.library_data()
-        folders = data.get("folders") or []
-        if not folders:
-            self._notify("צרו תיקייה קודם")
+        self.place_library_documents([doc_id])
+
+    def place_library_documents(self, doc_ids: Sequence[str]) -> None:
+        ids = [str(item) for item in doc_ids if item]
+        if not ids:
             return
-        body = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(10))
-        popup = Popup(title="", content=body, size_hint=(0.8, 0.62))
-        for folder in folders:
-            folder_id = str(folder.get("id") or "")
-            btn = Button(text=str(folder.get("name") or "תיקייה"), size_hint_y=None, height=dp(44))
+        data = self.library_data()
+        folders = list(data.get("folders") or [])
+        body = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
+        popup = Popup(title="", content=body, size_hint=(0.86, 0.62), separator_height=0, background_color=(0, 0, 0, 0))
+        with body.canvas.before:
+            Color(1, 1, 1, 1)
+            sheet = RoundedRectangle(radius=[dp(22)])
+        body.bind(
+            pos=lambda *_a: setattr(sheet, "pos", body.pos),
+            size=lambda *_a: setattr(sheet, "size", body.size),
+        )
+        heading = Label(
+            text=mixed_markup("העברה לתיקייה"),
+            markup=True,
+            color=(0.12, 0.13, 0.16, 1),
+            font_size=dp(18),
+            bold=True,
+            size_hint_y=None,
+            height=dp(32),
+        )
+        grid = GridLayout(cols=3, spacing=dp(8), size_hint_y=None)
+        grid.bind(minimum_height=grid.setter("height"))
 
-            def _move(_btn: Button, fid: str = folder_id) -> None:
-                self._set_doc_folder(doc_id, fid)
-                popup.dismiss()
+        def _pick(folder_id: str) -> None:
+            for doc_id in ids:
+                self._set_doc_folder(doc_id, folder_id)
+            self._library_moving = False
+            self._library_move_ids = set()
+            popup.dismiss()
+            self.library_screen.refresh()
+            self._notify("המסמך הועבר")
 
-            btn.bind(on_release=_move)
-            body.add_widget(btn)
+        options = [("", "ללא תיקייה", "#9AA0A8")] + [
+            (str(folder.get("id") or ""), str(folder.get("name") or "תיקייה"), str(folder.get("color") or "#9AA0A8"))
+            for folder in folders
+        ]
+        for folder_id, title, color in options:
+            tile = _HoldButton(
+                on_tap=lambda fid=folder_id: _pick(fid),
+                size_hint_y=None,
+                height=dp(120),
+            )
+            glyph = FolderGlyph(color)
+            glyph.pos_hint = {"center_x": 0.5, "top": 0.92}
+            label = Label(
+                text=mixed_markup(_short_label(title)),
+                markup=True,
+                color=(0.16, 0.17, 0.20, 1),
+                font_size=dp(13),
+                halign="center",
+                size_hint=(1, None),
+                height=dp(34),
+                pos_hint={"x": 0, "y": 0.02},
+            )
+            tile.add_widget(glyph)
+            tile.add_widget(label)
+            grid.add_widget(tile)
+        cancel = Button(
+            text=mixed_markup("ביטול"),
+            markup=True,
+            size_hint_y=None,
+            height=dp(42),
+            background_normal="",
+            background_down="",
+            background_color=(0.93, 0.94, 0.96, 1),
+            color=(0.20, 0.22, 0.26, 1),
+        )
+        cancel.bind(on_release=lambda *_a: popup.dismiss())
+        body.add_widget(heading)
+        body.add_widget(grid)
+        body.add_widget(cancel)
         popup.open()
         apply_hebrew_ui(popup, "העברה לתיקייה")
 
