@@ -123,8 +123,9 @@ SHAPE_ORDER: Sequence[str] = (
     "arrow",
     "heart",
 )
-CHROME_HEIGHT_DP = 124.0
+CHROME_HEIGHT_DP = 136.0
 SHAPE_BAR_DP = 40.0
+PASTE_HOLD_S = 3.0
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
 
@@ -143,6 +144,16 @@ SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
 
 def is_android() -> bool:
     return platform == "android"
+
+
+def _is_hover_touch(touch: MotionEvent) -> bool:
+    try:
+        action = int(getattr(touch, "action", 0) or 0)
+    except (TypeError, ValueError):
+        action = 0
+    if action in HOVER_ACTIONS:
+        return True
+    return bool(getattr(touch, "is_hovering", False))
 
 
 def _first_existing(paths: Sequence[str]) -> Optional[str]:
@@ -621,23 +632,40 @@ class ToolIcon(ButtonBehavior, Widget):
 
     def __init__(self, kind: str, **kwargs: Any) -> None:
         kwargs.setdefault("size_hint", (None, None))
-        kwargs.setdefault("size", (dp(44), dp(36)))
+        kwargs.setdefault("size", (dp(48), dp(44)))
         super().__init__(**kwargs)
         self.kind = kind
-        self.bind(pos=self._redraw, size=self._redraw, selected=self._redraw, on_dark=self._redraw)
+        with self.canvas.before:
+            self._bg_color = Color(0, 0, 0, 1)
+            self._bg_rect = Rectangle()
+        self.bind(
+            pos=self._redraw,
+            size=self._redraw,
+            selected=self._sync_bg,
+            on_dark=self._redraw,
+        )
         Clock.schedule_once(lambda _dt: self._redraw(), 0)
 
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if _is_hover_touch(touch):
+            return False
+        return super().on_touch_down(touch)
+
+    def _sync_bg(self, *_args: Any) -> None:
+        bg = TOOL_ACTIVE if self.selected else (TOOL_IDLE if self.on_dark else (1, 1, 1, 1))
+        self._bg_color.rgba = bg
+        self._bg_rect.pos = self.pos
+        self._bg_rect.size = self.size
+
     def _redraw(self, *_args: Any) -> None:
+        self._sync_bg()
         self.canvas.clear()
-        pad = dp(8)
+        pad = dp(7)
         x, y = self.x + pad, self.y + pad
         w, h = self.width - 2 * pad, self.height - 2 * pad
         cx, cy = self.center_x, self.center_y
         ink = (1, 1, 1, 1) if self.on_dark else (0.15, 0.15, 0.17, 1)
-        bg = TOOL_ACTIVE if self.selected else (TOOL_IDLE if self.on_dark else (1, 1, 1, 1))
         with self.canvas:
-            Color(*bg)
-            Rectangle(pos=self.pos, size=self.size)
             Color(*ink)
             kind = self.kind
             if kind == "pan":
@@ -898,6 +926,79 @@ class ToolIcon(ButtonBehavior, Widget):
         return texture
 
 
+class AbsorbLayout(BoxLayout):
+    """Toolbar container that keeps touches from falling through to the canvas."""
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0 or not self.collide_point(*touch.pos):
+            return False
+        if _is_hover_touch(touch):
+            return True
+        super().on_touch_down(touch)
+        return True
+
+    def on_touch_move(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
+        if self.collide_point(*touch.pos) or touch.grab_current is not None:
+            super().on_touch_move(touch)
+            return True
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
+        if self.collide_point(*touch.pos) or touch.grab_current is not None:
+            super().on_touch_up(touch)
+            return True
+        return super().on_touch_up(touch)
+
+
+class FloatingChip(ButtonBehavior, BoxLayout):
+    """On-canvas copy/paste control with a large hit target."""
+
+    def __init__(self, kind: str, caption: str, **kwargs: Any) -> None:
+        kwargs.setdefault("orientation", "horizontal")
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(118), dp(44)))
+        kwargs.setdefault("padding", (dp(6), dp(4)))
+        kwargs.setdefault("spacing", dp(4))
+        super().__init__(**kwargs)
+        with self.canvas.before:
+            self._bg = Color(0.12, 0.12, 0.14, 0.94)
+            self._rect = Rectangle()
+        self.icon = ToolIcon(kind, on_dark=True, size=(dp(36), dp(32)))
+        self.label = Label(
+            text=mixed_markup(caption),
+            markup=True,
+            color=(1, 1, 1, 1),
+            font_size=dp(14),
+            halign="center",
+            valign="middle",
+        )
+        self.add_widget(self.icon)
+        self.add_widget(self.label)
+        self.bind(pos=self._sync, size=self._sync)
+        Clock.schedule_once(lambda _dt: self._sync(), 0)
+
+    def _sync(self, *_args: Any) -> None:
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+        self.label.text_size = (self.label.width, self.label.height)
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
+        if _is_hover_touch(touch):
+            return False
+        if not self.collide_point(*touch.pos):
+            return False
+        return ButtonBehavior.on_touch_down(self, touch)
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        return ButtonBehavior.on_touch_up(self, touch)
+
+
 class ColorDot(ButtonBehavior, Widget):
     """Round ink swatch; a white ring marks the selected color."""
 
@@ -908,7 +1009,7 @@ class ColorDot(ButtonBehavior, Widget):
         super().__init__(**kwargs)
         self.rgba = list(rgba)
         self.size_hint = (None, None)
-        self.size = (dp(30), dp(30))
+        self.size = (dp(36), dp(36))
         with self.canvas:
             self._fill = Color(*self.rgba)
             self._dot = Ellipse()
@@ -916,6 +1017,11 @@ class ColorDot(ButtonBehavior, Widget):
             self._ring_line = Line(width=1.4)
         self.bind(pos=self._sync, size=self._sync, selected=self._sync, rgba=self._sync)
         Clock.schedule_once(lambda _dt: self._sync(), 0)
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if _is_hover_touch(touch):
+            return False
+        return super().on_touch_down(touch)
 
     def _sync(self, *_args: Any) -> None:
         pad = dp(5)
@@ -1117,6 +1223,7 @@ class SPenAnnotationCanvas(Widget):
         self.selected_ids: List[int] = []
         self._undo_stack: List[List[StrokeRecord]] = []
         self._redo_stack: List[List[StrokeRecord]] = []
+        self._paste_clock: Any = None
         self._gesture_snapshot = False
         with self.canvas.before:
             Color(*LETTERBOX)
@@ -1298,6 +1405,33 @@ class SPenAnnotationCanvas(Widget):
         if scale <= 1e-6:
             return (0.0, 0.0)
         return ((x - origin_x) / scale, (y - origin_y) / scale)
+
+    def from_doc(self, x: float, y: float) -> Point:
+        origin_x, origin_y, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+        return (origin_x + x * scale, origin_y + y * scale)
+
+    def _cancel_paste_hold(self) -> None:
+        clock = getattr(self, "_paste_clock", None)
+        if clock is not None:
+            clock.cancel()
+            self._paste_clock = None
+
+    def _arm_paste_hold(self, touch: MotionEvent) -> None:
+        app = App.get_running_app()
+        if not getattr(app, "_clipboard", None):
+            return
+        self._cancel_paste_hold()
+        touch.ud["hold_origin"] = (touch.x, touch.y)
+
+        def _fire(_dt: float) -> None:
+            self._paste_clock = None
+            if touch.ud.get("mode") in {"resize", "crop", "rotate", "endpoint", "move", "pinch"}:
+                return
+            layout = getattr(app, "root_layout", None)
+            if layout is not None:
+                layout.show_paste_chip(self, touch.x, touch.y)
+
+        self._paste_clock = Clock.schedule_once(_fire, PASTE_HOLD_S)
 
     def _classify(self, touch: MotionEvent) -> str:
         if getattr(touch, "is_mouse_scrolling", False):
@@ -1549,6 +1683,9 @@ class SPenAnnotationCanvas(Widget):
             PopMatrix()
             StencilUnUse()
             StencilPop()
+        layout = getattr(App.get_running_app(), "root_layout", None)
+        if layout is not None and hasattr(layout, "sync_floating_tools"):
+            Clock.schedule_once(lambda _dt: layout.sync_floating_tools(), 0)
 
     def _start_view_gesture(self, touch: MotionEvent) -> None:
         app = App.get_running_app()
@@ -1639,6 +1776,7 @@ class SPenAnnotationCanvas(Widget):
         self._set_pan(mid[0] - fit_x - doc_x * scale, mid[1] - fit_y - doc_y * scale)
 
     def _begin_two_finger_view(self, touch: MotionEvent) -> None:
+        self._cancel_paste_hold()
         app = App.get_running_app()
         app._multitouch = True
         self.current_stroke = []
@@ -1658,6 +1796,10 @@ class SPenAnnotationCanvas(Widget):
             return True
         touch.grab(self)
         app._pointers[touch.uid] = (touch.x, touch.y)
+        layout = getattr(app, "root_layout", None)
+        if layout is not None:
+            layout.hide_paste_chip()
+        self._arm_paste_hold(touch)
         if len(app._pointers) >= 2:
             self._begin_two_finger_view(touch)
             return True
@@ -1763,6 +1905,9 @@ class SPenAnnotationCanvas(Widget):
         app = App.get_running_app()
         if touch.uid in getattr(app, "_pointers", {}):
             app._pointers[touch.uid] = (touch.x, touch.y)
+        origin = touch.ud.get("hold_origin")
+        if origin is not None and math.hypot(touch.x - origin[0], touch.y - origin[1]) > dp(14):
+            self._cancel_paste_hold()
         if bool(getattr(app, "_multitouch", False)) or len(getattr(app, "_pointers", {})) >= 2:
             if len(app._pointers) >= 2:
                 app._fingers = dict(app._pointers)
@@ -1824,6 +1969,7 @@ class SPenAnnotationCanvas(Widget):
         if touch.grab_current is not self:
             return super().on_touch_up(touch)
         touch.ungrab(self)
+        self._cancel_paste_hold()
         app = App.get_running_app()
         app._pointers.pop(touch.uid, None)
         app._fingers.pop(touch.uid, None)
@@ -2288,6 +2434,24 @@ class SPenAnnotationCanvas(Widget):
         self.selected_ids = new_ids
         self.redraw_all()
 
+    def paste_records_at(self, records: Sequence[StrokeRecord], doc: Point) -> None:
+        if not records:
+            return
+        boxes = []
+        for record in records:
+            box = self._record_bbox(record)
+            if box is not None:
+                boxes.append(box)
+        if boxes:
+            left = min(box[0] for box in boxes)
+            bottom = min(box[1] for box in boxes)
+            right = max(box[0] + box[2] for box in boxes)
+            top = max(box[1] + box[3] for box in boxes)
+            cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
+            self.paste_records(records, dx=doc[0] - cx, dy=doc[1] - cy)
+            return
+        self.paste_records(records, dx=doc[0], dy=doc[1])
+
     def _draw_selection(self) -> None:
         if str(getattr(App.get_running_app(), "tool_mode", "")) != "lasso":
             return
@@ -2344,7 +2508,7 @@ class RootLayout(FloatLayout):
         self.notes_canvas.size_hint = (None, None)
         self.workspace.add_widget(self.pdf_canvas)
         self.workspace.add_widget(self.notes_canvas)
-        self.chrome = BoxLayout(
+        self.chrome = AbsorbLayout(
             orientation="vertical",
             size_hint=(1, None),
             height=dp(CHROME_HEIGHT_DP),
@@ -2370,10 +2534,27 @@ class RootLayout(FloatLayout):
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
         self.restore_btn.bind(on_release=self.show_toolbar)
+        self.copy_chip = FloatingChip("copy", "העתק")
+        self.paste_chip = FloatingChip("paste", "הדבק")
+        self.copy_chip.bind(on_release=self._on_copy_chip)
+        self.paste_chip.bind(on_release=self._on_paste_chip)
+        self._paste_target: Optional[Tuple[Any, float, float]] = None
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
+        self.add_widget(self.copy_chip)
+        self.add_widget(self.paste_chip)
         self.add_widget(self.restore_btn)
+        self.hide_copy_chip()
+        self.hide_paste_chip()
         self.refresh_tool_styles()
+        app = App.get_running_app()
+        app.bind(
+            view_scale=self.sync_floating_tools,
+            view_pan_x=self.sync_floating_tools,
+            view_pan_y=self.sync_floating_tools,
+            notes_scale=self.sync_floating_tools,
+            notes_pan_x=self.sync_floating_tools,
+        )
         self.bind(size=self._fit_workspace, pos=self._fit_workspace)
         Window.bind(size=lambda *_args: self.apply_orientation())
         Clock.schedule_once(lambda _dt: self.apply_orientation(), 0)
@@ -2384,6 +2565,63 @@ class RootLayout(FloatLayout):
         self.workspace.size = (float(self.width), work_h)
         self.workspace.pos = (float(self.x), float(self.y))
         self.dock_notes()
+        self.sync_floating_tools()
+
+    def hide_copy_chip(self) -> None:
+        self.copy_chip.opacity = 0
+        self.copy_chip.disabled = True
+        self.copy_chip.pos = (-2000.0, -2000.0)
+
+    def hide_paste_chip(self) -> None:
+        self.paste_chip.opacity = 0
+        self.paste_chip.disabled = True
+        self.paste_chip.pos = (-2000.0, -2000.0)
+        self._paste_target = None
+
+    def _place_chip(self, chip: FloatingChip, widget: Widget, x: float, y: float) -> None:
+        win_x, win_y = widget.to_window(x, y)
+        local_x, local_y = self.to_widget(win_x, win_y)
+        chip.center_x = min(max(local_x, chip.width / 2.0 + dp(8)), self.width - chip.width / 2.0 - dp(8))
+        chip.y = local_y + dp(10)
+        if self.toolbar_visible and chip.top > self.chrome.y - dp(4):
+            chip.y = self.chrome.y - chip.height - dp(6)
+        if chip.y < dp(8):
+            chip.y = dp(8)
+        chip.opacity = 1
+        chip.disabled = False
+
+    def sync_floating_tools(self, *_args: Any) -> None:
+        app = App.get_running_app()
+        if str(getattr(app, "tool_mode", "")) != "lasso":
+            self.hide_copy_chip()
+            return
+        canvas = None
+        box = None
+        for candidate in (self.pdf_canvas, self.notes_canvas):
+            if candidate.selected_ids:
+                box = candidate._selection_bbox()
+                if box is not None:
+                    canvas = candidate
+                    break
+        if canvas is None or box is None:
+            self.hide_copy_chip()
+            return
+        sx, sy = canvas.from_doc(box[0] + box[2] / 2.0, box[1] + box[3])
+        self._place_chip(self.copy_chip, canvas, sx, sy + dp(8))
+
+    def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
+        app = App.get_running_app()
+        if not getattr(app, "_clipboard", None):
+            return
+        self._paste_target = (canvas, x, y)
+        self._place_chip(self.paste_chip, canvas, x, y)
+
+    def _on_copy_chip(self, *_args: Any) -> None:
+        App.get_running_app().copy_selection()
+
+    def _on_paste_chip(self, *_args: Any) -> None:
+        App.get_running_app().paste_at_chip()
+        self.hide_paste_chip()
 
     def set_status(self, message: str) -> None:
         self.status_label.text = mixed_markup(message)
@@ -2445,9 +2683,9 @@ class RootLayout(FloatLayout):
         toolbar = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(40),
-            padding=(dp(8), dp(4)),
-            spacing=dp(2),
+            height=dp(52),
+            padding=(dp(6), dp(4)),
+            spacing=dp(4),
         )
         with toolbar.canvas.before:
             Color(*TOOLBAR_BG)
@@ -2465,13 +2703,11 @@ class RootLayout(FloatLayout):
             ("dashed", "dashed", app.toggle_dashed),
             ("eraser", "eraser", app.enable_eraser),
             ("lasso", "lasso", app.select_lasso),
-            ("copy", "copy", app.copy_selection),
-            ("paste", "paste", app.paste_selection),
             ("shapes", "shapes", app.toggle_shape_menu),
         )
         for key, kind, handler in actions:
-            button = ToolIcon(kind, on_dark=True)
-            button.bind(on_press=handler)
+            button = ToolIcon(kind, on_dark=True, size=(dp(48), dp(44)))
+            button.bind(on_release=handler)
             toolbar.add_widget(button)
             self.tool_buttons[key] = button
         for key, rgba in INK_COLORS:
@@ -2508,7 +2744,7 @@ class RootLayout(FloatLayout):
         )
         for kind in SHAPE_ORDER:
             button = ToolIcon(kind, on_dark=True, size=(dp(32), dp(32)))
-            button.bind(on_press=lambda _btn, name=kind: app.select_shape(name))
+            button.bind(on_release=lambda _btn, name=kind: app.select_shape(name))
             bar.add_widget(button)
             self.tool_buttons[kind] = button
         bar.add_widget(Widget())
@@ -2600,7 +2836,7 @@ class RootLayout(FloatLayout):
         for shape in SHAPE_TOOLS:
             mapping[shape] = app.tool_mode == shape
         for key, button in self.tool_buttons.items():
-            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette", "undo", "redo", "copy", "paste"}:
+            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette", "undo", "redo"}:
                 continue
             if isinstance(button, ToolIcon):
                 button.selected = mapping.get(key, False)
@@ -4125,17 +4361,12 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.toggle_shape_menu()
 
     def copy_selection(self, *_args: Any) -> None:
-        canvas = self._history_canvas()
-        payload = canvas.copy_selected()
-        if not payload:
-            other = (
-                self.root_layout.notes_canvas
-                if canvas is self.root_layout.pdf_canvas
-                else self.root_layout.pdf_canvas
-            )
-            payload = other.copy_selected()
+        payload: List[StrokeRecord] = []
+        for canvas in (self.root_layout.pdf_canvas, self.root_layout.notes_canvas):
+            payload = canvas.copy_selected()
             if payload:
-                self._history_role = other.view_role
+                self._history_role = canvas.view_role
+                break
         if not payload:
             self._notify("אין בחירה להעתקה")
             return
@@ -4152,6 +4383,22 @@ class SamsungNotesCompanionApp(App):
         self.is_eraser = False
         self.is_dashed = False
         self.root_layout.refresh_tool_styles()
+        self.root_layout.sync_floating_tools()
+        self._notify("הודבק")
+
+    def paste_at_chip(self, *_args: Any) -> None:
+        target = getattr(self.root_layout, "_paste_target", None)
+        if not self._clipboard or not target:
+            self._notify("אין מה להדביק")
+            return
+        canvas, x, y = target
+        canvas.paste_records_at(self._clipboard, canvas.to_doc(x, y))
+        self._history_role = canvas.view_role
+        self.tool_mode = "lasso"
+        self.is_eraser = False
+        self.is_dashed = False
+        self.root_layout.refresh_tool_styles()
+        self.root_layout.sync_floating_tools()
         self._notify("הודבק")
 
     def clear_tool(self, *_args: Any) -> None:
