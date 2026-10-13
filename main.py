@@ -296,16 +296,20 @@ def _strip_carried_lines(text: str) -> str:
     lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     if len(lines) < 2:
         return "\n".join(lines)
-    out: List[str] = [lines[0]]
-    for line in lines[1:]:
-        prev = out[-1]
-        stripped = line
-        if prev:
-            for prefix in (prev + " ", prev):
-                if stripped.startswith(prefix) and len(stripped) > len(prefix):
-                    stripped = stripped[len(prefix) :].lstrip()
-                    break
-        out.append(stripped)
+    out: List[str] = []
+    for line in lines:
+        current = line
+        for prev in out:
+            if not prev or not current or current == prev:
+                continue
+            if current.startswith(prev):
+                rest = current[len(prev) :].lstrip(" \t\u00a0")
+                if rest:
+                    current = rest
+                    continue
+            if _has_hebrew(current) and (not _has_hebrew(prev)) and prev in current:
+                current = current.replace(prev, "", 1).strip()
+        out.append(current)
     return "\n".join(out)
 
 
@@ -1510,6 +1514,7 @@ class SPenAnnotationCanvas(Widget):
         self._page_num_textures: Dict[int, Any] = {}
         self._text_textures: Dict[Tuple[Any, ...], Any] = {}
         self._text_texture_keepers: Dict[Tuple[Any, ...], Any] = {}
+        self._text_layouts: Dict[Tuple[Any, ...], List[Tuple[Any, Any, float, float]]] = {}
         self.selected_ids: List[int] = []
         self._undo_stack: List[List[StrokeRecord]] = []
         self._redo_stack: List[List[StrokeRecord]] = []
@@ -1834,69 +1839,51 @@ class SPenAnnotationCanvas(Widget):
         widget.texture_update()
         return widget
 
-    def _stack_line_images(self, widgets: Sequence[Any], align_right: bool) -> Optional[Any]:
-        from PIL import Image
-
-        rows: List[Any] = []
-        for widget in widgets:
-            tex = widget.texture
-            if tex is None or not tex.size[0] or not tex.size[1]:
-                continue
-            raw = Image.frombytes("RGBA", tuple(tex.size), bytes(tex.pixels))
-            rows.append(raw.transpose(Image.FLIP_TOP_BOTTOM))
-        if not rows:
-            return None
-        max_w = max(image.size[0] for image in rows)
-        total_h = sum(image.size[1] for image in rows)
-        stacked = Image.new("RGBA", (max_w, total_h), (0, 0, 0, 0))
-        top = 0
-        for image in rows:
-            left = max_w - image.size[0] if align_right else 0
-            stacked.paste(image, (left, top), image)
-            top += image.size[1]
-        return _pil_to_texture(stacked)
-
-    def _text_texture(self, record: StrokeRecord) -> Optional[Any]:
+    def _text_cache_key(self, record: StrokeRecord) -> Tuple[Any, ...]:
         text = str(record.get("text") or "")
         font_size = max(10.0, float(record.get("font_size") or 28.0))
         color = tuple(record.get("color") or COLOR_BLACK)
-        key = (text, round(font_size, 2), tuple(round(c, 4) for c in color[:4]))
-        cached = self._text_textures.get(key)
+        return (text, round(font_size, 2), tuple(round(c, 4) for c in color[:4]))
+
+    def _text_layout(self, record: StrokeRecord) -> List[Tuple[Any, Any, float, float]]:
+        key = self._text_cache_key(record)
+        cached = self._text_layouts.get(key)
         if cached is not None:
             return cached
-        try:
-            plain = _plain_user_text(text)
-            ink = color[:4] if len(color) > 3 else color + (1.0,)
-            lines = plain.split("\n") if plain else [""]
-            widgets = [self._make_line_label(line, font_size, ink) for line in lines]
-            texture = self._stack_line_images(widgets, align_right=_has_hebrew(plain))
-            if texture is None:
-                raise RuntimeError("empty text texture")
-            self._text_texture_keepers[key] = widgets
-        except Exception:
-            try:
-                from kivy.core.text import Label as CoreLabel
+        plain = _plain_user_text(str(record.get("text") or ""))
+        ink = tuple(record.get("color") or COLOR_BLACK)
+        ink = ink[:4] if len(ink) > 3 else ink + (1.0,)
+        font_size = max(10.0, float(record.get("font_size") or 28.0))
+        lines = plain.split("\n") if plain else [""]
+        rows: List[Tuple[Any, Any, float, float]] = []
+        widgets: List[Any] = []
+        for line in lines:
+            widget = self._make_line_label(line, font_size, ink)
+            tex = widget.texture
+            if tex is None:
+                continue
+            tw, th = widget.texture_size
+            rows.append((widget, tex, max(1.0, float(tw)), max(1.0, float(th))))
+            widgets.append(widget)
+        self._text_layouts[key] = rows
+        self._text_texture_keepers[key] = widgets
+        return rows
 
-                plain = _plain_user_text(text)
-                kwargs: Dict[str, Any] = {
-                    "text": "\n".join(ui_text(line) for line in plain.split("\n")),
-                    "markup": False,
-                    "font_size": font_size,
-                    "color": color[:4] if len(color) > 3 else color + (1.0,),
-                }
-                if _has_hebrew(plain) and _HEBREW_FONT_READY:
-                    kwargs["font_name"] = "HebrewFont"
-                elif _LATIN_FONT_READY:
-                    kwargs["font_name"] = "LatinFont"
-                label = CoreLabel(**kwargs)
-                label.refresh()
-                texture = label.texture
-            except Exception:
-                return None
-        if texture is None:
+    def _text_layout_size(self, record: StrokeRecord) -> Tuple[float, float]:
+        rows = self._text_layout(record)
+        if not rows:
+            return (24.0, 18.0)
+        return (
+            max(24.0, max(width for _widget, _tex, width, _height in rows)),
+            max(18.0, sum(height for _widget, _tex, _width, height in rows)),
+        )
+
+    def _text_texture(self, record: StrokeRecord) -> Optional[Any]:
+        rows = self._text_layout(record)
+        if not rows:
             return None
-        self._text_textures[key] = texture
-        return texture
+        _widget, tex, _width, _height = rows[0]
+        return tex
 
     def _page_number_texture(self, number: int) -> Optional[Any]:
         cached = self._page_num_textures.get(number)
@@ -1926,12 +1913,26 @@ class SPenAnnotationCanvas(Widget):
             x, y, width, height = [float(v) for v in rect[:4]]
             angle = float(record.get("angle") or 0.0)
             if record.get("kind") == "text":
-                texture = self._text_texture(record)
-                tex_coords = None
-            else:
-                path = str(record.get("path") or "")
-                texture = self._stamp_texture(path) if path else None
-                tex_coords = _stamp_tex_coords(record.get("crop") or [0.0, 0.0, 1.0, 1.0])
+                rows = self._text_layout(record)
+                if not rows:
+                    return
+                Color(1, 1, 1, 1)
+                PushMatrix()
+                Translate(x + width / 2.0, y + height / 2.0)
+                if abs(angle) > 0.01:
+                    Rotate(angle=angle, axis=(0, 0, 1))
+                Translate(-width / 2.0, -height / 2.0)
+                cursor = float(height)
+                align_right = _has_hebrew(_plain_user_text(str(record.get("text") or "")))
+                for _widget, tex, tw, th in rows:
+                    cursor -= th
+                    left = float(width) - tw if align_right else 0.0
+                    Rectangle(texture=tex, pos=(left, cursor), size=(tw, th))
+                PopMatrix()
+                return
+            path = str(record.get("path") or "")
+            texture = self._stamp_texture(path) if path else None
+            tex_coords = _stamp_tex_coords(record.get("crop") or [0.0, 0.0, 1.0, 1.0])
             if texture is None:
                 return
             Color(1, 1, 1, 1)
@@ -1940,14 +1941,12 @@ class SPenAnnotationCanvas(Widget):
             if abs(angle) > 0.01:
                 Rotate(angle=angle, axis=(0, 0, 1))
             Translate(-width / 2.0, -height / 2.0)
-            kwargs: Dict[str, Any] = {
-                "texture": texture,
-                "pos": (0.0, 0.0),
-                "size": (width, height),
-            }
-            if tex_coords is not None:
-                kwargs["tex_coords"] = tex_coords
-            Rectangle(**kwargs)
+            Rectangle(
+                texture=texture,
+                pos=(0.0, 0.0),
+                size=(width, height),
+                tex_coords=tex_coords,
+            )
             PopMatrix()
             return
         color = tuple(record.get("color", COLOR_BLACK))
@@ -2762,6 +2761,7 @@ class SPenAnnotationCanvas(Widget):
                 image["font_size"] = max(10.0, float(item.get("font_size") or 28.0) * (nh / max(oh, 1.0)))
                 self._text_textures.clear()
                 self._text_texture_keepers.clear()
+                self._text_layouts.clear()
             return
         ox, oy, ow, oh = [float(v) for v in snap["box"][:4]]
         nx, ny, nw, nh = self._scaled_box(handle, snap["box"], doc, handle in {"tl", "tr", "bl", "br"})
@@ -2778,6 +2778,7 @@ class SPenAnnotationCanvas(Widget):
                     record["font_size"] = max(10.0, float(item.get("font_size") or 28.0) * sy)
                     self._text_textures.clear()
                     self._text_texture_keepers.clear()
+                    self._text_layouts.clear()
                 continue
             record["points"] = [
                 [nx + (float(p[0]) - ox) * sx, ny + (float(p[1]) - oy) * sy] for p in item["points"]
@@ -2908,16 +2909,14 @@ class SPenAnnotationCanvas(Widget):
         else:
             self.strokes.append(record)
             target = len(self.strokes) - 1
-        texture = self._text_texture(record)
-        if texture is not None:
-            width, height = max(24.0, float(texture.size[0])), max(18.0, float(texture.size[1]))
-            if index is not None:
-                x, y = float(record["rect"][0]), float(record["rect"][1])
-            else:
-                x = doc[0] - width if _has_hebrew(plain) else doc[0]
-                y = doc[1] - height
-            record["rect"] = [x, y, width, height]
-            record["points"] = [[x, y], [x + width, y + height]]
+        width, height = self._text_layout_size(record)
+        if index is not None:
+            x, y = float(record["rect"][0]), float(record["rect"][1])
+        else:
+            x = doc[0] - width if _has_hebrew(plain) else doc[0]
+            y = doc[1] - height
+        record["rect"] = [x, y, width, height]
+        record["points"] = [[x, y], [x + width, y + height]]
         self.selected_ids = [target]
         self.redraw_all()
 
@@ -4496,11 +4495,25 @@ class SamsungNotesCompanionApp(App):
             if record.get("kind") == "text":
                 try:
                     canvas = self.root_layout.pdf_canvas
-                    texture = canvas._text_texture(record)
-                    if texture is None:
+                    rows = canvas._text_layout(record)
+                    if not rows:
                         continue
-                    raw = Image.frombytes("RGBA", tuple(texture.size), bytes(texture.pixels))
-                    stamp = raw.transpose(Image.FLIP_TOP_BOTTOM)
+                    max_w = max(int(round(line_w)) for _w, _t, line_w, _h in rows)
+                    total_h = sum(int(round(line_h)) for _w, _t, _width, line_h in rows)
+                    stamp = Image.new("RGBA", (max(1, max_w), max(1, total_h)), (0, 0, 0, 0))
+                    top = 0
+                    align_right = _has_hebrew(_plain_user_text(str(record.get("text") or "")))
+                    for widget, _tex, _line_w, line_h in rows:
+                        snapshot = widget.export_as_image()
+                        raw = Image.frombytes(
+                            "RGBA",
+                            tuple(snapshot.texture.size),
+                            bytes(snapshot.texture.pixels),
+                        )
+                        line_img = raw.transpose(Image.FLIP_TOP_BOTTOM)
+                        left = max_w - line_img.size[0] if align_right else 0
+                        stamp.paste(line_img, (left, top), line_img)
+                        top += int(round(line_h))
                     rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
                     sized = stamp.resize(
                         (
@@ -5175,12 +5188,29 @@ class SamsungNotesCompanionApp(App):
         Clock.schedule_once(lambda _t, ok=accept, value=text: self._finish_android_text(value, ok), 0)
         return False
 
-    def _capture_android_text(self, accept: bool) -> None:
-        field = ""
+    def _android_edit_lines(self) -> str:
+        edit = getattr(self, "_android_edit", None)
+        if edit is None:
+            return ""
         try:
-            field = _java_chars(self._android_edit.getText())
+            layout = edit.getLayout()
+            full = _java_chars(edit.getText())
+            if layout is not None:
+                parts: List[str] = []
+                for index in range(int(layout.getLineCount())):
+                    start = int(layout.getLineStart(index))
+                    end = int(layout.getLineEnd(index))
+                    parts.append(full[start:end].replace("\r", "").replace("\n", ""))
+                return "\n".join(parts)
+            return full
         except Exception:
-            field = ""
+            try:
+                return _java_chars(edit.getText())
+            except Exception:
+                return ""
+
+    def _capture_android_text(self, accept: bool) -> None:
+        field = self._android_edit_lines()
         self._remove_android_text_panel()
         self._queue_android_text_result(accept, field)
 
