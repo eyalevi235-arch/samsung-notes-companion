@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+import unicodedata
 
 os.environ["SDL_ANDROID_SEPARATE_MOUSE_AND_TOUCH"] = "1"
 os.environ["SDL_TOUCH_MOUSE_EVENTS"] = "0"
@@ -24,6 +25,7 @@ from kivy.graphics.texture import Texture
 from kivy.graphics import (
     Color,
     Ellipse,
+    InstructionGroup,
     Line,
     PopMatrix,
     PushMatrix,
@@ -71,8 +73,9 @@ MIN_SCALE = 0.45
 MAX_SCALE = 6.0
 PDF_RENDER_SCALE = 2.0
 PDF_RENDER_MAX_SIDE = 2048.0
-PDF_PREVIEW_SCALE = 1.15
-PDF_PREVIEW_MAX_SIDE = 1280.0
+PDF_PREVIEW_SCALE = 1.0
+PDF_PREVIEW_MAX_SIDE = 900.0
+MAX_GPU_PAGES = 5
 PAGE_GAP = 28.0
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
@@ -116,6 +119,17 @@ def _first_existing(paths: Sequence[str]) -> Optional[str]:
     return None
 
 
+def _font_has_hebrew(path: str) -> bool:
+    try:
+        from PIL import ImageFont
+
+        font = ImageFont.truetype(path, 36)
+        bbox = font.getbbox("א")
+        return bool(bbox) and (bbox[2] - bbox[0]) > 1 and (bbox[3] - bbox[1]) > 1
+    except Exception:
+        return False
+
+
 def resolve_latin_font() -> Optional[str]:
     return _first_existing(
         (
@@ -129,28 +143,93 @@ def resolve_latin_font() -> Optional[str]:
 
 
 def resolve_hebrew_font() -> Optional[str]:
-    return _first_existing(
-        (
-            r"C:\Windows\Fonts\arial.ttf",
-            r"C:\Windows\Fonts\calibri.ttf",
-            "/system/fonts/NotoSansHebrew-Regular.ttf",
-            "/system/fonts/NotoSansHebrew-VF.ttf",
-            "/system/fonts/SamsungSans-Regular.ttf",
-            "/system/fonts/Roboto-Regular.ttf",
-        )
+    preferred = [
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+        "/system/fonts/NotoSansHebrew-Regular.ttf",
+        "/system/fonts/DroidSansHebrew.ttf",
+        "/system/fonts/NotoSerifHebrew-Regular.ttf",
+        "/system/fonts/SamsungOneUI-Regular.ttf",
+        "/system/fonts/SamsungOne-400.ttf",
+        "/system/fonts/SamsungSans-Regular.ttf",
+        "/system/fonts/SECGeneric-Regular.ttf",
+    ]
+    found: List[str] = [path for path in preferred if os.path.isfile(path)]
+    fonts_dir = "/system/fonts"
+    if os.path.isdir(fonts_dir):
+        try:
+            for name in os.listdir(fonts_dir):
+                lower = name.lower()
+                if not lower.endswith((".ttf", ".otf")):
+                    continue
+                if "italic" in lower or "bold" in lower:
+                    continue
+                if "vf" in lower and "hebrew" not in lower:
+                    continue
+                if any(key in lower for key in ("hebrew", "samsungone", "samsung-sans", "samsungoneui", "notosans")):
+                    found.append(os.path.join(fonts_dir, name))
+        except Exception:
+            pass
+    ranked = sorted(
+        dict.fromkeys(found),
+        key=lambda path: (
+            0 if "hebrew" in os.path.basename(path).lower() else 1,
+            0 if "samsungone" in os.path.basename(path).lower() else 1,
+            os.path.basename(path).lower(),
+        ),
     )
+    for path in ranked:
+        if _font_has_hebrew(path):
+            return path
+    return _first_existing(preferred)
 
 
 def apply_ui_font() -> None:
-    latin = resolve_latin_font()
     hebrew = resolve_hebrew_font()
+    latin = resolve_latin_font()
+    path = hebrew or latin
+    if not path:
+        return
     try:
-        if latin:
-            LabelBase.register(name="LatinFont", fn_regular=latin)
-        if hebrew:
-            LabelBase.register(name="HebrewFont", fn_regular=hebrew)
+        LabelBase.register(name="Roboto", fn_regular=path)
+        LabelBase.register(name="HebrewFont", fn_regular=path)
+        LabelBase.register(name="LatinFont", fn_regular=path)
     except Exception:
         pass
+
+
+def ui_text(text: str) -> str:
+    """Reorder Hebrew for Kivy's LTR renderer so letters read right-to-left."""
+    if not text or not any("\u0590" <= ch <= "\u05FF" for ch in text):
+        return text
+    chunks: List[str] = []
+    buf: List[str] = []
+    mode: Optional[bool] = None
+
+    def flush() -> None:
+        if not buf or mode is None:
+            return
+        block = "".join(buf)
+        chunks.append(block[::-1] if mode else block)
+        buf.clear()
+
+    for ch in text:
+        bid = unicodedata.bidirectional(ch)
+        if bid in {"R", "AL", "RLE", "RLO"}:
+            rtl = True
+        elif bid in {"L", "LRE", "LRO", "EN", "AN", "ET", "ES"}:
+            rtl = False
+        else:
+            rtl = True if mode is None else mode
+        if mode is None:
+            mode = rtl
+        elif rtl != mode:
+            flush()
+            mode = rtl
+        buf.append(ch)
+    flush()
+    chunks.reverse()
+    return "".join(chunks)
 
 
 def set_latin_font(widget: Any) -> None:
@@ -246,9 +325,10 @@ def shape_points(kind: str, start: Point, end: Point) -> List[Point]:
 
 
 def _pil_to_texture(image: Any) -> Any:
-    rgba = image.convert("RGBA")
-    texture = Texture.create(size=rgba.size, colorfmt="rgba")
-    texture.blit_buffer(rgba.tobytes(), colorfmt="rgba", bufferfmt="ubyte")
+    if image.mode != "RGB":
+        image = _image_rgb_on_white(image)
+    texture = Texture.create(size=image.size, colorfmt="rgb")
+    texture.blit_buffer(image.tobytes(), colorfmt="rgb", bufferfmt="ubyte")
     texture.flip_vertical()
     texture.wrap = "clamp_to_edge"
     texture.mag_filter = "linear"
@@ -537,6 +617,14 @@ class SPenAnnotationCanvas(Widget):
         self._live_width: float = 2.5
         self._live_dashed: bool = False
         self._page_textures: List[Any] = []
+        self._tx: Optional[Translate] = None
+        self._sc: Optional[Scale] = None
+        self._clip_rect: Optional[Rectangle] = None
+        self._pages_group: Optional[InstructionGroup] = None
+        self._strokes_group: Optional[InstructionGroup] = None
+        self._live_group: Optional[InstructionGroup] = None
+        self._page_image_rects: Dict[int, Rectangle] = {}
+        self._visible_range: Optional[Tuple[int, int]] = None
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -544,34 +632,34 @@ class SPenAnnotationCanvas(Widget):
         app = App.get_running_app()
         if self.view_role == "notes":
             app.bind(
-                notes_scale=self._on_view,
-                notes_pan_x=self._on_view,
-                view_pan_y=self._on_view,
-                notes_page_width=self._on_view,
-                page_width=self._on_view,
-                page_height=self._on_view,
-                page_count=self._on_view,
+                notes_scale=self._apply_view,
+                notes_pan_x=self._apply_view,
+                view_pan_y=self._apply_view,
+                notes_page_width=self._rebuild_scene,
+                page_width=self._rebuild_scene,
+                page_height=self._rebuild_scene,
+                page_count=self._rebuild_scene,
             )
         else:
             app.bind(
-                view_scale=self._on_view,
-                view_pan_x=self._on_view,
-                view_pan_y=self._on_view,
-                page_width=self._on_view,
-                page_height=self._on_view,
-                page_count=self._on_view,
+                view_scale=self._apply_view,
+                view_pan_x=self._apply_view,
+                view_pan_y=self._apply_view,
+                page_width=self._rebuild_scene,
+                page_height=self._rebuild_scene,
+                page_count=self._rebuild_scene,
             )
-        self.bind(show_grid=self._on_view, show_document_image=self._on_view)
-        Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
+        self.bind(show_grid=self._rebuild_scene, show_document_image=self._rebuild_scene)
+        Clock.schedule_once(lambda _dt: self._rebuild_scene(), 0)
 
     def _on_geom(self, *_args: Any) -> None:
         if self._bg_rect is not None:
             self._bg_rect.pos = self.pos
             self._bg_rect.size = self.size
-        self.redraw_all()
-
-    def _on_view(self, *_args: Any) -> None:
-        self.redraw_all()
+        if self._clip_rect is not None:
+            self._clip_rect.pos = self.pos
+            self._clip_rect.size = self.size
+        self._apply_view()
 
     def collide_point(self, x: float, y: float) -> bool:
         if self.disabled or self.opacity <= 0 or self.width <= 1 or self.height <= 1:
@@ -646,14 +734,15 @@ class SPenAnnotationCanvas(Widget):
             return
         self._page_textures[index] = texture
         app = App.get_running_app()
-        if index == 0 or float(app.page_width) <= 1:
-            app.page_width = float(texture.size[0])
-            app.page_height = float(texture.size[1])
         app.page_count = total
-        self.redraw_all()
+        rect = self._page_image_rects.get(index)
+        if rect is not None:
+            rect.texture = texture
+        else:
+            self._fill_pages_group()
 
     def set_blank_notebook(self, count: int, width: float = 0.0, height: float = 0.0) -> None:
-        self._page_textures = []
+        self._page_textures = [None] * max(1, int(count))
         app = App.get_running_app()
         app.page_count = max(1, int(count))
         if self.view_role == "notes" and width > 0:
@@ -721,6 +810,155 @@ class SPenAnnotationCanvas(Widget):
             return True
         return int(getattr(app, "tool_type", 0) or 0) == TOOL_ERASER
 
+    def _visible_pages(self) -> Tuple[int, int]:
+        app = App.get_running_app()
+        count = max(1, int(app.page_count))
+        _ox, origin_y, _dw, _dh, scale, _pw, page_h = self._page_metrics()
+        if scale <= 1e-6 or self.height <= 1:
+            return (0, min(count - 1, 1))
+        doc_bottom = (self.y - origin_y) / scale
+        doc_top = (self.y + self.height - origin_y) / scale
+        if doc_bottom > doc_top:
+            doc_bottom, doc_top = doc_top, doc_bottom
+        pad = page_h
+        first = last = None
+        for index in range(count):
+            y0 = self._page_origin_y(index, page_h)
+            y1 = y0 + page_h
+            if y1 >= doc_bottom - pad and y0 <= doc_top + pad:
+                if first is None:
+                    first = index
+                last = index
+        if first is None or last is None:
+            return (0, 0)
+        if last - first > MAX_GPU_PAGES - 1:
+            mid = (doc_bottom + doc_top) / 2.0
+            best = first
+            best_dist = 1e12
+            for index in range(first, last + 1):
+                center = self._page_origin_y(index, page_h) + page_h / 2.0
+                dist = abs(center - mid)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = index
+            first = max(first, best - 2)
+            last = min(last, best + 2)
+        return (first, last)
+
+    def evict_page_textures(self, keep: Sequence[int]) -> None:
+        keep_set = set(keep)
+        loaded = [index for index, tex in enumerate(self._page_textures) if tex is not None]
+        if len(loaded) <= MAX_GPU_PAGES:
+            return
+        for index in loaded:
+            if index in keep_set:
+                continue
+            self._page_textures[index] = None
+            rect = self._page_image_rects.get(index)
+            if rect is not None:
+                rect.texture = None
+
+    def _apply_view(self, *_args: Any) -> None:
+        if self._tx is None or self._sc is None:
+            self._rebuild_scene()
+            return
+        origin_x, origin_y, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+        self._tx.x = origin_x
+        self._tx.y = origin_y
+        self._sc.x = scale
+        self._sc.y = scale
+        visible = self._visible_pages()
+        if visible != self._visible_range:
+            self._visible_range = visible
+            self._fill_pages_group()
+        app = App.get_running_app()
+        if self.view_role == "pdf" and hasattr(app, "request_visible_pages"):
+            app.request_visible_pages()
+
+    def _rebuild_scene(self, *_args: Any) -> None:
+        origin_x, origin_y, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+        self.canvas.clear()
+        self._page_image_rects = {}
+        self._visible_range = None
+        with self.canvas:
+            StencilPush()
+            Color(1, 1, 1, 1)
+            self._clip_rect = Rectangle(pos=self.pos, size=self.size)
+            StencilUse()
+            PushMatrix()
+            self._tx = Translate(origin_x, origin_y)
+            self._sc = Scale(scale, scale, 1)
+        self._pages_group = InstructionGroup()
+        self._strokes_group = InstructionGroup()
+        self._live_group = InstructionGroup()
+        self.canvas.add(self._pages_group)
+        self.canvas.add(self._strokes_group)
+        self.canvas.add(self._live_group)
+        with self.canvas:
+            PopMatrix()
+            StencilUnUse()
+            StencilPop()
+        self._fill_pages_group()
+        self._fill_strokes_group()
+        self._sync_live()
+
+    def _fill_pages_group(self) -> None:
+        if self._pages_group is None:
+            return
+        self._pages_group.clear()
+        self._page_image_rects = {}
+        origin_metrics = self._page_metrics()
+        page_w, page_h = origin_metrics[5], origin_metrics[6]
+        count = max(1, int(App.get_running_app().page_count))
+        first, last = self._visible_pages()
+        self._visible_range = (first, last)
+        with self._pages_group:
+            for index in range(first, last + 1):
+                page_y = self._page_origin_y(index, page_h)
+                Color(*PAGE_WHITE)
+                Rectangle(pos=(0, page_y), size=(page_w, page_h))
+                has_page_image = (
+                    self.show_document_image
+                    and index < len(self._page_textures)
+                    and self._page_textures[index] is not None
+                )
+                if has_page_image:
+                    Color(1, 1, 1, 1)
+                    rect = Rectangle(
+                        texture=self._page_textures[index],
+                        pos=(0, page_y),
+                        size=(page_w, page_h),
+                    )
+                    self._page_image_rects[index] = rect
+                elif self.show_grid:
+                    self._draw_grid(page_w, page_h, page_y)
+
+    def _fill_strokes_group(self) -> None:
+        if self._strokes_group is None:
+            return
+        self._strokes_group.clear()
+        with self._strokes_group:
+            for record in self.strokes:
+                self._draw_record(record)
+
+    def _sync_live(self) -> None:
+        if self._live_group is None:
+            return
+        self._live_group.clear()
+        if len(self.current_stroke) < 2:
+            return
+        with self._live_group:
+            self._draw_record(
+                {
+                    "points": [list(point) for point in self.current_stroke],
+                    "color": list(self._live_color),
+                    "width": self._live_width,
+                    "dashed": self._live_dashed,
+                    "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
+                    "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
+                }
+            )
+
     def _draw_record(self, record: StrokeRecord) -> None:
         color = tuple(record.get("color", COLOR_BLACK))
         width = float(record.get("width", self.ink_width))
@@ -742,51 +980,12 @@ class SPenAnnotationCanvas(Widget):
             Line(points=flat, width=width, cap="round", joint="round")
 
     def redraw_all(self) -> None:
-        origin_x, origin_y, _dw, _dh, scale, page_w, page_h = self._page_metrics()
-        count = max(1, int(App.get_running_app().page_count))
-        self.canvas.clear()
-        with self.canvas:
-            StencilPush()
-            Color(1, 1, 1, 1)
-            Rectangle(pos=self.pos, size=self.size)
-            StencilUse()
-            PushMatrix()
-            Translate(origin_x, origin_y)
-            Scale(scale, scale, 1)
-            for index in range(count):
-                page_y = self._page_origin_y(index, page_h)
-                Color(*PAGE_WHITE)
-                Rectangle(pos=(0, page_y), size=(page_w, page_h))
-                has_page_image = (
-                    self.show_document_image
-                    and index < len(self._page_textures)
-                    and self._page_textures[index] is not None
-                )
-                if has_page_image:
-                    Color(1, 1, 1, 1)
-                    Rectangle(
-                        texture=self._page_textures[index],
-                        pos=(0, page_y),
-                        size=(page_w, page_h),
-                    )
-                elif self.show_grid:
-                    self._draw_grid(page_w, page_h, page_y)
-            for record in self.strokes:
-                self._draw_record(record)
-            if len(self.current_stroke) >= 2:
-                self._draw_record(
-                    {
-                        "points": [list(point) for point in self.current_stroke],
-                        "color": list(self._live_color),
-                        "width": self._live_width,
-                        "dashed": self._live_dashed,
-                        "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
-                        "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
-                    }
-                )
-            PopMatrix()
-            StencilUnUse()
-            StencilPop()
+        if self._tx is None:
+            self._rebuild_scene()
+            return
+        self._fill_strokes_group()
+        self._sync_live()
+        self._apply_view()
 
     def _draw_grid(self, page_w: float, page_h: float, page_y: float) -> None:
         step = max(24.0, min(page_w, page_h) / 22.0)
@@ -882,7 +1081,7 @@ class SPenAnnotationCanvas(Widget):
         app = App.get_running_app()
         app._multitouch = True
         self.current_stroke = []
-        self.redraw_all()
+        self._sync_live()
         app._fingers = dict(app._pointers)
         touch.ud["mode"] = "pinch"
         self._begin_pinch(app)
@@ -958,10 +1157,10 @@ class SPenAnnotationCanvas(Widget):
             self.current_stroke = shape_points(
                 str(touch.ud["shape"]), start, self.to_doc(touch.x, touch.y)
             )
-            self.redraw_all()
+            self._sync_live()
             return True
         self.current_stroke.append(self.to_doc(touch.x, touch.y))
-        self.redraw_all()
+        self._sync_live()
         return True
 
     def on_touch_up(self, touch: MotionEvent) -> bool:
@@ -996,7 +1195,8 @@ class SPenAnnotationCanvas(Widget):
                 }
             )
         self.current_stroke = []
-        self.redraw_all()
+        self._fill_strokes_group()
+        self._sync_live()
         return True
 
     def serialized_strokes(self) -> List[StrokeRecord]:
@@ -1064,7 +1264,7 @@ class RootLayout(FloatLayout):
         self.dock_notes()
 
     def set_status(self, message: str) -> None:
-        self.status_label.text = message
+        self.status_label.text = ui_text(message)
 
     def _build_header(self) -> BoxLayout:
         app = App.get_running_app()
@@ -1100,12 +1300,12 @@ class RootLayout(FloatLayout):
         )
         set_hebrew_font(self.status_label)
         self.title_button = Button(
-            text=f"{app.document_title}  >",
+            text=ui_text(f"> {app.document_title}"),
             color=(0.12, 0.12, 0.14, 1),
             font_size=dp(16),
             bold=True,
             size_hint_x=None,
-            width=dp(160),
+            width=dp(200),
             background_normal="",
             background_down="",
             background_color=(1, 1, 1, 1),
@@ -1289,7 +1489,7 @@ class RootLayout(FloatLayout):
 
     def refresh_title(self) -> None:
         app = App.get_running_app()
-        self.title_button.text = f"{app.document_title}  >"
+        self.title_button.text = ui_text(f"> {app.document_title}")
 
     def set_page_status(self, index: int, count: int) -> None:
         if count <= 0:
@@ -1329,6 +1529,8 @@ class SamsungNotesCompanionApp(App):
         self._preview_token: int = 0
         self._preview_renderer: Any = None
         self._preview_pfd: Any = None
+        self._preview_queue: List[int] = []
+        self._preview_busy: bool = False
         self.spen_button_held: bool = False
         self.pointer_count = 1
         self.down_tool_type = 0
@@ -1446,7 +1648,7 @@ class SamsungNotesCompanionApp(App):
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
         buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="שם המסמך", content=body, size_hint=(0.8, 0.4))
+        popup = Popup(title=ui_text("שם המסמך"), content=body, size_hint=(0.8, 0.4))
 
         def _save(_btn: Button) -> None:
             name = field.text.strip() or "כותרת"
@@ -1454,13 +1656,13 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.refresh_title()
             popup.dismiss()
 
-        save_btn = Button(text="שמירה")
-        cancel_btn = Button(text="ביטול")
+        save_btn = Button(text=ui_text("שמירה"))
+        cancel_btn = Button(text=ui_text("ביטול"))
         save_btn.bind(on_release=_save)
         cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
         buttons.add_widget(save_btn)
         buttons.add_widget(cancel_btn)
-        body.add_widget(Label(text="בחרו שם למסמך", size_hint_y=None, height=dp(28)))
+        body.add_widget(Label(text=ui_text("בחרו שם למסמך"), size_hint_y=None, height=dp(28)))
         body.add_widget(field)
         body.add_widget(buttons)
         popup.open()
@@ -1488,8 +1690,8 @@ class SamsungNotesCompanionApp(App):
     def _notify_long(self, message: str) -> None:
         self._notify(message)
         field = TextInput(text=message, readonly=True, multiline=True)
-        set_latin_font(field)
-        Popup(title="שגיאה", content=field, size_hint=(0.94, 0.6)).open()
+        set_hebrew_font(field)
+        Popup(title=ui_text("שגיאה"), content=field, size_hint=(0.94, 0.6)).open()
 
     def _on_key_down(self, *_args: Any, **kwargs: Any) -> bool:
         key = _args[1] if len(_args) > 1 else None
@@ -1716,7 +1918,7 @@ class SamsungNotesCompanionApp(App):
         stream = autoclass("java.io.FileOutputStream")(handle.name)
         fmt = autoclass("android.graphics.Bitmap$CompressFormat")
         if jpeg:
-            ok = bool(bitmap.compress(fmt.JPEG, 82, stream))
+            ok = bool(bitmap.compress(fmt.JPEG, 70, stream))
         else:
             ok = bool(bitmap.compress(fmt.PNG, 100, stream))
         stream.close()
@@ -1746,7 +1948,12 @@ class SamsungNotesCompanionApp(App):
         if for_export:
             scale = min(PDF_RENDER_SCALE, PDF_RENDER_MAX_SIDE / max(page_w, page_h))
         else:
-            scale = min(PDF_PREVIEW_SCALE, PDF_PREVIEW_MAX_SIDE / max(page_w, page_h))
+            cap = PDF_PREVIEW_MAX_SIDE
+            try:
+                cap = min(cap, max(720.0, float(Window.width) * 1.1))
+            except Exception:
+                pass
+            scale = min(PDF_PREVIEW_SCALE, cap / max(page_w, page_h))
         width = max(1, int(round(page_w * scale)))
         height = max(1, int(round(page_h * scale)))
         bitmap_cls = autoclass("android.graphics.Bitmap")
@@ -1862,6 +2069,8 @@ class SamsungNotesCompanionApp(App):
         Clock.schedule_once(lambda _dt: self.clamp_view(), 0)
 
     def _close_preview_renderer(self) -> None:
+        self._preview_queue = []
+        self._preview_busy = False
         renderer = getattr(self, "_preview_renderer", None)
         pfd = getattr(self, "_preview_pfd", None)
         self._preview_renderer = None
@@ -1881,7 +2090,7 @@ class SamsungNotesCompanionApp(App):
         if uri is not None and (not self.pdf_path or str(self.pdf_path).startswith("content:")):
             self.pdf_path = self._copy_uri_to_temp(uri, ".pdf")
         self._preview_token += 1
-        token = self._preview_token
+        self._preview_opened_msg = False
         self._close_preview_renderer()
         try:
             from jnius import autoclass
@@ -1901,6 +2110,13 @@ class SamsungNotesCompanionApp(App):
             pfd.close()
             self._notify_long("PdfRenderer reported 0 pages")
             return
+        try:
+            page = renderer.openPage(0)
+            self.page_width = max(1.0, float(page.getWidth()))
+            self.page_height = max(1.0, float(page.getHeight()))
+            page.close()
+        except Exception:
+            pass
         self._pdf_page_count = count
         self.page_count = count
         self._preview_pfd = pfd
@@ -1910,36 +2126,73 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.sync_notes_page_size()
         self.root_layout.pdf_canvas.load_strokes(self._pages_to_stacked(self._page_strokes))
         self.root_layout.notes_canvas.load_strokes(self._pages_to_stacked(self._notes_strokes))
-        self.root_layout.set_status(f"טוען 0/{count}")
-        Clock.schedule_once(lambda _dt: self._preview_next_page(token, 0), 0)
+        self.root_layout.set_status(f"טוען 1/{count}")
+        self.request_visible_pages()
 
-    def _preview_next_page(self, token: int, index: int) -> None:
-        if token != self._preview_token:
+    def request_visible_pages(self) -> None:
+        if self._preview_renderer is None:
             return
-        renderer = self._preview_renderer
+        canvas = self.root_layout.pdf_canvas
+        first, last = canvas._visible_pages()
         count = int(self._pdf_page_count or 0)
-        if renderer is None or index >= count:
-            self._close_preview_renderer()
-            self.root_layout.set_page_status(0, count)
-            textures = self.root_layout.pdf_canvas._page_textures
-            if count > 0 and any(tex is not None for tex in textures):
+        if count <= 0:
+            return
+        keep = list(range(max(0, first - 1), min(count, last + 2)))
+        canvas.evict_page_textures(keep)
+        textures = canvas._page_textures
+        missing: List[int] = []
+        for index in keep:
+            while len(textures) <= index:
+                textures.append(None)
+            if textures[index] is None:
+                missing.append(index)
+        if missing:
+            self._enqueue_preview(missing)
+
+    def _enqueue_preview(self, indices: Sequence[int]) -> None:
+        for index in indices:
+            idx = int(index)
+            if idx not in self._preview_queue:
+                self._preview_queue.append(idx)
+        if not self._preview_busy:
+            self._preview_busy = True
+            Clock.schedule_once(self._pump_preview, 0)
+
+    def _pump_preview(self, *_args: Any) -> None:
+        if self._preview_renderer is None:
+            self._preview_busy = False
+            self._preview_queue = []
+            return
+        if self._pointers:
+            Clock.schedule_once(self._pump_preview, 0.12)
+            return
+        textures = self.root_layout.pdf_canvas._page_textures
+        index: Optional[int] = None
+        while self._preview_queue:
+            candidate = self._preview_queue.pop(0)
+            if candidate >= len(textures) or textures[candidate] is None:
+                index = candidate
+                break
+        if index is None:
+            self._preview_busy = False
+            if not getattr(self, "_preview_opened_msg", False):
+                self._preview_opened_msg = True
                 self._notify(f"PDF נפתח לכתיבה: {self.document_title}")
-            elif count > 0:
-                self._notify("ה-PDF נפתח אבל טעינת התמונות נכשלה")
+            else:
+                self.root_layout.set_page_status(0, self._pdf_page_count)
             return
         path = None
         try:
-            page = renderer.openPage(int(index))
+            page = self._preview_renderer.openPage(int(index))
             try:
                 path = self._render_opened_page(page, for_export=False)
             finally:
                 page.close()
             if path:
-                self.root_layout.pdf_canvas.set_page_image_at(index, path, count)
+                self.root_layout.pdf_canvas.set_page_image_at(index, path, self._pdf_page_count)
                 if index == 0:
                     self.root_layout.sync_notes_page_size()
-                    Clock.schedule_once(lambda _dt: self.root_layout.sync_notes_page_size(), 0)
-            self.root_layout.set_status(f"טוען {index + 1}/{count}")
+            self.root_layout.set_status(f"טוען {index + 1}/{self._pdf_page_count}")
         except Exception as exc:
             if index == 0:
                 self._notify_long(f"לא ניתן לרנדר את ה-PDF: {exc}")
@@ -1949,7 +2202,7 @@ class SamsungNotesCompanionApp(App):
                     os.unlink(path)
                 except Exception:
                     pass
-        Clock.schedule_once(lambda _dt: self._preview_next_page(token, index + 1), 0)
+        Clock.schedule_once(self._pump_preview, 0.06)
 
     def _uri_display_name(self, uri: Any) -> str:
         try:
