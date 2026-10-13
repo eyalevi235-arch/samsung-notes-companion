@@ -3303,17 +3303,34 @@ class LibraryScreen(Screen):
         moving = bool(getattr(app, "_library_moving", False))
         picked = set(getattr(app, "_library_move_ids", set()) or [])
         self.body.clear_widgets()
-        folders = list(data.get("folders") or [])
-        docs = list(data.get("documents") or [])
-        docs.sort(key=lambda item: float(item.get("updated") or 0.0), reverse=True)
         self.move_btn.text = mixed_markup("ביטול" if moving else "העברה")
-        self.move_btn.opacity = 0 if selected == LIBRARY_ALL else 1
-        self.move_btn.disabled = selected == LIBRARY_ALL
-        if selected == LIBRARY_ALL:
-            self.title.text = mixed_markup("התיקיות שלי")
+        current = app._library_parent_id(selected)
+        child_folders = app._child_folders(data, current)
+        visible = app._docs_in_folder(data, current)
+        if not current:
+            self.title.text = mixed_markup("הספרייה")
+        else:
+            folder = app._folder_by_id(data, current)
+            self.title.text = mixed_markup(_short_label(str((folder or {}).get("name") or "תיקייה"), 16))
+            parent_id = str((folder or {}).get("parent_id") or "") or LIBRARY_ALL
+            back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+            back = Button(
+                text=mixed_markup("חזרה"),
+                markup=True,
+                size_hint=(None, 1),
+                width=dp(84),
+                background_normal="",
+                background_down="",
+                background_color=(0.26, 0.28, 0.32, 1),
+                color=(0.82, 0.86, 0.94, 1),
+            )
+            back.bind(on_release=lambda *_a, pid=parent_id: app.select_library_folder(pid or LIBRARY_ALL))
+            back_row.add_widget(Widget())
+            back_row.add_widget(back)
+            self.body.add_widget(back_row)
+        if child_folders:
             folder_grid = self._grid()
-            folder_grid.add_widget(FolderTile(LIBRARY_UNFILED, "ללא תיקייה", "#9AA0A8"))
-            for folder in folders:
+            for folder in child_folders:
                 folder_grid.add_widget(
                     FolderTile(
                         str(folder.get("id") or ""),
@@ -3322,36 +3339,12 @@ class LibraryScreen(Screen):
                     )
                 )
             self.body.add_widget(folder_grid)
-            return
-        if selected == LIBRARY_UNFILED:
-            name = "ללא תיקייה"
-            visible = [doc for doc in docs if not str(doc.get("folder_id") or "")]
-            color = "#9AA0A8"
-        else:
-            folder = next((item for item in folders if str(item.get("id")) == selected), None)
-            name = str((folder or {}).get("name") or "תיקייה")
-            visible = [doc for doc in docs if str(doc.get("folder_id") or "") == selected]
-            color = str((folder or {}).get("color") or "#2F80ED")
-        self.title.text = mixed_markup(_short_label(name, 16))
-        back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        back = Button(
-            text=mixed_markup("תיקיות"),
-            markup=True,
-            size_hint=(None, 1),
-            width=dp(84),
-            background_normal="",
-            background_down="",
-            background_color=(0.26, 0.28, 0.32, 1),
-            color=(0.82, 0.86, 0.94, 1),
-        )
-        back.bind(on_release=lambda *_a: app.select_library_folder(LIBRARY_ALL))
-        back_row.add_widget(Widget())
-        back_row.add_widget(back)
-        self.body.add_widget(back_row)
-        note_grid = self._grid()
-        for doc in visible:
-            note_grid.add_widget(NoteTile(doc, color, checked=str(doc.get("id")) in picked))
-        self.body.add_widget(note_grid)
+        if visible:
+            color = str((app._folder_by_id(data, current) or {}).get("color") or "#2F80ED")
+            note_grid = self._grid()
+            for doc in visible:
+                note_grid.add_widget(NoteTile(doc, color, checked=str(doc.get("id")) in picked))
+            self.body.add_widget(note_grid)
 
 
 class RootLayout(FloatLayout):
@@ -4041,11 +4034,71 @@ class SamsungNotesCompanionApp(App):
         path = self.library_index_path()
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            payload.setdefault("folders", [])
-            payload.setdefault("documents", [])
-            return payload
         except Exception:
-            return {"folders": [], "documents": []}
+            payload = {}
+        payload.setdefault("folders", [])
+        payload.setdefault("documents", [])
+        changed = False
+        for folder in payload["folders"]:
+            if "parent_id" not in folder:
+                folder["parent_id"] = ""
+                changed = True
+        if changed:
+            self._save_library_data(payload)
+        return payload
+
+    def _library_parent_id(self, folder_id: Optional[str] = None) -> str:
+        current = str(folder_id if folder_id is not None else getattr(self, "_library_folder", "") or "")
+        if current in {LIBRARY_ALL, LIBRARY_UNFILED, ""}:
+            return ""
+        return current
+
+    def _folder_by_id(self, data: Dict[str, Any], folder_id: str) -> Optional[Dict[str, Any]]:
+        return next((item for item in data.get("folders") or [] if str(item.get("id")) == str(folder_id)), None)
+
+    def _child_folders(self, data: Dict[str, Any], parent_id: str) -> List[Dict[str, Any]]:
+        pid = self._library_parent_id(parent_id)
+        return [item for item in data.get("folders") or [] if str(item.get("parent_id") or "") == pid]
+
+    def _docs_in_folder(self, data: Dict[str, Any], folder_id: str) -> List[Dict[str, Any]]:
+        fid = self._library_parent_id(folder_id)
+        docs = [item for item in data.get("documents") or [] if str(item.get("folder_id") or "") == fid]
+        docs.sort(key=lambda item: float(item.get("updated") or 0.0), reverse=True)
+        return docs
+
+    def _folder_descendants(self, data: Dict[str, Any], folder_id: str) -> List[str]:
+        found: List[str] = []
+        stack = [str(folder_id)]
+        while stack:
+            current = stack.pop()
+            for child in self._child_folders(data, current):
+                child_id = str(child.get("id") or "")
+                if child_id and child_id not in found:
+                    found.append(child_id)
+                    stack.append(child_id)
+        return found
+
+    def _folder_path_label(self, data: Dict[str, Any], folder_id: str) -> str:
+        if not folder_id:
+            return "הספרייה"
+        names: List[str] = []
+        current = str(folder_id)
+        seen = set()
+        while current and current not in seen:
+            seen.add(current)
+            folder = self._folder_by_id(data, current)
+            if folder is None:
+                break
+            names.append(str(folder.get("name") or "תיקייה"))
+            current = str(folder.get("parent_id") or "")
+        names.reverse()
+        return " / ".join(names) if names else "תיקייה"
+
+    def _folder_tree_doc_ids(self, data: Dict[str, Any], folder_id: str) -> List[str]:
+        ids = [str(item.get("id") or "") for item in self._docs_in_folder(data, folder_id)]
+        for child_id in self._folder_descendants(data, folder_id):
+            ids.extend(str(item.get("id") or "") for item in self._docs_in_folder(data, child_id))
+        return [item for item in ids if item]
 
     def _save_library_data(self, data: Dict[str, Any]) -> None:
         path = self.library_index_path()
@@ -4136,8 +4189,7 @@ class SamsungNotesCompanionApp(App):
             self._current_doc_id = doc_id
         data = self.library_data()
         docs = data.setdefault("documents", [])
-        current_folder = str(self._library_folder or LIBRARY_ALL)
-        folder_id = "" if current_folder in {LIBRARY_ALL, LIBRARY_UNFILED} else current_folder
+        folder_id = self._library_parent_id()
         entry = {
             "id": doc_id,
             "title": self.document_title,
@@ -4218,10 +4270,47 @@ class SamsungNotesCompanionApp(App):
         ids = [str(item) for item in doc_ids if item]
         if not ids:
             return
+
+        def _pick(folder_id: str) -> None:
+            for doc_id in ids:
+                self._set_doc_folder(doc_id, folder_id)
+            self._library_moving = False
+            self._library_move_ids = set()
+            self.library_screen.refresh()
+            self._notify("המסמך הועבר")
+
+        self._pick_library_destination("העברה לתיקייה", _pick)
+
+    def place_library_folder(self, folder_id: str) -> None:
         data = self.library_data()
-        folders = list(data.get("folders") or [])
+        blocked = {str(folder_id)} | set(self._folder_descendants(data, folder_id))
+
+        def _pick(parent_id: str) -> None:
+            if parent_id in blocked:
+                self._notify("לא ניתן להעביר לתיקייה הזו")
+                return
+            folder = self._folder_by_id(self.library_data(), folder_id)
+            if folder is None:
+                return
+            self._patched_folder_parent(folder_id, parent_id)
+            self.library_screen.refresh()
+            self._notify("התיקייה הועברה")
+
+        self._pick_library_destination("העברה לתיקייה", _pick, exclude=blocked)
+
+    def _patched_folder_parent(self, folder_id: str, parent_id: str) -> Dict[str, Any]:
+        data = self.library_data()
+        folder = self._folder_by_id(data, folder_id)
+        if folder is not None:
+            folder["parent_id"] = parent_id
+            self._save_library_data(data)
+        return data
+
+    def _pick_library_destination(self, heading: str, on_pick: Any, exclude: Optional[set] = None) -> None:
+        blocked = set(exclude or set())
+        data = self.library_data()
         body = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
-        popup = Popup(title="", content=body, size_hint=(0.86, 0.62), separator_height=0, background_color=(0, 0, 0, 0))
+        popup = Popup(title="", content=body, size_hint=(0.86, 0.72), separator_height=0, background_color=(0, 0, 0, 0))
         with body.canvas.before:
             Color(0.20, 0.21, 0.24, 1)
             sheet = RoundedRectangle(radius=[dp(22)])
@@ -4229,8 +4318,8 @@ class SamsungNotesCompanionApp(App):
             pos=lambda *_a: setattr(sheet, "pos", body.pos),
             size=lambda *_a: setattr(sheet, "size", body.size),
         )
-        heading = Label(
-            text=mixed_markup("העברה לתיקייה"),
+        title = Label(
+            text=mixed_markup(heading),
             markup=True,
             color=(0.94, 0.95, 0.97, 1),
             font_size=dp(18),
@@ -4240,33 +4329,38 @@ class SamsungNotesCompanionApp(App):
         )
         grid = GridLayout(cols=3, spacing=dp(8), size_hint_y=None)
         grid.bind(minimum_height=grid.setter("height"))
+        scroller = ScrollView(do_scroll_x=False, size_hint_y=1)
+        scroller.add_widget(grid)
 
-        def _pick(folder_id: str) -> None:
-            for doc_id in ids:
-                self._set_doc_folder(doc_id, folder_id)
-            self._library_moving = False
-            self._library_move_ids = set()
+        def _choose(folder_id: str) -> None:
             popup.dismiss()
-            self.library_screen.refresh()
-            self._notify("המסמך הועבר")
+            on_pick(folder_id)
 
-        options = [("", "ללא תיקייה", "#9AA0A8")] + [
-            (str(folder.get("id") or ""), str(folder.get("name") or "תיקייה"), str(folder.get("color") or "#9AA0A8"))
-            for folder in folders
-        ]
-        for folder_id, title, color in options:
+        options = [("", "הספרייה", "#9AA0A8")]
+        for folder in data.get("folders") or []:
+            folder_id = str(folder.get("id") or "")
+            if not folder_id or folder_id in blocked:
+                continue
+            options.append(
+                (
+                    folder_id,
+                    self._folder_path_label(data, folder_id),
+                    str(folder.get("color") or "#9AA0A8"),
+                )
+            )
+        for folder_id, label_text, color in options:
             tile = _HoldButton(
-                on_tap=lambda fid=folder_id: _pick(fid),
+                on_tap=lambda fid=folder_id: _choose(fid),
                 size_hint_y=None,
                 height=dp(120),
             )
             glyph = FolderGlyph(color)
             glyph.pos_hint = {"center_x": 0.5, "top": 0.92}
             label = Label(
-                text=mixed_markup(_short_label(title)),
+                text=mixed_markup(_short_label(label_text, 14)),
                 markup=True,
                 color=(0.88, 0.90, 0.93, 1),
-                font_size=dp(13),
+                font_size=dp(12),
                 halign="center",
                 size_hint=(1, None),
                 height=dp(34),
@@ -4286,11 +4380,11 @@ class SamsungNotesCompanionApp(App):
             color=(0.90, 0.91, 0.94, 1),
         )
         cancel.bind(on_release=lambda *_a: popup.dismiss())
-        body.add_widget(heading)
-        body.add_widget(grid)
+        body.add_widget(title)
+        body.add_widget(scroller)
         body.add_widget(cancel)
         popup.open()
-        apply_hebrew_ui(popup, "העברה לתיקייה")
+        apply_hebrew_ui(popup, heading)
 
     def _set_doc_folder(self, doc_id: str, folder_id: str) -> None:
         data = self.library_data()
@@ -4372,7 +4466,7 @@ class SamsungNotesCompanionApp(App):
         self._action_sheet(
             name,
             (
-                ("העברה", lambda: self.move_library_folder_documents(folder_id), False),
+                ("העברה", lambda: self.place_library_folder(folder_id), False),
                 ("העתקה", lambda: self.copy_library_folder(folder_id), False),
                 ("עריכה", lambda: self.edit_library_folder(folder_id), False),
                 ("שיתוף", lambda: self.share_library_folder(folder_id), False),
@@ -4414,33 +4508,27 @@ class SamsungNotesCompanionApp(App):
         self.library_screen.refresh()
         return new_id
 
-    def move_library_folder_documents(self, folder_id: str) -> None:
+    def copy_library_folder(self, folder_id: str, parent_id: Optional[str] = None) -> Optional[str]:
         data = self.library_data()
-        ids = [
-            str(item.get("id") or "")
-            for item in data.get("documents") or []
-            if str(item.get("folder_id") or "") == folder_id
-        ]
-        self.place_library_documents([item for item in ids if item])
-
-    def copy_library_folder(self, folder_id: str) -> None:
-        data = self.library_data()
-        folder = next((item for item in data.get("folders") or [] if str(item.get("id")) == folder_id), None)
+        folder = self._folder_by_id(data, folder_id)
         if folder is None:
-            return
+            return None
         new_folder_id = uuid.uuid4().hex
         data.setdefault("folders", []).append(
             {
                 "id": new_folder_id,
-                "name": f"עותק של {folder.get('name') or 'תיקייה'}",
+                "name": f"עותק של {folder.get('name') or 'תיקייה'}" if parent_id is None else str(folder.get("name") or "תיקייה"),
                 "color": folder.get("color") or "#9AA0A8",
+                "parent_id": str(folder.get("parent_id") or "") if parent_id is None else parent_id,
             }
         )
         self._save_library_data(data)
-        for item in list(data.get("documents") or []):
-            if str(item.get("folder_id") or "") == folder_id:
-                self.copy_library_document(str(item.get("id") or ""), folder_id=new_folder_id)
+        for item in list(self._docs_in_folder(data, folder_id)):
+            self.copy_library_document(str(item.get("id") or ""), folder_id=new_folder_id)
+        for child in list(self._child_folders(data, folder_id)):
+            self.copy_library_folder(str(child.get("id") or ""), parent_id=new_folder_id)
         self.library_screen.refresh()
+        return new_folder_id
 
     def confirm_delete_library_document(self, doc_id: str) -> None:
         self._action_sheet(
@@ -4472,29 +4560,35 @@ class SamsungNotesCompanionApp(App):
 
     def delete_library_folder(self, folder_id: str) -> None:
         data = self.library_data()
+        folder = self._folder_by_id(data, folder_id)
+        parent_id = str((folder or {}).get("parent_id") or "")
+        for child in self._child_folders(data, folder_id):
+            child["parent_id"] = parent_id
+        for item in self._docs_in_folder(data, folder_id):
+            item["folder_id"] = parent_id
         data["folders"] = [item for item in data.get("folders") or [] if str(item.get("id")) != folder_id]
-        for item in data.get("documents") or []:
-            if str(item.get("folder_id") or "") == folder_id:
-                item["folder_id"] = ""
         self._save_library_data(data)
         if str(self._library_folder) == folder_id:
-            self._library_folder = LIBRARY_ALL
+            self._library_folder = parent_id or LIBRARY_ALL
         self.library_screen.refresh()
 
     def share_current_document(self, *_args: Any) -> None:
         self._autosave_library_doc()
-        self._share_active_document()
+        self._notify("מייצא PDF...")
+        Clock.schedule_once(lambda _dt: self._share_active_document(), 0.05)
 
     def share_library_document(self, doc_id: str) -> None:
+        self._notify("מייצא PDF...")
+        Clock.schedule_once(lambda _dt, item=doc_id: self._share_library_document_now(item), 0.05)
+
+    def _share_library_document_now(self, doc_id: str) -> None:
         previous = str(getattr(self, "_current_doc_id", "") or "")
         was_editor = getattr(self, "_sm", None) is not None and self._sm.current == "editor"
+        self._autosave_library_doc()
+        if previous != doc_id and not self._hydrate_library_document(doc_id):
+            return
         if previous == doc_id:
             self._autosave_library_doc()
-            self._share_active_document()
-            return
-        self._autosave_library_doc()
-        if not self._hydrate_library_document(doc_id):
-            return
         self._share_active_document()
         if previous and previous != doc_id:
             self._hydrate_library_document(previous)
@@ -4502,13 +4596,12 @@ class SamsungNotesCompanionApp(App):
             self.show_library()
 
     def share_library_folder(self, folder_id: str) -> None:
+        self._notify("מייצא PDF...")
+        Clock.schedule_once(lambda _dt, item=folder_id: self._share_library_folder_now(item), 0.05)
+
+    def _share_library_folder_now(self, folder_id: str) -> None:
         data = self.library_data()
-        ids = [
-            str(item.get("id") or "")
-            for item in data.get("documents") or []
-            if str(item.get("folder_id") or "") == folder_id
-        ]
-        ids = [item for item in ids if item]
+        ids = self._folder_tree_doc_ids(data, folder_id)
         if not ids:
             self._notify("התיקייה ריקה")
             return
@@ -4517,7 +4610,7 @@ class SamsungNotesCompanionApp(App):
         self._autosave_library_doc()
         paths: List[str] = []
         for doc_id in ids:
-            if not self._hydrate_library_document(doc_id):
+            if previous != doc_id and not self._hydrate_library_document(doc_id):
                 continue
             path = self._write_share_pdf()
             if path:
@@ -4529,14 +4622,33 @@ class SamsungNotesCompanionApp(App):
         if not paths:
             self._notify("לא ניתן לייצא PDF")
             return
-        self._android_share_pdfs(paths, "תיקייה")
+        self._android_share_pdfs(paths, self._folder_path_label(data, folder_id))
 
     def _share_active_document(self) -> None:
         path = self._write_share_pdf()
         if not path:
-            self._notify("לא ניתן לייצא PDF")
             return
         self._android_share_pdfs([path], self.document_title)
+
+    def _share_cache_dir(self) -> Path:
+        candidates: List[Path] = []
+        if is_android():
+            try:
+                from jnius import autoclass
+
+                activity = autoclass("org.kivy.android.PythonActivity").mActivity
+                candidates.append(Path(str(activity.getFilesDir().getAbsolutePath())) / "share")
+                candidates.append(Path(str(activity.getCacheDir().getAbsolutePath())))
+            except Exception:
+                pass
+        candidates.append(Path(str(self.user_data_dir)) / "share")
+        for folder in candidates:
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                return folder
+            except Exception:
+                continue
+        raise RuntimeError("cannot create share folder")
 
     def _write_share_pdf(self) -> Optional[str]:
         try:
@@ -4544,37 +4656,63 @@ class SamsungNotesCompanionApp(App):
         except Exception as exc:
             self._notify(f"ייצוא נכשל: {exc}")
             return None
-        folder = Path(str(self.user_data_dir)) / "share"
-        folder.mkdir(parents=True, exist_ok=True)
-        stem = self._file_stem()
-        path = folder / f"{stem}-{uuid.uuid4().hex[:6]}.pdf"
+        if not pdf_bytes:
+            self._notify("ייצוא נכשל")
+            return None
+        path = self._share_cache_dir() / f"note-{uuid.uuid4().hex[:10]}.pdf"
         path.write_bytes(pdf_bytes)
         return str(path)
+
+    def _android_file_uri(self, activity: Any, path: str) -> Any:
+        from jnius import autoclass
+
+        File = autoclass("java.io.File")
+        java_file = File(str(path))
+        package = str(activity.getPackageName())
+        authorities = (package + ".fileprovider", package + ".GenericFileProvider")
+        providers = (
+            "org.kivy.android.GenericFileProvider",
+            "androidx.core.content.FileProvider",
+            "android.support.v4.content.FileProvider",
+        )
+        last_error: Optional[Exception] = None
+        for cls_name in providers:
+            try:
+                provider = autoclass(cls_name)
+            except Exception as exc:
+                last_error = exc
+                continue
+            for authority in authorities:
+                try:
+                    return provider.getUriForFile(activity, authority, java_file)
+                except Exception as exc:
+                    last_error = exc
+        Uri = autoclass("android.net.Uri")
+        try:
+            return Uri.fromFile(java_file)
+        except Exception:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("FileProvider unavailable")
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
         if not files:
+            self._notify("לא נמצא קובץ PDF")
             return
         if not is_android():
-            self._notify("השיתוף זמין בטאבלט")
+            self._notify(f"PDF נשמר: {files[0]}")
             return
         try:
+            from android.runnable import run_on_ui_thread
             from jnius import autoclass
 
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             activity = PythonActivity.mActivity
             Intent = autoclass("android.content.Intent")
             String = autoclass("java.lang.String")
-            File = autoclass("java.io.File")
-            try:
-                FileProvider = autoclass("androidx.core.content.FileProvider")
-            except Exception:
-                FileProvider = autoclass("android.support.v4.content.FileProvider")
-            authority = activity.getPackageName() + ".fileprovider"
-            uris = []
-            for path in files:
-                uri = FileProvider.getUriForFile(activity, authority, File(path))
-                uris.append(uri)
+            ClipData = autoclass("android.content.ClipData")
+            uris = [self._android_file_uri(activity, path) for path in files]
             if len(uris) == 1:
                 intent = Intent(Intent.ACTION_SEND)
                 intent.setType("application/pdf")
@@ -4587,16 +4725,35 @@ class SamsungNotesCompanionApp(App):
                 intent = Intent(Intent.ACTION_SEND_MULTIPLE)
                 intent.setType("application/pdf")
                 intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
+            clip = ClipData.newRawUri(String("pdf"), uris[0])
+            for uri in uris[1:]:
+                clip.addItem(ClipData.Item(uri))
+            intent.setClipData(clip)
             intent.putExtra(Intent.EXTRA_SUBJECT, String(title or "PDF"))
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             chooser = Intent.createChooser(intent, String("שיתוף"))
             chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            activity.startActivity(chooser)
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try:
+                PackageManager = autoclass("android.content.pm.PackageManager")
+                resolved = activity.getPackageManager().queryIntentActivities(intent, int(getattr(PackageManager, "MATCH_DEFAULT_ONLY", 65536)))
+                for index in range(int(resolved.size())):
+                    package_name = resolved.get(index).activityInfo.packageName
+                    for uri in uris:
+                        activity.grantUriPermission(package_name, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            except Exception:
+                pass
+
+            @run_on_ui_thread
+            def _open() -> None:
+                activity.startActivity(chooser)
+
+            _open()
         except Exception as exc:
             self._notify(f"שיתוף נכשל: {exc}")
 
     def create_library_folder(self, *_args: Any) -> None:
-        self._folder_editor(None)
+        self._folder_editor(None, parent_id=self._library_parent_id())
 
     def edit_library_folder(self, folder_id: str) -> None:
         data = self.library_data()
@@ -4642,7 +4799,7 @@ class SamsungNotesCompanionApp(App):
         apply_hebrew_ui(popup, title)
         focus_system_keyboard(field)
 
-    def _folder_editor(self, folder: Optional[Dict[str, Any]]) -> None:
+    def _folder_editor(self, folder: Optional[Dict[str, Any]], parent_id: Optional[str] = None) -> None:
         chosen = {"color": str((folder or {}).get("color") or FOLDER_PALETTE[5][1])}
         name_state = {"text": str((folder or {}).get("name") or "")}
         name_btn = Button(
@@ -4690,7 +4847,14 @@ class SamsungNotesCompanionApp(App):
             data = self.library_data()
             folders = data.setdefault("folders", [])
             if folder is None:
-                folders.append({"id": uuid.uuid4().hex, "name": name, "color": chosen["color"]})
+                folders.append(
+                    {
+                        "id": uuid.uuid4().hex,
+                        "name": name,
+                        "color": chosen["color"],
+                        "parent_id": parent_id if parent_id is not None else self._library_parent_id(),
+                    }
+                )
             else:
                 for item in folders:
                     if str(item.get("id")) == str(folder.get("id")):
