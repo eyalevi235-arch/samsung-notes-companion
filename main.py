@@ -172,6 +172,7 @@ def _first_existing(paths: Sequence[str]) -> Optional[str]:
 
 _HEBREW_FONT_READY = False
 _LATIN_FONT_READY = False
+_INPUT_FONT_READY = False
 
 
 def resolve_latin_font() -> Optional[str]:
@@ -203,10 +204,27 @@ def resolve_hebrew_font() -> Optional[str]:
     )
 
 
+def resolve_input_font() -> Optional[str]:
+    """Font for the typing box: must contain both Hebrew and Latin glyphs."""
+    return _first_existing(
+        (
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+            "/system/fonts/DroidSansFallback.ttf",
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/SamsungOneUI-Regular.ttf",
+            "/system/fonts/SamsungOneUI-400.ttf",
+            "/system/fonts/SamsungOne-400.ttf",
+            "/system/fonts/SamsungSans-Regular.ttf",
+        )
+    )
+
+
 def apply_ui_font() -> None:
-    global _HEBREW_FONT_READY, _LATIN_FONT_READY
+    global _HEBREW_FONT_READY, _LATIN_FONT_READY, _INPUT_FONT_READY
     latin = resolve_latin_font()
     hebrew = resolve_hebrew_font()
+    typed = resolve_input_font()
     try:
         if latin:
             LabelBase.register(name="LatinFont", fn_regular=latin)
@@ -222,6 +240,24 @@ def apply_ui_font() -> None:
             _HEBREW_FONT_READY = True
     except Exception:
         _HEBREW_FONT_READY = False
+    try:
+        if typed:
+            LabelBase.register(name="InputFont", fn_regular=typed)
+            _INPUT_FONT_READY = True
+        else:
+            _INPUT_FONT_READY = False
+    except Exception:
+        _INPUT_FONT_READY = False
+
+
+def _input_font_name() -> str:
+    if _INPUT_FONT_READY:
+        return "InputFont"
+    if _HEBREW_FONT_READY:
+        return "HebrewFont"
+    if _LATIN_FONT_READY:
+        return "LatinFont"
+    return "Roboto"
 
 
 def ui_text(text: str) -> str:
@@ -253,6 +289,12 @@ def _strip_markup_tags(text: str) -> str:
         .replace("&br;", "]")
         .replace("&amp;", "&")
     )
+
+
+def _ltr_field_text(text: str) -> str:
+    """Force LTR paragraphs so Enter inserts a new line below Hebrew text."""
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join("\u200e" + _strip_bidi_marks(line) for line in lines)
 
 
 def _plain_user_text(text: str) -> str:
@@ -354,8 +396,7 @@ def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
         for widget in widgets:
             try:
                 if isinstance(widget, TextInput):
-                    if _LATIN_FONT_READY:
-                        widget.font_name = "LatinFont"
+                    widget.font_name = _input_font_name()
                     continue
                 if "filechooser" in type(widget).__module__:
                     continue
@@ -3030,9 +3071,15 @@ class RootLayout(FloatLayout):
             input_type="text",
             write_tab=False,
             size_hint_y=1,
+            halign="left",
         )
-        if _LATIN_FONT_READY:
-            self.text_field.font_name = "LatinFont"
+        self.text_field.font_name = _input_font_name()
+        try:
+            self.text_field.base_direction = "ltr"
+        except Exception:
+            pass
+        self._fixing_ltr = False
+        self.text_field.bind(text=self._keep_ltr_field)
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         ok_btn = Button(text="אישור")
         cancel_btn = Button(text="ביטול")
@@ -3054,7 +3101,38 @@ class RootLayout(FloatLayout):
         apply_hebrew_ui(hint)
         apply_hebrew_ui(ok_btn)
         apply_hebrew_ui(cancel_btn)
+        Window.bind(keyboard_height=self._dock_text_overlay)
+        self.bind(size=self._dock_text_overlay, pos=self._dock_text_overlay)
         return box
+
+    def _keep_ltr_field(self, instance: TextInput, value: str) -> None:
+        if getattr(self, "_fixing_ltr", False):
+            return
+        fixed = _ltr_field_text(value)
+        if fixed == value:
+            return
+        self._fixing_ltr = True
+        try:
+            col, row = instance.cursor
+        except Exception:
+            col, row = 0, 0
+        instance.text = fixed
+        try:
+            instance.cursor = (col, row)
+        except Exception:
+            pass
+        self._fixing_ltr = False
+
+    def _dock_text_overlay(self, *_args: Any) -> None:
+        overlay = getattr(self, "text_overlay", None)
+        if overlay is None or overlay.opacity <= 0 or overlay.disabled:
+            return
+        overlay.pos_hint = {}
+        overlay.height = dp(168)
+        overlay.x = float(self.x)
+        overlay.width = float(self.width)
+        keyboard = float(getattr(Window, "keyboard_height", 0) or 0)
+        overlay.y = keyboard
 
     def hide_text_overlay(self) -> None:
         self.text_overlay.opacity = 0
@@ -3062,21 +3140,30 @@ class RootLayout(FloatLayout):
         self.text_overlay.y = -400.0
         self.text_field.focus = False
         self._text_target = None
+        try:
+            Window.softinput_mode = "pan"
+        except Exception:
+            pass
 
     def show_text_overlay(self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int] = None) -> None:
         initial = ""
         if existing is not None and 0 <= existing < len(canvas.strokes):
             initial = str(canvas.strokes[existing].get("text") or "")
         self._text_target = (canvas, doc, existing)
-        self.text_field.text = initial
+        self._fixing_ltr = True
+        self.text_field.text = _ltr_field_text(initial)
+        self._fixing_ltr = False
+        self.text_field.font_name = _input_font_name()
+        try:
+            Window.softinput_mode = ""
+        except Exception:
+            pass
         self.text_overlay.disabled = False
         self.text_overlay.opacity = 1
-        self.text_overlay.pos_hint = {}
-        self.text_overlay.height = dp(168)
-        self.text_overlay.x = float(self.x)
-        self.text_overlay.width = float(self.width)
-        top = float(self.chrome.y) if self.toolbar_visible else float(self.top)
-        self.text_overlay.top = max(self.text_overlay.height, top)
+        self._dock_text_overlay()
+        Clock.schedule_once(lambda _dt: self._dock_text_overlay(), 0.05)
+        Clock.schedule_once(lambda _dt: self._dock_text_overlay(), 0.25)
+        Clock.schedule_once(lambda _dt: self._dock_text_overlay(), 0.6)
         focus_system_keyboard(self.text_field)
 
     def _commit_text_overlay(self, *_args: Any) -> None:
@@ -4899,11 +4986,6 @@ class SamsungNotesCompanionApp(App):
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
         self.root_layout.show_text_overlay(canvas, doc, existing)
-        if is_android():
-            try:
-                self._show_android_text_dialog(canvas, doc, existing)
-            except Exception:
-                pass
 
     def _ensure_android_text_listeners(self) -> None:
         if getattr(self, "_android_text_ui_ver", 0) == 6:
