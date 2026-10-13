@@ -187,13 +187,12 @@ def resolve_hebrew_font() -> Optional[str]:
         (
             r"C:\Windows\Fonts\arial.ttf",
             r"C:\Windows\Fonts\calibri.ttf",
-            "/system/fonts/SamsungOneUI-Regular.ttf",
-            "/system/fonts/SamsungOne-400.ttf",
-            "/system/fonts/SamsungSans-Regular.ttf",
-            "/system/fonts/Roboto-Regular.ttf",
             "/system/fonts/NotoSansHebrew-Regular.ttf",
             "/system/fonts/DroidSansHebrew.ttf",
             "/system/fonts/NotoSerifHebrew-Regular.ttf",
+            "/system/fonts/SamsungOneUI-Regular.ttf",
+            "/system/fonts/SamsungOne-400.ttf",
+            "/system/fonts/SamsungSans-Regular.ttf",
         )
     )
 
@@ -1739,16 +1738,16 @@ class SPenAnnotationCanvas(Widget):
 
             plain = _plain_user_text(text)
             kwargs: Dict[str, Any] = {
-                "text": ui_text(plain),
-                "markup": False,
+                "text": mixed_markup(plain),
+                "markup": True,
                 "font_size": font_size,
                 "color": color[:4] if len(color) > 3 else color + (1.0,),
                 "halign": "right" if _has_hebrew(plain) else "left",
             }
-            if _has_hebrew(plain) and _HEBREW_FONT_READY:
-                kwargs["font_name"] = "HebrewFont"
-            elif _LATIN_FONT_READY:
+            if _LATIN_FONT_READY:
                 kwargs["font_name"] = "LatinFont"
+            elif _HEBREW_FONT_READY:
+                kwargs["font_name"] = "HebrewFont"
             label = CoreLabel(**kwargs)
             label.refresh()
             texture = label.texture
@@ -4890,7 +4889,7 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
-        if getattr(self, "_android_text_ui_ver", 0) == 4:
+        if getattr(self, "_android_text_ui_ver", 0) == 5:
             return
         from jnius import PythonJavaClass, java_method
 
@@ -4928,6 +4927,14 @@ class SamsungNotesCompanionApp(App):
                 if text:
                     app._android_typed = text
 
+        class DialogShow(PythonJavaClass):
+            __javacontext__ = "app"
+            __javainterfaces__ = ["android.content.DialogInterface$OnShowListener"]
+
+            @java_method("(Landroid/content/DialogInterface;)V")
+            def onShow(self, _dialog: Any) -> None:
+                app._show_android_ime()
+
         class DialogDismiss(PythonJavaClass):
             __javacontext__ = "app"
             __javainterfaces__ = ["android.content.DialogInterface$OnDismissListener"]
@@ -4944,15 +4951,36 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             self._android_watcher = None
         try:
+            self._android_show = DialogShow()
+        except Exception:
+            self._android_show = None
+        try:
             self._android_dismiss = DialogDismiss()
         except Exception:
             self._android_dismiss = None
-        self._android_text_ui_ver = 4
+        self._android_text_ui_ver = 5
 
     def _queue_android_text_result(self, accept: bool, text: str) -> None:
         if getattr(self, "_android_dialog_result", None) is not None:
             return
         self._android_dialog_result = (bool(accept), str(text or ""))
+
+    def _show_android_ime(self) -> None:
+        try:
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Context = autoclass("android.content.Context")
+            InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
+            edit = getattr(self, "_android_edit", None)
+            if edit is None:
+                return
+            edit.requestFocus()
+            imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
+            imm.restartInput(edit)
+            imm.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
+        except Exception:
+            pass
 
     def _poll_android_text_dialog(self, _dt: float) -> bool:
         result = getattr(self, "_android_dialog_result", None)
@@ -5032,11 +5060,7 @@ class SamsungNotesCompanionApp(App):
             edit.setHint(String("כתבו טקסט"))
             edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
             try:
-                edit.setImeOptions(
-                    EditorInfo.IME_FLAG_NO_EXTRACT_UI
-                    | EditorInfo.IME_FLAG_NO_FULLSCREEN
-                    | EditorInfo.IME_ACTION_DONE
-                )
+                edit.setImeOptions(EditorInfo.IME_ACTION_DONE)
             except Exception:
                 pass
             edit.setMinLines(3)
@@ -5072,12 +5096,14 @@ class SamsungNotesCompanionApp(App):
             builder.setView(box)
             builder.setCancelable(True)
             dialog = builder.create()
+            if getattr(self, "_android_show", None) is not None:
+                dialog.setOnShowListener(self._android_show)
             if self._android_dismiss is not None:
                 dialog.setOnDismissListener(self._android_dismiss)
             try:
                 LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
                 dialog.getWindow().setSoftInputMode(
-                    LayoutParams.SOFT_INPUT_STATE_VISIBLE | LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE | LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                 )
             except Exception:
                 pass
@@ -5085,12 +5111,7 @@ class SamsungNotesCompanionApp(App):
             self._android_dialog = dialog
             self._android_edit = edit
             self._android_dialog_visible = True
-            edit.requestFocus()
-            try:
-                imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-                imm.showSoftInput(edit, 0)
-            except Exception:
-                pass
+            self._show_android_ime()
 
         _open()
 
