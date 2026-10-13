@@ -291,12 +291,6 @@ def _strip_markup_tags(text: str) -> str:
     )
 
 
-def _ltr_field_text(text: str) -> str:
-    """Force LTR paragraphs so Enter inserts a new line below Hebrew text."""
-    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    return "\n".join("\u200e" + _strip_bidi_marks(line) for line in lines)
-
-
 def _plain_user_text(text: str) -> str:
     cleaned = _strip_markup_tags(_strip_bidi_marks(str(text or "")))
     lowered = cleaned.lower()
@@ -468,6 +462,11 @@ def mixed_markup(text: str) -> str:
         buf.append(ch)
     flush()
     return "".join(parts)
+
+
+def mixed_markup_lines(text: str) -> str:
+    """Render each line with canvas fonts, without reversing line order."""
+    return "\n".join(mixed_markup(line) for line in str(text or "").split("\n"))
 
 
 def _script_runs(text: str) -> List[Tuple[str, Optional[str]]]:
@@ -3064,22 +3063,20 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._text_overlay_bg, "pos", box.pos),
             size=lambda *_args: setattr(self._text_overlay_bg, "size", box.size),
         )
-        self.text_field = TextInput(
-            text="",
-            multiline=True,
+        self._text_buffer = ""
+        self._text_keyboard = None
+        self.text_preview = Label(
+            text=mixed_markup("כתבו טקסט בעברית או באנגלית"),
+            markup=True,
             font_size=dp(18),
-            input_type="text",
-            write_tab=False,
+            color=(1, 1, 1, 1),
+            halign="right",
+            valign="top",
             size_hint_y=1,
-            halign="left",
         )
-        self.text_field.font_name = _input_font_name()
-        try:
-            self.text_field.base_direction = "ltr"
-        except Exception:
-            pass
-        self._fixing_ltr = False
-        self.text_field.bind(text=self._keep_ltr_field)
+        self.text_preview.bind(
+            size=lambda inst, _value: setattr(inst, "text_size", inst.size)
+        )
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         ok_btn = Button(text="אישור")
         cancel_btn = Button(text="ביטול")
@@ -3095,50 +3092,91 @@ class RootLayout(FloatLayout):
             color=(1, 1, 1, 1),
         )
         box.add_widget(hint)
-        box.add_widget(self.text_field)
+        box.add_widget(self.text_preview)
         box.add_widget(buttons)
         self._text_target: Optional[Tuple[Any, Point, Optional[int]]] = None
         apply_hebrew_ui(hint)
         apply_hebrew_ui(ok_btn)
         apply_hebrew_ui(cancel_btn)
-        Window.bind(keyboard_height=self._dock_text_overlay)
         self.bind(size=self._dock_text_overlay, pos=self._dock_text_overlay)
         return box
 
-    def _keep_ltr_field(self, instance: TextInput, value: str) -> None:
-        if getattr(self, "_fixing_ltr", False):
-            return
-        fixed = _ltr_field_text(value)
-        if fixed == value:
-            return
-        self._fixing_ltr = True
+    def _refresh_text_preview(self) -> None:
+        raw = str(getattr(self, "_text_buffer", "") or "")
+        shown = mixed_markup_lines(raw)
+        self.text_preview.text = shown or mixed_markup("כתבו טקסט בעברית או באנגלית")
+        self.text_preview.halign = "right" if _has_hebrew(raw) else "left"
+        self.text_preview.texture_update()
+
+    def _bind_text_keyboard(self) -> None:
+        self._release_text_keyboard()
+
+        def _closed() -> None:
+            self._text_keyboard = None
+
         try:
-            col, row = instance.cursor
+            keyboard = Window.request_keyboard(_closed, self.text_preview, "text")
         except Exception:
-            col, row = 0, 0
-        instance.text = fixed
+            keyboard = None
+        self._text_keyboard = keyboard
+        if keyboard is None:
+            return
+        keyboard.bind(on_textinput=self._on_text_typed, on_key_down=self._on_text_key)
+
+    def _release_text_keyboard(self) -> None:
+        keyboard = getattr(self, "_text_keyboard", None)
+        self._text_keyboard = None
+        if keyboard is None:
+            return
         try:
-            instance.cursor = (col, row)
+            keyboard.unbind(on_textinput=self._on_text_typed, on_key_down=self._on_text_key)
         except Exception:
             pass
-        self._fixing_ltr = False
+        try:
+            keyboard.release()
+        except Exception:
+            pass
+
+    def _on_text_typed(self, _keyboard: Any, text: str) -> None:
+        if not text or text in {"\n", "\r"}:
+            return
+        self._text_buffer = str(getattr(self, "_text_buffer", "") or "") + text
+        self._refresh_text_preview()
+
+    def _on_text_key(self, _keyboard: Any, keycode: Any, _text: str, _modifiers: Any) -> bool:
+        key = ""
+        code = 0
+        try:
+            code = int(keycode[0])
+            key = str(keycode[1])
+        except Exception:
+            key = str(keycode or "")
+        if key in {"enter", "numpadenter"} or code in {13, 271}:
+            self._text_buffer = str(getattr(self, "_text_buffer", "") or "") + "\n"
+            self._refresh_text_preview()
+            return True
+        if key == "backspace" or code in {8, 127}:
+            current = str(getattr(self, "_text_buffer", "") or "")
+            self._text_buffer = current[:-1]
+            self._refresh_text_preview()
+            return True
+        return False
 
     def _dock_text_overlay(self, *_args: Any) -> None:
         overlay = getattr(self, "text_overlay", None)
         if overlay is None or overlay.opacity <= 0 or overlay.disabled:
             return
-        overlay.pos_hint = {}
+        overlay.pos_hint = {"x": 0, "y": 0}
         overlay.height = dp(168)
         overlay.x = float(self.x)
         overlay.width = float(self.width)
-        keyboard = float(getattr(Window, "keyboard_height", 0) or 0)
-        overlay.y = keyboard
+        overlay.y = 0.0
 
     def hide_text_overlay(self) -> None:
+        self._release_text_keyboard()
         self.text_overlay.opacity = 0
         self.text_overlay.disabled = True
         self.text_overlay.y = -400.0
-        self.text_field.focus = False
         self._text_target = None
         try:
             Window.softinput_mode = "pan"
@@ -3150,25 +3188,20 @@ class RootLayout(FloatLayout):
         if existing is not None and 0 <= existing < len(canvas.strokes):
             initial = str(canvas.strokes[existing].get("text") or "")
         self._text_target = (canvas, doc, existing)
-        self._fixing_ltr = True
-        self.text_field.text = _ltr_field_text(initial)
-        self._fixing_ltr = False
-        self.text_field.font_name = _input_font_name()
+        self._text_buffer = _plain_user_text(initial) if initial else ""
+        self._refresh_text_preview()
         try:
-            Window.softinput_mode = ""
+            Window.softinput_mode = "resize"
         except Exception:
             pass
         self.text_overlay.disabled = False
         self.text_overlay.opacity = 1
         self._dock_text_overlay()
-        Clock.schedule_once(lambda _dt: self._dock_text_overlay(), 0.05)
-        Clock.schedule_once(lambda _dt: self._dock_text_overlay(), 0.25)
-        Clock.schedule_once(lambda _dt: self._dock_text_overlay(), 0.6)
-        focus_system_keyboard(self.text_field)
+        self._bind_text_keyboard()
 
     def _commit_text_overlay(self, *_args: Any) -> None:
         target = self._text_target
-        text = _plain_user_text(self.text_field.text)
+        text = _plain_user_text(getattr(self, "_text_buffer", ""))
         self.hide_text_overlay()
         if not target or not text:
             return
@@ -4985,10 +5018,16 @@ class SamsungNotesCompanionApp(App):
     def _prompt_text(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
+        if is_android():
+            try:
+                self._show_android_text_panel(canvas, doc, existing)
+                return
+            except Exception:
+                pass
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
-        if getattr(self, "_android_text_ui_ver", 0) == 6:
+        if getattr(self, "_android_text_ui_ver", 0) == 7:
             return
         from jnius import PythonJavaClass, java_method
 
@@ -5006,40 +5045,18 @@ class SamsungNotesCompanionApp(App):
             def onClick(self, _view: Any) -> None:
                 app._capture_android_text(self.ok)
 
-        class DialogShow(PythonJavaClass):
+        class ImeDock(PythonJavaClass):
             __javacontext__ = "app"
-            __javainterfaces__ = ["android.content.DialogInterface$OnShowListener"]
+            __javainterfaces__ = ["android.view.ViewTreeObserver$OnGlobalLayoutListener"]
 
-            @java_method("(Landroid/content/DialogInterface;)V")
-            def onShow(self, _dialog: Any) -> None:
-                try:
-                    edit = getattr(app, "_android_edit", None)
-                    if edit is not None:
-                        edit.requestFocus()
-                except Exception:
-                    pass
-
-        class DialogDismiss(PythonJavaClass):
-            __javacontext__ = "app"
-            __javainterfaces__ = ["android.content.DialogInterface$OnDismissListener"]
-
-            @java_method("(Landroid/content/DialogInterface;)V")
-            def onDismiss(self, _dialog: Any) -> None:
-                Clock.schedule_once(lambda _dt: app._restore_kivy_softinput(), 0)
-                if getattr(app, "_android_dialog_result", None) is None:
-                    app._queue_android_text_result(False, "")
+            @java_method("()V")
+            def onGlobalLayout(self) -> None:
+                app._dock_android_text_panel()
 
         self._android_tap_ok = TextTap(True)
         self._android_tap_cancel = TextTap(False)
-        try:
-            self._android_show = DialogShow()
-        except Exception:
-            self._android_show = None
-        try:
-            self._android_dismiss = DialogDismiss()
-        except Exception:
-            self._android_dismiss = None
-        self._android_text_ui_ver = 6
+        self._android_ime_dock = ImeDock()
+        self._android_text_ui_ver = 7
 
     def _queue_android_text_result(self, accept: bool, text: str) -> None:
         if getattr(self, "_android_dialog_result", None) is not None:
@@ -5070,7 +5087,11 @@ class SamsungNotesCompanionApp(App):
         result = getattr(self, "_android_dialog_result", None)
         if result is None:
             self._android_poll_ticks = int(getattr(self, "_android_poll_ticks", 0)) + 1
-            return self._android_poll_ticks < 600
+            if self._android_poll_ticks >= 600:
+                self._remove_android_text_panel()
+                Clock.schedule_once(lambda _dt: self._restore_kivy_softinput(), 0)
+                return False
+            return True
         self._android_dialog_result = None
         accept, text = result
         Clock.schedule_once(lambda _t, ok=accept, value=text: self._finish_android_text(value, ok), 0)
@@ -5082,16 +5103,75 @@ class SamsungNotesCompanionApp(App):
             field = _java_chars(self._android_edit.getText())
         except Exception:
             field = ""
-        text = field
+        self._remove_android_text_panel()
+        self._queue_android_text_result(accept, field)
+
+    def _dock_android_text_panel(self) -> None:
+        view = getattr(self, "_android_panel", None)
+        params = getattr(self, "_android_panel_params", None)
+        activity = getattr(self, "_android_activity", None)
+        if view is None or activity is None:
+            return
         try:
-            dialog = getattr(self, "_android_dialog", None)
-            if dialog is not None:
-                dialog.dismiss()
+            from jnius import autoclass
+
+            Rect = autoclass("android.graphics.Rect")
+            frame = Rect()
+            decor = activity.getWindow().getDecorView()
+            decor.getWindowVisibleDisplayFrame(frame)
+            screen_h = int(decor.getRootView().getHeight())
+            overlap = int(screen_h - int(frame.bottom))
+            if overlap < 100:
+                overlap = 0
+            if params is not None:
+                if int(getattr(params, "y", 0)) == overlap:
+                    return
+                params.y = overlap
+                activity.getWindowManager().updateViewLayout(view, params)
+            elif int(getattr(self, "_android_panel_lift", -1)) != overlap:
+                self._android_panel_lift = overlap
+                view.setTranslationY(float(-overlap))
         except Exception:
             pass
-        self._queue_android_text_result(accept, text)
 
-    def _show_android_text_dialog(
+    def _remove_android_text_panel(self) -> None:
+        try:
+            from android.runnable import run_on_ui_thread
+        except Exception:
+            return
+
+        @run_on_ui_thread
+        def _close() -> None:
+            view = getattr(self, "_android_panel", None)
+            activity = getattr(self, "_android_activity", None)
+            observer = getattr(self, "_android_ime_observer", None)
+            listener = getattr(self, "_android_ime_dock", None)
+            if observer is not None and listener is not None:
+                try:
+                    observer.removeOnGlobalLayoutListener(listener)
+                except Exception:
+                    try:
+                        observer.removeGlobalOnLayoutListener(listener)
+                    except Exception:
+                        pass
+            self._android_ime_observer = None
+            if view is not None:
+                try:
+                    activity.getWindowManager().removeView(view)
+                except Exception:
+                    try:
+                        parent = view.getParent()
+                        if parent is not None:
+                            parent.removeView(view)
+                    except Exception:
+                        pass
+            self._android_panel = None
+            self._android_edit = None
+            self._android_panel_params = None
+
+        _close()
+
+    def _show_android_text_panel(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
         from android.runnable import run_on_ui_thread
@@ -5106,20 +5186,20 @@ class SamsungNotesCompanionApp(App):
 
         self._ensure_android_text_listeners()
         activity = autoclass("org.kivy.android.PythonActivity").mActivity
-        Builder = autoclass("android.app.AlertDialog$Builder")
         EditText = autoclass("android.widget.EditText")
         InputType = autoclass("android.text.InputType")
-        View = autoclass("android.view.View")
         String = autoclass("java.lang.String")
         Gravity = autoclass("android.view.Gravity")
         LinearLayout = autoclass("android.widget.LinearLayout")
         Button = autoclass("android.widget.Button")
+        LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+        PixelFormat = autoclass("android.graphics.PixelFormat")
         density = float(activity.getResources().getDisplayMetrics().density)
-        pad = int(18 * density)
+        pad = int(16 * density)
 
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
-        self._android_dialog_visible = False
+        self._android_activity = activity
         self._pause_kivy_softinput()
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
@@ -5128,27 +5208,41 @@ class SamsungNotesCompanionApp(App):
         @run_on_ui_thread
         def _open() -> None:
             try:
+                old = getattr(self, "_android_panel", None)
+                if old is not None:
+                    try:
+                        activity.getWindowManager().removeView(old)
+                    except Exception:
+                        try:
+                            parent = old.getParent()
+                            if parent is not None:
+                                parent.removeView(old)
+                        except Exception:
+                            pass
+                    self._android_panel = None
                 box = LinearLayout(activity)
                 box.setOrientation(LinearLayout.VERTICAL)
                 box.setPadding(pad, pad, pad, pad)
-                try:
-                    box.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
-                except Exception:
-                    pass
+                ColorCls = autoclass("android.graphics.Color")
+                box.setBackgroundColor(ColorCls.parseColor("#FF2A2A2E"))
 
                 edit = EditText(activity)
                 edit.setText(String(initial))
                 edit.setHint(String("כתבו טקסט"))
-                edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
-                edit.setMinLines(4)
-                edit.setGravity(Gravity.TOP | Gravity.LEFT)
+                edit.setInputType(
+                    InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    | InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
+                )
+                edit.setMinLines(3)
+                edit.setMaxLines(6)
+                edit.setGravity(Gravity.TOP | Gravity.START)
                 edit.setFocusable(True)
                 edit.setFocusableInTouchMode(True)
-                try:
-                    edit.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
-                    edit.setTextDirection(View.TEXT_DIRECTION_LTR)
-                except Exception:
-                    pass
+                edit.setBackgroundColor(ColorCls.parseColor("#FFFFFFFF"))
+                edit.setTextColor(ColorCls.parseColor("#FF111111"))
+                edit.setHintTextColor(ColorCls.parseColor("#FF777777"))
+                edit.setPadding(pad, pad, pad, pad)
 
                 buttons = LinearLayout(activity)
                 buttons.setOrientation(LinearLayout.HORIZONTAL)
@@ -5166,35 +5260,61 @@ class SamsungNotesCompanionApp(App):
                 box.addView(edit, LinearLayout.LayoutParams(-1, -2))
                 box.addView(buttons, LinearLayout.LayoutParams(-1, -2))
 
-                builder = Builder(activity)
-                builder.setTitle(String("טקסט"))
-                builder.setView(box)
-                builder.setCancelable(True)
-                dialog = builder.create()
-                if getattr(self, "_android_show", None) is not None:
-                    dialog.setOnShowListener(self._android_show)
-                if self._android_dismiss is not None:
-                    dialog.setOnDismissListener(self._android_dismiss)
-                win = dialog.getWindow()
+                flags = LayoutParams.FLAG_NOT_TOUCH_MODAL | LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                token = None
                 try:
-                    LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
-                    win.setGravity(Gravity.TOP)
-                    win.setLayout(-1, -2)
-                    win.setSoftInputMode(LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+                    token = activity.getWindow().getDecorView().getWindowToken()
+                except Exception:
+                    token = None
+                params = None
+                for wtype in (
+                    LayoutParams.TYPE_APPLICATION_PANEL,
+                    LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG,
+                ):
+                    try:
+                        candidate = LayoutParams(-1, -2, wtype, flags, PixelFormat.TRANSLUCENT)
+                        candidate.gravity = Gravity.BOTTOM
+                        candidate.softInputMode = (
+                            LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                            | LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                        )
+                        candidate.token = token
+                        candidate.y = 0
+                        activity.getWindowManager().addView(box, candidate)
+                        params = candidate
+                        break
+                    except Exception:
+                        params = None
+                if params is None:
+                    FrameLayout = autoclass("android.widget.FrameLayout")
+                    flp = FrameLayout.LayoutParams(-1, -2)
+                    flp.gravity = Gravity.BOTTOM
+                    activity.addContentView(box, flp)
+                self._android_panel = box
+                self._android_panel_params = params
+                self._android_edit = edit
+                observer = box.getViewTreeObserver()
+                observer.addOnGlobalLayoutListener(self._android_ime_dock)
+                self._android_ime_observer = observer
+                edit.requestFocus()
+                try:
+                    imm = activity.getSystemService("input_method")
+                    imm.showSoftInput(edit, 0)
                 except Exception:
                     pass
-                self._android_edit = edit
-                dialog.show()
-                self._android_dialog = dialog
-                self._android_dialog_visible = True
+                self._dock_android_text_panel()
             except Exception:
-                self._android_dialog_visible = False
+                Clock.schedule_once(
+                    lambda _dt: self.root_layout.show_text_overlay(canvas, doc, existing),
+                    0,
+                )
                 Clock.schedule_once(lambda _dt: self._restore_kivy_softinput(), 0)
 
         _open()
 
     def _finish_android_text(self, text: str, accept: bool) -> None:
         Clock.unschedule(self._poll_android_text_dialog)
+        self._remove_android_text_panel()
         self._restore_kivy_softinput()
         target = getattr(self, "_android_text_target", None)
         self._android_text_target = None
