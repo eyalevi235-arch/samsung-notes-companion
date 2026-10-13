@@ -25,7 +25,6 @@ from kivy.graphics.texture import Texture
 from kivy.graphics import (
     Color,
     Ellipse,
-    InstructionGroup,
     Line,
     PopMatrix,
     PushMatrix,
@@ -38,6 +37,7 @@ from kivy.graphics import (
     Translate,
     Triangle,
 )
+from kivy.graphics.instructions import InstructionGroup
 from kivy.input.motionevent import MotionEvent
 from kivy.metrics import dp
 from kivy.properties import BooleanProperty, ListProperty, NumericProperty, StringProperty
@@ -119,15 +119,8 @@ def _first_existing(paths: Sequence[str]) -> Optional[str]:
     return None
 
 
-def _font_has_hebrew(path: str) -> bool:
-    try:
-        from PIL import ImageFont
-
-        font = ImageFont.truetype(path, 36)
-        bbox = font.getbbox("א")
-        return bool(bbox) and (bbox[2] - bbox[0]) > 1 and (bbox[3] - bbox[1]) > 1
-    except Exception:
-        return False
+_HEBREW_FONT_READY = False
+_LATIN_FONT_READY = False
 
 
 def resolve_latin_font() -> Optional[str]:
@@ -143,63 +136,52 @@ def resolve_latin_font() -> Optional[str]:
 
 
 def resolve_hebrew_font() -> Optional[str]:
-    preferred = [
-        r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\calibri.ttf",
-        "/system/fonts/NotoSansHebrew-Regular.ttf",
-        "/system/fonts/DroidSansHebrew.ttf",
-        "/system/fonts/NotoSerifHebrew-Regular.ttf",
-        "/system/fonts/SamsungOneUI-Regular.ttf",
-        "/system/fonts/SamsungOne-400.ttf",
-        "/system/fonts/SamsungSans-Regular.ttf",
-        "/system/fonts/SECGeneric-Regular.ttf",
-    ]
-    found: List[str] = [path for path in preferred if os.path.isfile(path)]
-    fonts_dir = "/system/fonts"
-    if os.path.isdir(fonts_dir):
-        try:
-            for name in os.listdir(fonts_dir):
-                lower = name.lower()
-                if not lower.endswith((".ttf", ".otf")):
-                    continue
-                if "italic" in lower or "bold" in lower:
-                    continue
-                if "vf" in lower and "hebrew" not in lower:
-                    continue
-                if any(key in lower for key in ("hebrew", "samsungone", "samsung-sans", "samsungoneui", "notosans")):
-                    found.append(os.path.join(fonts_dir, name))
-        except Exception:
-            pass
-    ranked = sorted(
-        dict.fromkeys(found),
-        key=lambda path: (
-            0 if "hebrew" in os.path.basename(path).lower() else 1,
-            0 if "samsungone" in os.path.basename(path).lower() else 1,
-            os.path.basename(path).lower(),
-        ),
+    # Explicit files only: scanning /system/fonts and opening Noto/Emoji TTFs
+    # with FreeType can native-crash on Android at launch.
+    return _first_existing(
+        (
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+            "/system/fonts/NotoSansHebrew-Regular.ttf",
+            "/system/fonts/DroidSansHebrew.ttf",
+            "/system/fonts/NotoSerifHebrew-Regular.ttf",
+            "/system/fonts/SamsungOneUI-Regular.ttf",
+            "/system/fonts/SamsungOne-400.ttf",
+            "/system/fonts/SamsungSans-Regular.ttf",
+        )
     )
-    for path in ranked:
-        if _font_has_hebrew(path):
-            return path
-    return _first_existing(preferred)
 
 
 def apply_ui_font() -> None:
-    hebrew = resolve_hebrew_font()
+    global _HEBREW_FONT_READY, _LATIN_FONT_READY
     latin = resolve_latin_font()
-    path = hebrew or latin
-    if not path:
-        return
+    hebrew = resolve_hebrew_font()
     try:
-        LabelBase.register(name="Roboto", fn_regular=path)
-        LabelBase.register(name="HebrewFont", fn_regular=path)
-        LabelBase.register(name="LatinFont", fn_regular=path)
+        if latin:
+            LabelBase.register(name="LatinFont", fn_regular=latin)
+            _LATIN_FONT_READY = True
     except Exception:
-        pass
+        _LATIN_FONT_READY = False
+    try:
+        if hebrew:
+            LabelBase.register(name="HebrewFont", fn_regular=hebrew)
+            _HEBREW_FONT_READY = True
+        elif _LATIN_FONT_READY:
+            LabelBase.register(name="HebrewFont", fn_regular=latin)
+            _HEBREW_FONT_READY = True
+    except Exception:
+        _HEBREW_FONT_READY = False
 
 
 def ui_text(text: str) -> str:
     """Reorder Hebrew for Kivy's LTR renderer so letters read right-to-left."""
+    try:
+        return _ui_text_body(text)
+    except Exception:
+        return text
+
+
+def _ui_text_body(text: str) -> str:
     if not text or not any("\u0590" <= ch <= "\u05FF" for ch in text):
         return text
     chunks: List[str] = []
@@ -233,6 +215,8 @@ def ui_text(text: str) -> str:
 
 
 def set_latin_font(widget: Any) -> None:
+    if not _LATIN_FONT_READY:
+        return
     try:
         widget.font_name = "LatinFont"
     except Exception:
@@ -240,6 +224,8 @@ def set_latin_font(widget: Any) -> None:
 
 
 def set_hebrew_font(widget: Any) -> None:
+    if not _HEBREW_FONT_READY:
+        return
     try:
         widget.font_name = "HebrewFont"
     except Exception:
@@ -625,6 +611,7 @@ class SPenAnnotationCanvas(Widget):
         self._live_group: Optional[InstructionGroup] = None
         self._page_image_rects: Dict[int, Rectangle] = {}
         self._visible_range: Optional[Tuple[int, int]] = None
+        self._rebuilding = False
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -859,6 +846,8 @@ class SPenAnnotationCanvas(Widget):
                 rect.texture = None
 
     def _apply_view(self, *_args: Any) -> None:
+        if getattr(self, "_rebuilding", False):
+            return
         if self._tx is None or self._sc is None:
             self._rebuild_scene()
             return
@@ -876,6 +865,15 @@ class SPenAnnotationCanvas(Widget):
             app.request_visible_pages()
 
     def _rebuild_scene(self, *_args: Any) -> None:
+        if getattr(self, "_rebuilding", False):
+            return
+        self._rebuilding = True
+        try:
+            self._rebuild_scene_body()
+        finally:
+            self._rebuilding = False
+
+    def _rebuild_scene_body(self) -> None:
         origin_x, origin_y, _dw, _dh, scale, _pw, _ph = self._page_metrics()
         self.canvas.clear()
         self._page_image_rects = {}
@@ -1515,7 +1513,10 @@ class SamsungNotesCompanionApp(App):
     document_title = StringProperty("כותרת")
 
     def build(self) -> RootLayout:
-        apply_ui_font()
+        try:
+            apply_ui_font()
+        except Exception:
+            pass
         Window.clearcolor = LETTERBOX
         self.title = "Samsung Notes Companion"
         self.tool_mode: str = "none"
