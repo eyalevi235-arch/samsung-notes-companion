@@ -149,6 +149,12 @@ def is_android() -> bool:
 
 def _is_hover_touch(touch: MotionEvent) -> bool:
     try:
+        pressure = float(getattr(touch, "pressure", 1.0) or 0.0)
+    except (TypeError, ValueError):
+        pressure = 1.0
+    if pressure > 0.02:
+        return False
+    try:
         action = int(getattr(touch, "action", 0) or 0)
     except (TypeError, ValueError):
         action = 0
@@ -4916,6 +4922,7 @@ class SamsungNotesCompanionApp(App):
         self.is_dashed = False
         self.root_layout.set_shapes_open(False)
         self.root_layout.refresh_tool_styles()
+        self._notify("לחצו על הדף כדי להוסיף טקסט")
 
     def prompt_new_text(self, canvas: SPenAnnotationCanvas, doc: Point) -> None:
         self._prompt_text(canvas, doc, None)
@@ -4928,15 +4935,22 @@ class SamsungNotesCompanionApp(App):
     def _prompt_text(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
-        opened = False
         if is_android():
+            self._android_dialog_visible = False
             try:
                 self._show_android_text_dialog(canvas, doc, existing)
-                opened = True
             except Exception:
-                opened = False
-        if not opened:
-            self.root_layout.show_text_overlay(canvas, doc, existing)
+                self.root_layout.show_text_overlay(canvas, doc, existing)
+                return
+
+            def _fallback(_dt: float) -> None:
+                if getattr(self, "_android_dialog_visible", False):
+                    return
+                self.root_layout.show_text_overlay(canvas, doc, existing)
+
+            Clock.schedule_once(_fallback, 0.35)
+            return
+        self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
         if getattr(self, "_android_text_ui_ver", 0) == 5:
@@ -5101,68 +5115,78 @@ class SamsungNotesCompanionApp(App):
 
         @run_on_ui_thread
         def _open() -> None:
-            box = LinearLayout(activity)
-            box.setOrientation(LinearLayout.VERTICAL)
-            box.setPadding(pad, pad, pad, pad)
             try:
-                box.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
-            except Exception:
-                pass
+                box = LinearLayout(activity)
+                box.setOrientation(LinearLayout.VERTICAL)
+                box.setPadding(pad, pad, pad, pad)
+                try:
+                    box.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
+                except Exception:
+                    pass
 
-            edit = EditText(activity)
-            edit.setText(String(initial))
-            edit.setHint(String("כתבו טקסט"))
-            edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
-            try:
-                edit.setImeOptions(EditorInfo.IME_ACTION_DONE)
-            except Exception:
-                pass
-            edit.setMinLines(3)
-            edit.setGravity(Gravity.START | Gravity.TOP)
-            edit.setFocusable(True)
-            edit.setFocusableInTouchMode(True)
-            try:
-                edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
-                edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
-            except Exception:
-                pass
-            if self._android_watcher is not None:
-                edit.addTextChangedListener(self._android_watcher)
+                edit = EditText(activity)
+                edit.setText(String(initial))
+                edit.setHint(String("כתבו טקסט"))
+                edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
+                try:
+                    edit.setImeOptions(EditorInfo.IME_ACTION_DONE)
+                except Exception:
+                    pass
+                edit.setMinLines(3)
+                edit.setGravity(Gravity.START | Gravity.TOP)
+                edit.setFocusable(True)
+                edit.setFocusableInTouchMode(True)
+                try:
+                    edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
+                    edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
+                except Exception:
+                    pass
+                if self._android_watcher is not None:
+                    try:
+                        edit.addTextChangedListener(self._android_watcher)
+                    except Exception:
+                        pass
 
-            buttons = LinearLayout(activity)
-            buttons.setOrientation(LinearLayout.HORIZONTAL)
-            buttons.setGravity(Gravity.END)
-            cancel_btn = Button(activity)
-            cancel_btn.setText(String("ביטול"))
-            cancel_btn.setOnClickListener(self._android_tap_cancel)
-            ok_btn = Button(activity)
-            ok_btn.setText(String("אישור"))
-            ok_btn.setOnClickListener(self._android_tap_ok)
-            btn_params = LinearLayout.LayoutParams(-2, -2)
-            buttons.addView(cancel_btn, btn_params)
-            buttons.addView(ok_btn, btn_params)
+                buttons = LinearLayout(activity)
+                buttons.setOrientation(LinearLayout.HORIZONTAL)
+                buttons.setGravity(Gravity.END)
+                cancel_btn = Button(activity)
+                cancel_btn.setText(String("ביטול"))
+                cancel_btn.setOnClickListener(self._android_tap_cancel)
+                ok_btn = Button(activity)
+                ok_btn.setText(String("אישור"))
+                ok_btn.setOnClickListener(self._android_tap_ok)
+                btn_params = LinearLayout.LayoutParams(-2, -2)
+                buttons.addView(cancel_btn, btn_params)
+                buttons.addView(ok_btn, btn_params)
 
-            box.addView(edit, LinearLayout.LayoutParams(-1, -2))
-            box.addView(buttons, LinearLayout.LayoutParams(-1, -2))
+                box.addView(edit, LinearLayout.LayoutParams(-1, -2))
+                box.addView(buttons, LinearLayout.LayoutParams(-1, -2))
 
-            builder = Builder(activity)
-            builder.setTitle(String("טקסט"))
-            builder.setView(box)
-            builder.setCancelable(True)
-            dialog = builder.create()
-            if getattr(self, "_android_show", None) is not None:
-                dialog.setOnShowListener(self._android_show)
-            if self._android_dismiss is not None:
-                dialog.setOnDismissListener(self._android_dismiss)
-            try:
-                LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
-                dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                builder = Builder(activity)
+                builder.setTitle(String("טקסט"))
+                builder.setView(box)
+                builder.setCancelable(True)
+                dialog = builder.create()
+                if getattr(self, "_android_show", None) is not None:
+                    dialog.setOnShowListener(self._android_show)
+                if self._android_dismiss is not None:
+                    dialog.setOnDismissListener(self._android_dismiss)
+                try:
+                    LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+                    dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                except Exception:
+                    pass
+                self._android_edit = edit
+                dialog.show()
+                self._android_dialog = dialog
+                self._android_dialog_visible = True
             except Exception:
-                pass
-            self._android_edit = edit
-            dialog.show()
-            self._android_dialog = dialog
-            self._android_dialog_visible = True
+                self._android_dialog_visible = False
+                Clock.schedule_once(
+                    lambda _dt: self.root_layout.show_text_overlay(canvas, doc, existing),
+                    0,
+                )
 
         _open()
 
