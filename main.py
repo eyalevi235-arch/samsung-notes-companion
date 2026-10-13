@@ -365,9 +365,7 @@ def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
         for widget in widgets:
             try:
                 if isinstance(widget, TextInput):
-                    if _HEBREW_FONT_READY:
-                        widget.font_name = "HebrewFont"
-                    elif _LATIN_FONT_READY:
+                    if _LATIN_FONT_READY:
                         widget.font_name = "LatinFont"
                     continue
                 if "filechooser" in type(widget).__module__:
@@ -3061,7 +3059,9 @@ class RootLayout(FloatLayout):
         box.add_widget(self.text_field)
         box.add_widget(buttons)
         self._text_target: Optional[Tuple[Any, Point, Optional[int]]] = None
-        Clock.schedule_once(lambda _dt: apply_hebrew_ui(box), 0)
+        apply_hebrew_ui(hint)
+        apply_hebrew_ui(ok_btn)
+        apply_hebrew_ui(cancel_btn)
         return box
 
     def hide_text_overlay(self) -> None:
@@ -5092,7 +5092,17 @@ class SamsungNotesCompanionApp(App):
                 edit = EditText(activity)
                 try:
                     Typeface = autoclass("android.graphics.Typeface")
-                    edit.setTypeface(Typeface.SANS_SERIF)
+                    font_path = _first_existing(
+                        (
+                            "/system/fonts/Roboto-Regular.ttf",
+                            "/system/fonts/NotoSans-Regular.ttf",
+                            "/system/fonts/DroidSans.ttf",
+                        )
+                    )
+                    if font_path:
+                        edit.setTypeface(Typeface.createFromFile(font_path))
+                    else:
+                        edit.setTypeface(Typeface.DEFAULT)
                 except Exception:
                     pass
                 edit.setText(String(initial))
@@ -5103,18 +5113,15 @@ class SamsungNotesCompanionApp(App):
                 except Exception:
                     pass
                 edit.setMinLines(3)
-                edit.setGravity(Gravity.START | Gravity.TOP)
+                edit.setGravity(Gravity.LEFT | Gravity.TOP)
                 edit.setFocusable(True)
                 edit.setFocusableInTouchMode(True)
                 try:
-                    edit.setTextDirection(View.TEXT_DIRECTION_ANY_RTL)
-                    edit.setTextAlignment(View.TEXT_ALIGNMENT_TEXT_START)
-                    edit.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
+                    edit.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
+                    edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
+                    edit.setTextAlignment(View.TEXT_ALIGNMENT_GRAVITY)
                 except Exception:
-                    try:
-                        edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
-                    except Exception:
-                        pass
+                    pass
                 if self._android_watcher is not None:
                     try:
                         edit.addTextChangedListener(self._android_watcher)
