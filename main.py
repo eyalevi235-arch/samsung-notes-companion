@@ -26,6 +26,7 @@ from kivy.graphics.texture import Texture
 from kivy.graphics import (
     Color,
     Ellipse,
+    Fbo,
     Line,
     PopMatrix,
     PushMatrix,
@@ -354,7 +355,7 @@ def _ui_text_body(text: str) -> str:
             mode = rtl
         buf.append(ch)
     flush()
-    chunks.reverse()
+    # Keep logical run order so English-then-Hebrew is not duplicated by a second bidi pass.
     return "".join(chunks)
 
 
@@ -859,17 +860,37 @@ class ToolIcon(ButtonBehavior, Widget):
                 Line(points=[cx + w * 0.35, cy, cx + w * 0.18, cy + h * 0.12], width=1.2)
                 Line(points=[cx + w * 0.35, cy, cx + w * 0.18, cy - h * 0.12], width=1.2)
             elif kind == "pen":
-                Line(points=[x + w * 0.2, y + h * 0.15, x + w * 0.72, y + h * 0.72], width=1.5)
-                Triangle(
+                PushMatrix()
+                Translate(cx, cy)
+                Rotate(angle=-52, axis=(0, 0, 1))
+                Translate(-cx, -cy)
+                bw = max(dp(3.5), w * 0.16)
+                Line(rectangle=(cx - bw / 2.0, cy - h * 0.12, bw, h * 0.52), width=1.35)
+                Line(points=[cx - bw / 2.0, cy + h * 0.08, cx + bw / 2.0, cy + h * 0.08], width=1.2)
+                Line(
                     points=[
-                        x + w * 0.72,
-                        y + h * 0.72,
-                        x + w * 0.88,
-                        y + h * 0.62,
-                        x + w * 0.82,
-                        y + h * 0.88,
-                    ]
+                        cx + bw / 2.0,
+                        cy + h * 0.28,
+                        cx + bw / 2.0 + w * 0.12,
+                        cy + h * 0.28,
+                        cx + bw / 2.0 + w * 0.12,
+                        cy - h * 0.02,
+                    ],
+                    width=1.15,
                 )
+                Line(
+                    points=[
+                        cx - bw / 2.0,
+                        cy - h * 0.12,
+                        cx,
+                        cy - h * 0.42,
+                        cx + bw / 2.0,
+                        cy - h * 0.12,
+                    ],
+                    width=1.35,
+                )
+                Line(points=[cx, cy - h * 0.12, cx, cy - h * 0.42], width=1.05)
+                PopMatrix()
             elif kind == "dashed":
                 Line(points=[x, cy, x + w * 0.28, cy], width=1.4)
                 Line(points=[x + w * 0.42, cy, x + w * 0.62, cy], width=1.4)
@@ -1471,6 +1492,7 @@ class SPenAnnotationCanvas(Widget):
         self._stamp_textures: Dict[str, Any] = {}
         self._page_num_textures: Dict[int, Any] = {}
         self._text_textures: Dict[Tuple[Any, ...], Any] = {}
+        self._text_texture_keepers: Dict[Tuple[Any, ...], Any] = {}
         self.selected_ids: List[int] = []
         self._undo_stack: List[List[StrokeRecord]] = []
         self._redo_stack: List[List[StrokeRecord]] = []
@@ -1769,6 +1791,60 @@ class SPenAnnotationCanvas(Widget):
         self._stamp_textures[path] = texture
         return texture
 
+    def _make_line_label(self, line: str, font_size: float, ink: Sequence[float]) -> Any:
+        from kivy.uix.label import Label as UiLabel
+
+        widget = UiLabel(
+            text=mixed_markup(line) if line else " ",
+            markup=True,
+            font_size=font_size,
+            color=ink,
+            halign="right" if _has_hebrew(line) else "left",
+            valign="middle",
+            size_hint=(None, None),
+        )
+        try:
+            widget.base_direction = "ltr"
+        except Exception:
+            pass
+        if _LATIN_FONT_READY:
+            widget.font_name = "LatinFont"
+        elif _HEBREW_FONT_READY:
+            widget.font_name = "HebrewFont"
+        widget.texture_update()
+        tw, th = widget.texture_size
+        widget.size = (max(1.0, float(tw)), max(1.0, float(th)))
+        widget.texture_update()
+        return widget
+
+    def _stack_line_textures(self, widgets: Sequence[Any], align_right: bool) -> Optional[Any]:
+        rows: List[Tuple[Any, int, int]] = []
+        for widget in widgets:
+            tex = widget.texture
+            if tex is None or not tex.size[0] or not tex.size[1]:
+                continue
+            rows.append((tex, int(tex.size[0]), int(tex.size[1])))
+        if not rows:
+            return None
+        max_w = max(width for _tex, width, _height in rows)
+        total_h = sum(height for _tex, _width, height in rows)
+        fbo = Fbo(size=(max_w, total_h), with_stencilbuffer=False)
+        with fbo:
+            Color(0, 0, 0, 0)
+            Rectangle(pos=(0, 0), size=(max_w, total_h))
+            cursor = float(total_h)
+            for tex, width, height in rows:
+                cursor -= float(height)
+                left = float(max_w - width) if align_right else 0.0
+                Color(1, 1, 1, 1)
+                Rectangle(texture=tex, pos=(left, cursor), size=(float(width), float(height)))
+        fbo.draw()
+        texture = fbo.texture
+        if texture is None:
+            return None
+        texture.flip_vertical()
+        return texture
+
     def _text_texture(self, record: StrokeRecord) -> Optional[Any]:
         text = str(record.get("text") or "")
         font_size = max(10.0, float(record.get("font_size") or 28.0))
@@ -1778,30 +1854,14 @@ class SPenAnnotationCanvas(Widget):
         if cached is not None:
             return cached
         try:
-            from kivy.uix.label import Label as UiLabel
-
             plain = _plain_user_text(text)
             ink = color[:4] if len(color) > 3 else color + (1.0,)
-            widget = UiLabel(
-                text=mixed_markup_lines(plain),
-                markup=True,
-                font_size=font_size,
-                color=ink,
-                halign="right" if _has_hebrew(plain) else "left",
-                valign="middle",
-                size_hint=(None, None),
-            )
-            if _LATIN_FONT_READY:
-                widget.font_name = "LatinFont"
-            elif _HEBREW_FONT_READY:
-                widget.font_name = "HebrewFont"
-            widget.texture_update()
-            tw, th = widget.texture_size
-            widget.size = (max(1.0, float(tw)), max(1.0, float(th)))
-            widget.texture_update()
-            texture = widget.texture
-            if texture is None or not texture.size[0] or not texture.size[1]:
+            lines = plain.split("\n") if plain else [""]
+            widgets = [self._make_line_label(line, font_size, ink) for line in lines]
+            texture = self._stack_line_textures(widgets, align_right=_has_hebrew(plain))
+            if texture is None:
                 raise RuntimeError("empty text texture")
+            self._text_texture_keepers[key] = (widgets, texture)
         except Exception:
             try:
                 from kivy.core.text import Label as CoreLabel
@@ -2690,6 +2750,7 @@ class SPenAnnotationCanvas(Widget):
             if image.get("kind") == "text":
                 image["font_size"] = max(10.0, float(item.get("font_size") or 28.0) * (nh / max(oh, 1.0)))
                 self._text_textures.clear()
+                self._text_texture_keepers.clear()
             return
         ox, oy, ow, oh = [float(v) for v in snap["box"][:4]]
         nx, ny, nw, nh = self._scaled_box(handle, snap["box"], doc, handle in {"tl", "tr", "bl", "br"})
@@ -2705,6 +2766,7 @@ class SPenAnnotationCanvas(Widget):
                 if item.get("kind") == "text":
                     record["font_size"] = max(10.0, float(item.get("font_size") or 28.0) * sy)
                     self._text_textures.clear()
+                    self._text_texture_keepers.clear()
                 continue
             record["points"] = [
                 [nx + (float(p[0]) - ox) * sx, ny + (float(p[1]) - oy) * sy] for p in item["points"]
@@ -3168,11 +3230,11 @@ class RootLayout(FloatLayout):
         overlay = getattr(self, "text_overlay", None)
         if overlay is None or overlay.opacity <= 0 or overlay.disabled:
             return
-        overlay.pos_hint = {"x": 0, "y": 0}
+        overlay.pos_hint = {}
         overlay.height = dp(168)
         overlay.x = float(self.x)
         overlay.width = float(self.width)
-        overlay.y = 0.0
+        overlay.y = max(0.0, (float(self.height) - overlay.height) * 0.55)
 
     def hide_text_overlay(self) -> None:
         self._release_text_keyboard()
@@ -5155,19 +5217,20 @@ class SamsungNotesCompanionApp(App):
             from android.runnable import run_on_ui_thread
         except Exception:
             return
+        lift = int(getattr(self, "_android_center_lift", 0) or 0)
 
         @run_on_ui_thread
         def _apply() -> None:
             try:
-                overlap = self._ime_overlap_px(activity)
                 if params is not None:
-                    if int(getattr(params, "y", 0)) == overlap:
-                        return
-                    params.y = overlap
+                    from jnius import autoclass
+
+                    Gravity = autoclass("android.view.Gravity")
+                    params.gravity = Gravity.CENTER
+                    params.y = -lift
                     activity.getWindowManager().updateViewLayout(view, params)
-                elif int(getattr(self, "_android_panel_lift", -1)) != overlap:
-                    self._android_panel_lift = overlap
-                    view.setTranslationY(float(-overlap))
+                else:
+                    view.setTranslationY(float(-lift))
             except Exception:
                 pass
 
@@ -5240,6 +5303,7 @@ class SamsungNotesCompanionApp(App):
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
         self._android_activity = activity
+        self._android_center_lift = int(90 * density)
         self._pause_kivy_softinput()
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
@@ -5315,13 +5379,13 @@ class SamsungNotesCompanionApp(App):
                 ):
                     try:
                         candidate = LayoutParams(-1, -2, wtype, flags, PixelFormat.TRANSLUCENT)
-                        candidate.gravity = Gravity.BOTTOM
+                        candidate.gravity = Gravity.CENTER
                         candidate.softInputMode = (
-                            LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                            LayoutParams.SOFT_INPUT_ADJUST_NOTHING
                             | LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
                         )
                         candidate.token = token
-                        candidate.y = 0
+                        candidate.y = -int(90 * density)
                         activity.getWindowManager().addView(box, candidate)
                         params = candidate
                         break
@@ -5330,8 +5394,9 @@ class SamsungNotesCompanionApp(App):
                 if params is None:
                     FrameLayout = autoclass("android.widget.FrameLayout")
                     flp = FrameLayout.LayoutParams(-1, -2)
-                    flp.gravity = Gravity.BOTTOM
+                    flp.gravity = Gravity.CENTER
                     activity.addContentView(box, flp)
+                    box.setTranslationY(float(-90 * density))
                 self._android_panel = box
                 self._android_panel_params = params
                 self._android_edit = edit
