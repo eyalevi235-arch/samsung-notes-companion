@@ -1780,49 +1780,50 @@ class SPenAnnotationCanvas(Widget):
         if cached is not None:
             return cached
         try:
-            from kivy.core.text import Label as CoreLabel
-            from PIL import Image
+            from kivy.uix.label import Label as UiLabel
 
             plain = _plain_user_text(text)
             ink = color[:4] if len(color) > 3 else color + (1.0,)
-            pieces = []
-            for chunk, font_name in _script_runs(plain):
-                if not chunk:
-                    continue
-                kwargs: Dict[str, Any] = {
-                    "text": chunk,
-                    "markup": False,
-                    "font_size": font_size,
-                    "color": ink,
-                }
-                if font_name:
-                    kwargs["font_name"] = font_name
-                label = CoreLabel(**kwargs)
-                label.refresh()
-                piece = label.texture
-                if piece is None or not piece.size[0] or not piece.size[1]:
-                    continue
-                pieces.append(
-                    Image.frombytes("RGBA", tuple(piece.size), bytes(piece.pixels))
-                )
-            if not pieces:
-                return None
-            width = sum(item.size[0] for item in pieces)
-            height = max(item.size[1] for item in pieces)
-            sheet = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            cursor = 0
-            for item in pieces:
-                sheet.paste(item, (cursor, (height - item.size[1]) // 2), item)
-                cursor += item.size[0]
-            texture = Texture.create(size=sheet.size, colorfmt="rgba")
-            texture.blit_buffer(sheet.tobytes(), colorfmt="rgba", bufferfmt="ubyte")
-            texture.wrap = "clamp_to_edge"
-            texture.mag_filter = "linear"
-            texture.min_filter = "linear"
+            widget = UiLabel(
+                text=mixed_markup(plain),
+                markup=True,
+                font_size=font_size,
+                color=ink,
+                halign="right" if _has_hebrew(plain) else "left",
+                valign="middle",
+                size_hint=(None, None),
+            )
+            if _LATIN_FONT_READY:
+                widget.font_name = "LatinFont"
+            elif _HEBREW_FONT_READY:
+                widget.font_name = "HebrewFont"
+            widget.texture_update()
+            tw, th = widget.texture_size
+            widget.size = (max(1.0, float(tw)), max(1.0, float(th)))
+            widget.texture_update()
+            texture = widget.texture
             if texture is None or not texture.size[0] or not texture.size[1]:
                 raise RuntimeError("empty text texture")
         except Exception:
-            return None
+            try:
+                from kivy.core.text import Label as CoreLabel
+
+                plain = _plain_user_text(text)
+                kwargs: Dict[str, Any] = {
+                    "text": ui_text(plain),
+                    "markup": False,
+                    "font_size": font_size,
+                    "color": color[:4] if len(color) > 3 else color + (1.0,),
+                }
+                if _has_hebrew(plain) and _HEBREW_FONT_READY:
+                    kwargs["font_name"] = "HebrewFont"
+                elif _LATIN_FONT_READY:
+                    kwargs["font_name"] = "LatinFont"
+                label = CoreLabel(**kwargs)
+                label.refresh()
+                texture = label.texture
+            except Exception:
+                return None
         if texture is None:
             return None
         self._text_textures[key] = texture
