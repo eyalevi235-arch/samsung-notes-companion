@@ -601,6 +601,15 @@ class SPenAnnotationCanvas(Widget):
         self._live_width: float = 2.5
         self._live_dashed: bool = False
         self._page_textures: List[Any] = []
+        self._image_rects: Dict[int, Rectangle] = {}
+        self._tx: Optional[Translate] = None
+        self._sc: Optional[Scale] = None
+        self._clip_rect: Optional[Rectangle] = None
+        self._live_color_instr: Optional[Color] = None
+        self._live_line: Optional[Line] = None
+        self._grid_tex: Any = None
+        self._grid_tex_key: Optional[Tuple[int, int]] = None
+        self._queued_vis: Optional[Tuple[int, int]] = None
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -608,37 +617,55 @@ class SPenAnnotationCanvas(Widget):
         app = App.get_running_app()
         if self.view_role == "notes":
             app.bind(
-                notes_scale=self._on_view,
-                notes_pan_x=self._on_view,
-                view_pan_y=self._on_view,
-                notes_page_width=self._on_view,
-                page_width=self._on_view,
-                page_height=self._on_view,
-                page_count=self._on_view,
+                notes_scale=self._apply_transform,
+                notes_pan_x=self._apply_transform,
+                view_pan_y=self._apply_transform,
+                notes_page_width=self.redraw_all,
+                page_width=self.redraw_all,
+                page_height=self.redraw_all,
+                page_count=self.redraw_all,
             )
         else:
             app.bind(
-                view_scale=self._on_view,
-                view_pan_x=self._on_view,
-                view_pan_y=self._on_view,
-                page_width=self._on_view,
-                page_height=self._on_view,
-                page_count=self._on_view,
+                view_scale=self._apply_transform,
+                view_pan_x=self._apply_transform,
+                view_pan_y=self._apply_transform,
+                page_width=self.redraw_all,
+                page_height=self.redraw_all,
+                page_count=self.redraw_all,
             )
-        self.bind(show_grid=self._on_view, show_document_image=self._on_view)
+        self.bind(show_grid=self.redraw_all, show_document_image=self.redraw_all)
         Clock.schedule_once(lambda _dt: self.redraw_all(), 0)
 
     def _on_geom(self, *_args: Any) -> None:
         if self._bg_rect is not None:
             self._bg_rect.pos = self.pos
             self._bg_rect.size = self.size
-        self.redraw_all()
+        if self._clip_rect is not None:
+            self._clip_rect.pos = self.pos
+            self._clip_rect.size = self.size
+        self._apply_transform()
 
-    def _on_view(self, *_args: Any) -> None:
-        self.redraw_all()
+    def _apply_transform(self, *_args: Any) -> None:
+        if self._tx is None or self._sc is None:
+            self.redraw_all()
+            return
+        origin_x, origin_y, _dw, _dh, scale, _pw, _ph = self._page_metrics()
+        self._tx.x = origin_x
+        self._tx.y = origin_y
+        try:
+            self._sc.xyz = (scale, scale, 1.0)
+        except Exception:
+            self._sc.x = scale
+            self._sc.y = scale
+        if self.view_role != "pdf":
+            return
         app = App.get_running_app()
-        if self.view_role == "pdf" and hasattr(app, "request_visible_pages"):
-            app.request_visible_pages()
+        vis = self._visible_pages()
+        if vis != self._queued_vis:
+            self._queued_vis = vis
+            if hasattr(app, "request_visible_pages"):
+                app.request_visible_pages()
 
     def collide_point(self, x: float, y: float) -> bool:
         if self.disabled or self.opacity <= 0 or self.width <= 1 or self.height <= 1:
@@ -713,8 +740,13 @@ class SPenAnnotationCanvas(Widget):
             return
         self._page_textures[index] = texture
         app = App.get_running_app()
-        app.page_count = total
-        self.redraw_all()
+        if int(app.page_count) != total:
+            app.page_count = total
+        rect = self._image_rects.get(index)
+        if rect is not None:
+            rect.texture = texture
+        else:
+            self.redraw_all()
 
     def set_blank_notebook(self, count: int, width: float = 0.0, height: float = 0.0) -> None:
         self._page_textures = [None] * max(1, int(count))
@@ -850,65 +882,96 @@ class SPenAnnotationCanvas(Widget):
                 flat.extend([float(point[0]), float(point[1])])
             Line(points=flat, width=width, cap="round", joint="round")
 
-    def redraw_all(self) -> None:
+    def _grid_texture(self, page_w: float, page_h: float) -> Any:
+        key = (max(2, int(round(page_w))), max(2, int(round(page_h))))
+        if self._grid_tex is not None and self._grid_tex_key == key:
+            return self._grid_tex
+        from PIL import Image, ImageDraw
+
+        width, height = key
+        cap = 768.0
+        scale = min(1.0, cap / float(max(width, height)))
+        tw = max(2, int(round(width * scale)))
+        th = max(2, int(round(height * scale)))
+        image = Image.new("RGB", (tw, th), (255, 255, 255))
+        drawer = ImageDraw.Draw(image)
+        color = (199, 214, 235)
+        step = max(12, min(tw, th) // 22)
+        x = 0
+        while x <= tw:
+            drawer.line([(x, 0), (x, th)], fill=color, width=1)
+            x += step
+        y = 0
+        while y <= th:
+            drawer.line([(0, y), (tw, y)], fill=color, width=1)
+            y += step
+        self._grid_tex = _pil_to_texture(image)
+        self._grid_tex_key = key
+        return self._grid_tex
+
+    def _live_points_flat(self) -> List[float]:
+        flat: List[float] = []
+        for point in self.current_stroke:
+            flat.extend([float(point[0]), float(point[1])])
+        return flat
+
+    def _sync_live(self) -> None:
+        if self._live_dashed or self._live_line is None or self._live_color_instr is None:
+            self.redraw_all()
+            return
+        self._live_color_instr.rgba = self._live_color
+        self._live_line.points = self._live_points_flat()
+        self._live_line.width = max(1.0, float(self._live_width))
+
+    def redraw_all(self, *_args: Any) -> None:
         origin_x, origin_y, _dw, _dh, scale, page_w, page_h = self._page_metrics()
         count = max(1, int(App.get_running_app().page_count))
+        grid_tex = self._grid_texture(page_w, page_h) if self.show_grid else None
         self.canvas.clear()
+        self._image_rects = {}
         with self.canvas:
             StencilPush()
             Color(1, 1, 1, 1)
-            Rectangle(pos=self.pos, size=self.size)
+            self._clip_rect = Rectangle(pos=self.pos, size=self.size)
             StencilUse()
             PushMatrix()
-            Translate(origin_x, origin_y)
-            Scale(scale, scale, 1)
+            self._tx = Translate(origin_x, origin_y)
+            self._sc = Scale(scale, scale, 1)
             for index in range(count):
                 page_y = self._page_origin_y(index, page_h)
-                Color(*PAGE_WHITE)
-                Rectangle(pos=(0, page_y), size=(page_w, page_h))
+                Color(1, 1, 1, 1)
                 has_page_image = (
                     self.show_document_image
                     and index < len(self._page_textures)
                     and self._page_textures[index] is not None
                 )
                 if has_page_image:
-                    Color(1, 1, 1, 1)
-                    Rectangle(
+                    rect = Rectangle(
                         texture=self._page_textures[index],
                         pos=(0, page_y),
                         size=(page_w, page_h),
                     )
-                elif self.show_grid:
-                    self._draw_grid(page_w, page_h, page_y)
+                elif grid_tex is not None:
+                    rect = Rectangle(
+                        texture=grid_tex,
+                        pos=(0, page_y),
+                        size=(page_w, page_h),
+                    )
+                else:
+                    rect = Rectangle(pos=(0, page_y), size=(page_w, page_h))
+                self._image_rects[index] = rect
             for record in self.strokes:
                 self._draw_record(record)
-            if len(self.current_stroke) >= 2:
-                self._draw_record(
-                    {
-                        "points": [list(point) for point in self.current_stroke],
-                        "color": list(self._live_color),
-                        "width": self._live_width,
-                        "dashed": self._live_dashed,
-                        "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
-                        "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
-                    }
-                )
+            self._live_color_instr = Color(*self._live_color)
+            self._live_line = Line(
+                points=self._live_points_flat(),
+                width=max(1.0, float(self._live_width)),
+                cap="round",
+                joint="round",
+            )
             PopMatrix()
             StencilUnUse()
             StencilPop()
-
-    def _draw_grid(self, page_w: float, page_h: float, page_y: float) -> None:
-        step = max(24.0, min(page_w, page_h) / 22.0)
-        Color(*GRID_LINE)
-        x = 0.0
-        while x <= page_w + 0.5:
-            Line(points=[x, page_y, x, page_y + page_h], width=1.0)
-            x += step
-        y = page_y
-        top = page_y + page_h
-        while y <= top + 0.5:
-            Line(points=[0.0, y, page_w, y], width=1.0)
-            y += step
 
     def _start_view_gesture(self, touch: MotionEvent) -> None:
         app = App.get_running_app()
@@ -991,7 +1054,7 @@ class SPenAnnotationCanvas(Widget):
         app = App.get_running_app()
         app._multitouch = True
         self.current_stroke = []
-        self.redraw_all()
+        self._sync_live()
         app._fingers = dict(app._pointers)
         touch.ud["mode"] = "pinch"
         self._begin_pinch(app)
@@ -1067,10 +1130,13 @@ class SPenAnnotationCanvas(Widget):
             self.current_stroke = shape_points(
                 str(touch.ud["shape"]), start, self.to_doc(touch.x, touch.y)
             )
-            self.redraw_all()
+            self._sync_live()
             return True
-        self.current_stroke.append(self.to_doc(touch.x, touch.y))
-        self.redraw_all()
+        doc = self.to_doc(touch.x, touch.y)
+        if self.current_stroke and _dist2(self.current_stroke[-1], doc) < 2.25:
+            return True
+        self.current_stroke.append(doc)
+        self._sync_live()
         return True
 
     def on_touch_up(self, touch: MotionEvent) -> bool:
