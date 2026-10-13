@@ -74,6 +74,8 @@ MIN_SCALE = 0.45
 MAX_SCALE = 6.0
 PDF_RENDER_SCALE = 2.0
 PDF_RENDER_MAX_SIDE = 2048.0
+PDF_EXPORT_SCALE = 3.5
+PDF_EXPORT_MAX_SIDE = 3200.0
 PDF_PREVIEW_SCALE = 1.0
 PDF_PREVIEW_MAX_SIDE = 900.0
 MAX_GPU_PAGES = 5
@@ -4000,7 +4002,7 @@ class SamsungNotesCompanionApp(App):
         pfd.close()
         return count
 
-    def _bitmap_to_file(self, bitmap: Any, jpeg: bool = False) -> Optional[str]:
+    def _bitmap_to_file(self, bitmap: Any, jpeg: bool = False, quality: int = 70) -> Optional[str]:
         from jnius import autoclass
 
         suffix = ".jpg" if jpeg else ".png"
@@ -4009,7 +4011,7 @@ class SamsungNotesCompanionApp(App):
         stream = autoclass("java.io.FileOutputStream")(handle.name)
         fmt = autoclass("android.graphics.Bitmap$CompressFormat")
         if jpeg:
-            ok = bool(bitmap.compress(fmt.JPEG, 70, stream))
+            ok = bool(bitmap.compress(fmt.JPEG, int(max(40, min(95, quality))), stream))
         else:
             ok = bool(bitmap.compress(fmt.PNG, 100, stream))
         stream.close()
@@ -4037,7 +4039,7 @@ class SamsungNotesCompanionApp(App):
         page_w = max(1.0, float(page.getWidth()))
         page_h = max(1.0, float(page.getHeight()))
         if for_export:
-            scale = min(PDF_RENDER_SCALE, PDF_RENDER_MAX_SIDE / max(page_w, page_h))
+            scale = min(PDF_EXPORT_SCALE, PDF_EXPORT_MAX_SIDE / max(page_w, page_h))
         else:
             cap = PDF_PREVIEW_MAX_SIDE
             try:
@@ -4055,7 +4057,7 @@ class SamsungNotesCompanionApp(App):
         paint.setARGB(255, 255, 255, 255)
         canvas.drawRect(0.0, 0.0, float(width), float(height), paint)
         self._call_page_render(page, bitmap)
-        path = self._bitmap_to_file(bitmap, jpeg=not for_export)
+        path = self._bitmap_to_file(bitmap, jpeg=True, quality=90 if for_export else 70)
         try:
             bitmap.recycle()
         except Exception:
@@ -4112,16 +4114,28 @@ class SamsungNotesCompanionApp(App):
         pages: Dict[int, List[StrokeRecord]] = {index: [] for index in range(count)}
         for record in strokes:
             points = record.get("points") or []
-            if not points:
+            rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
+            if points:
+                from_bottom = int(float(points[0][1]) // span)
+            elif record.get("kind") in {"image", "text"}:
+                from_bottom = int(float(rect[1]) // span)
+            else:
                 continue
-            from_bottom = int(float(points[0][1]) // span)
             from_bottom = max(0, min(count - 1, from_bottom))
             page = count - 1 - from_bottom
             origin_y = from_bottom * span
             clone = dict(record)
-            clone["points"] = [
-                [float(point[0]), float(point[1]) - origin_y] for point in points
-            ]
+            if points:
+                clone["points"] = [
+                    [float(point[0]), float(point[1]) - origin_y] for point in points
+                ]
+            if record.get("rect") and len(record["rect"]) >= 4:
+                clone["rect"] = [
+                    float(record["rect"][0]),
+                    float(record["rect"][1]) - origin_y,
+                    float(record["rect"][2]),
+                    float(record["rect"][3]),
+                ]
             pages.setdefault(page, []).append(clone)
         return pages
 
@@ -4139,6 +4153,13 @@ class SamsungNotesCompanionApp(App):
                     [float(point[0]), float(point[1]) + origin_y]
                     for point in (record.get("points") or [])
                 ]
+                if record.get("rect") and len(record["rect"]) >= 4:
+                    clone["rect"] = [
+                        float(record["rect"][0]),
+                        float(record["rect"][1]) + origin_y,
+                        float(record["rect"][2]),
+                        float(record["rect"][3]),
+                    ]
                 stacked.append(clone)
         return stacked
 
@@ -4460,9 +4481,9 @@ class SamsungNotesCompanionApp(App):
         scale_y = height / page_h if page_h > 1 else 1.0
         for record in strokes:
             if record.get("kind") == "image":
-                rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
-                path = str(record.get("path") or "")
-                if not path or not os.path.isfile(path):
+                rect = self._export_record_box(record) or [0.0, 0.0, 0.0, 0.0]
+                path = self._resolve_stamp_path(str(record.get("path") or "")) or ""
+                if not path:
                     continue
                 try:
                     stamp = _image_rgb_on_white(path).convert("RGBA")
@@ -4477,7 +4498,8 @@ class SamsungNotesCompanionApp(App):
                         (
                             max(1, int(float(rect[2]) * scale_x)),
                             max(1, int(float(rect[3]) * scale_y)),
-                        )
+                        ),
+                        Image.LANCZOS,
                     )
                     angle = float(record.get("angle") or 0.0)
                     if abs(angle) > 0.05:
@@ -4514,12 +4536,13 @@ class SamsungNotesCompanionApp(App):
                         left = max_w - line_img.size[0] if align_right else 0
                         stamp.paste(line_img, (left, top), line_img)
                         top += int(round(line_h))
-                    rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
+                    rect = self._export_record_box(record) or [0.0, 0.0, 1.0, 1.0]
                     sized = stamp.resize(
                         (
                             max(1, int(float(rect[2]) * scale_x)),
                             max(1, int(float(rect[3]) * scale_y)),
-                        )
+                        ),
+                        Image.LANCZOS,
                     )
                     angle = float(record.get("angle") or 0.0)
                     if abs(angle) > 0.05:
@@ -4540,7 +4563,7 @@ class SamsungNotesCompanionApp(App):
             color = record.get("color", COLOR_BLACK)
             alpha = int(max(0.0, min(1.0, float(color[3] if len(color) > 3 else 1.0))) * 255)
             fill = tuple(max(0, min(255, int(c * 255))) for c in color[:3]) + (alpha,)
-            stroke_w = max(1, int(record.get("width", 2) * max(scale_x, scale_y)))
+            stroke_w = max(2, int(round(float(record.get("width", 2)) * max(scale_x, scale_y))))
             xy = [
                 (float(p[0]) * scale_x, height - float(p[1]) * scale_y) for p in points
             ]
@@ -4571,14 +4594,69 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             return None
 
-    def _export_document_page(self, index: int) -> Optional[Any]:
+    def _stamps_dir(self) -> Path:
+        folder = Path(str(getattr(self, "user_data_dir", "") or tempfile.gettempdir())) / "stamps"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _resolve_stamp_path(self, path: str) -> Optional[str]:
+        if path and os.path.isfile(path):
+            return path
+        name = os.path.basename(str(path or ""))
+        if not name:
+            return None
+        for folder in (self._stamps_dir(), Path(tempfile.gettempdir())):
+            candidate = folder / name
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _export_record_box(self, record: StrokeRecord) -> Optional[List[float]]:
+        points = record.get("points") or []
+        if len(points) >= 2:
+            xs = [float(point[0]) for point in points]
+            ys = [float(point[1]) for point in points]
+            return [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+        rect = record.get("rect") or []
+        if len(rect) >= 4:
+            return [float(value) for value in rect[:4]]
+        return None
+
+    def _render_all_export_backgrounds(self, count: int) -> List[Optional[Any]]:
+        pages: List[Optional[Any]] = [None] * count
         if self.pdf_path and is_android():
-            preview = self._render_pdf_page(index)
-            if preview:
-                return _image_rgb_on_white(preview)
+            try:
+                from jnius import autoclass
+
+                pfd = self._open_pdf_pfd()
+                renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
+                try:
+                    total = min(count, int(renderer.getPageCount()))
+                    for index in range(total):
+                        page = renderer.openPage(int(index))
+                        try:
+                            path = self._render_opened_page(page, for_export=True)
+                            if path:
+                                pages[index] = _image_rgb_on_white(path)
+                        finally:
+                            page.close()
+                finally:
+                    renderer.close()
+                    pfd.close()
+            except Exception:
+                pass
         textures = getattr(self.root_layout.pdf_canvas, "_page_textures", [])
-        if 0 <= index < len(textures) and textures[index] is not None:
-            return self._texture_to_rgb(textures[index])
+        for index, current in enumerate(pages):
+            if current is not None:
+                continue
+            if 0 <= index < len(textures) and textures[index] is not None:
+                pages[index] = self._texture_to_rgb(textures[index])
+        return pages
+
+    def _export_document_page(self, index: int) -> Optional[Any]:
+        pages = self._render_all_export_backgrounds(index + 1)
+        if 0 <= index < len(pages):
+            return pages[index]
         return None
 
     def _render_export_pngs(self) -> List[Tuple[bytes, int, int]]:
@@ -4587,33 +4665,35 @@ class SamsungNotesCompanionApp(App):
         self._stash_current_page_strokes()
         pages: List[Tuple[bytes, int, int]] = []
         count = max(1, int(self._pdf_page_count) or 1)
+        backgrounds = self._render_all_export_backgrounds(count)
+        page_w = max(1.0, float(self.page_width))
+        page_h = max(1.0, float(self.page_height))
+        notes_w = max(1.0, float(self.notes_page_width))
         for index in range(count):
-            background = self._export_document_page(index)
+            background = backgrounds[index] if index < len(backgrounds) else None
             if background is None:
+                scale = min(PDF_EXPORT_SCALE, PDF_EXPORT_MAX_SIDE / max(page_w, page_h))
                 background = Image.new(
                     "RGB",
-                    (int(self.page_width), int(self.page_height)),
+                    (max(1, int(round(page_w * scale))), max(1, int(round(page_h * scale)))),
                     (255, 255, 255),
                 )
             self._stroke_on_image(
                 background,
                 self._page_strokes.get(index, []),
-                float(self.page_width),
-                float(self.page_height),
-            )
-            notes_h = int(max(1, self.page_height))
-            notes_w = int(max(1, round(float(self.notes_page_width))))
-            notes_native = Image.new("RGB", (notes_w, notes_h), (255, 255, 255))
-            self._draw_notes_grid_pil(notes_native)
-            self._stroke_on_image(
-                notes_native,
-                self._notes_strokes.get(index, []),
-                float(notes_w),
-                float(notes_h),
+                page_w,
+                page_h,
             )
             export_notes_h = background.size[1]
-            export_notes_w = max(1, int(round(notes_w * export_notes_h / max(notes_h, 1))))
-            notes = notes_native.resize((export_notes_w, export_notes_h), Image.LANCZOS)
+            export_notes_w = max(1, int(round(notes_w * export_notes_h / max(page_h, 1.0))))
+            notes = Image.new("RGB", (export_notes_w, export_notes_h), (255, 255, 255))
+            self._draw_notes_grid_pil(notes)
+            self._stroke_on_image(
+                notes,
+                self._notes_strokes.get(index, []),
+                notes_w,
+                page_h,
+            )
             combined = Image.new(
                 "RGB",
                 (notes.size[0] + background.size[0], background.size[1]),
@@ -4622,9 +4702,7 @@ class SamsungNotesCompanionApp(App):
             combined.paste(notes, (0, 0))
             combined.paste(background, (notes.size[0], 0))
             buffer = io.BytesIO()
-            combined.save(
-                buffer, format="JPEG", quality=92, optimize=False, progressive=False
-            )
+            combined.save(buffer, format="JPEG", quality=90, optimize=False, progressive=False)
             pages.append((buffer.getvalue(), combined.size[0], combined.size[1]))
         return pages
 
@@ -4896,9 +4974,8 @@ class SamsungNotesCompanionApp(App):
 
         canvas = self.root_layout.pdf_canvas
         image = _image_rgb_on_white(Image.open(path))
-        stored = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        stored.close()
-        image.save(stored.name, "PNG")
+        stored = self._stamps_dir() / f"{uuid.uuid4().hex}.png"
+        image.save(str(stored), "PNG")
         page_w = max(1.0, float(self.page_width))
         page_h = max(1.0, float(self.page_height))
         iw, ih = image.size
@@ -4916,7 +4993,7 @@ class SamsungNotesCompanionApp(App):
         canvas.strokes.append(
             {
                 "kind": "image",
-                "path": stored.name,
+                "path": str(stored),
                 "rect": [x, y, tw, th],
                 "crop": [0.0, 0.0, 1.0, 1.0],
                 "angle": 0.0,
