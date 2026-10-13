@@ -234,6 +234,11 @@ def _java_chars(value: Any) -> str:
     if value is None:
         return ""
     try:
+        length = int(value.length())
+        return "".join(chr(int(value.charAt(index)) & 0xFFFF) for index in range(length))
+    except Exception:
+        pass
+    try:
         if hasattr(value, "toString"):
             value = value.toString()
     except Exception:
@@ -2107,6 +2112,12 @@ class SPenAnnotationCanvas(Widget):
         if tool_mode == "none":
             self._start_view_gesture(touch)
             return True
+        if tool_mode == "text":
+            self.current_stroke = []
+            self._sync_live()
+            touch.ud["mode"] = "text"
+            touch.ud["text_doc"] = doc
+            return True
         color = tuple(getattr(app, "current_color", COLOR_BLACK))[:3]
         opacity = max(0.12, min(1.0, float(getattr(app, "ink_opacity", 1.0))))
         self._live_color = (color[0], color[1], color[2], opacity)
@@ -2114,10 +2125,6 @@ class SPenAnnotationCanvas(Widget):
         self._live_dashed = bool(getattr(app, "is_dashed", False))
         self._live_dash_len = float(getattr(app, "dash_length", DASH_LENGTH))
         self._live_gap_len = float(getattr(app, "dash_gap", GAP_LENGTH))
-        if tool_mode == "text":
-            touch.ud["mode"] = "text"
-            touch.ud["text_doc"] = doc
-            return True
         if tool_mode in SHAPE_TOOLS:
             touch.ud["shape"] = tool_mode
             touch.ud["shape_start"] = doc
@@ -2144,6 +2151,8 @@ class SPenAnnotationCanvas(Widget):
                 self._update_pinch(app)
             return True
         mode = touch.ud.get("mode")
+        if mode == "text":
+            return True
         if mode == "pan":
             last = touch.ud.get("last", (touch.x, touch.y))
             self._add_pan(touch.x - last[0], touch.y - last[1])
@@ -2217,9 +2226,8 @@ class SPenAnnotationCanvas(Widget):
         if touch.ud.get("mode") in {"pan", "pinch", "move", "resize", "crop", "rotate", "endpoint"}:
             return True
         if touch.ud.get("mode") == "text":
-            origin = touch.ud.get("hold_origin", (touch.x, touch.y))
-            if math.hypot(touch.x - origin[0], touch.y - origin[1]) > dp(14):
-                return True
+            self.current_stroke = []
+            self._sync_live()
             doc = touch.ud.get("text_doc", self.to_doc(touch.x, touch.y))
             hit = self._hit_object(doc)
             if hit is not None and self.strokes[hit].get("kind") == "text":
@@ -4837,7 +4845,7 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
-        if getattr(self, "_android_text_ui_ver", 0) == 3:
+        if getattr(self, "_android_text_ui_ver", 0) == 4:
             return
         from jnius import PythonJavaClass, java_method
 
@@ -4875,10 +4883,26 @@ class SamsungNotesCompanionApp(App):
                 if text:
                     app._android_typed = text
 
+        class DialogDismiss(PythonJavaClass):
+            __javacontext__ = "app"
+            __javainterfaces__ = ["android.content.DialogInterface$OnDismissListener"]
+
+            @java_method("(Landroid/content/DialogInterface;)V")
+            def onDismiss(self, _dialog: Any) -> None:
+                if getattr(app, "_android_dialog_result", None) is None:
+                    app._queue_android_text_result(False, "")
+
         self._android_tap_ok = TextTap(True)
         self._android_tap_cancel = TextTap(False)
-        self._android_watcher = TextWatch()
-        self._android_text_ui_ver = 3
+        try:
+            self._android_watcher = TextWatch()
+        except Exception:
+            self._android_watcher = None
+        try:
+            self._android_dismiss = DialogDismiss()
+        except Exception:
+            self._android_dismiss = None
+        self._android_text_ui_ver = 4
 
     def _queue_android_text_result(self, accept: bool, text: str) -> None:
         if getattr(self, "_android_dialog_result", None) is not None:
@@ -4902,32 +4926,15 @@ class SamsungNotesCompanionApp(App):
             field = _java_chars(self._android_edit.getText())
         except Exception:
             field = ""
-        text = typed.strip() and typed or field
+        text = typed if typed.strip() else field
         if len(field.strip()) > len(_strip_bidi_marks(text).strip()):
             text = field
-        from android.runnable import run_on_ui_thread
-
-        @run_on_ui_thread
-        def _hide() -> None:
-            try:
-                from jnius import autoclass
-
-                activity = autoclass("org.kivy.android.PythonActivity").mActivity
-                Context = autoclass("android.content.Context")
-                InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
-                imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-                token = self._android_edit.getWindowToken()
-                imm.hideSoftInputFromWindow(token, 0)
-            except Exception:
-                pass
-            try:
-                parent = self._android_overlay.getParent()
-                if parent is not None:
-                    parent.removeView(self._android_overlay)
-            except Exception:
-                pass
-
-        _hide()
+        try:
+            dialog = getattr(self, "_android_dialog", None)
+            if dialog is not None:
+                dialog.dismiss()
+        except Exception:
+            pass
         self._queue_android_text_result(accept, text)
 
     def _show_android_text_dialog(
@@ -4945,6 +4952,7 @@ class SamsungNotesCompanionApp(App):
 
         self._ensure_android_text_listeners()
         activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        Builder = autoclass("android.app.AlertDialog$Builder")
         EditText = autoclass("android.widget.EditText")
         InputType = autoclass("android.text.InputType")
         View = autoclass("android.view.View")
@@ -4952,14 +4960,11 @@ class SamsungNotesCompanionApp(App):
         Gravity = autoclass("android.view.Gravity")
         LinearLayout = autoclass("android.widget.LinearLayout")
         Button = autoclass("android.widget.Button")
-        FrameLayout = autoclass("android.widget.FrameLayout")
-        AndroidColor = autoclass("android.graphics.Color")
         EditorInfo = autoclass("android.view.inputmethod.EditorInfo")
         Context = autoclass("android.content.Context")
         InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
-        RId = autoclass("android.R$id")
         density = float(activity.getResources().getDisplayMetrics().density)
-        pad = int(16 * density)
+        pad = int(18 * density)
 
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
@@ -4970,21 +4975,11 @@ class SamsungNotesCompanionApp(App):
 
         @run_on_ui_thread
         def _open() -> None:
+            box = LinearLayout(activity)
+            box.setOrientation(LinearLayout.VERTICAL)
+            box.setPadding(pad, pad, pad, pad)
             try:
-                old = getattr(self, "_android_overlay", None)
-                if old is not None and old.getParent() is not None:
-                    old.getParent().removeView(old)
-            except Exception:
-                pass
-            overlay = LinearLayout(activity)
-            overlay.setOrientation(LinearLayout.VERTICAL)
-            overlay.setBackgroundColor(AndroidColor.parseColor("#F21C1C1E"))
-            overlay.setPadding(pad, pad, pad, pad)
-            overlay.setClickable(True)
-            overlay.setFocusable(True)
-            overlay.setFocusableInTouchMode(True)
-            try:
-                overlay.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
+                box.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
             except Exception:
                 pass
 
@@ -5001,7 +4996,6 @@ class SamsungNotesCompanionApp(App):
             except Exception:
                 pass
             edit.setMinLines(3)
-            edit.setMaxLines(8)
             edit.setGravity(Gravity.START | Gravity.TOP)
             edit.setFocusable(True)
             edit.setFocusableInTouchMode(True)
@@ -5010,36 +5004,45 @@ class SamsungNotesCompanionApp(App):
                 edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
             except Exception:
                 pass
-            edit.addTextChangedListener(self._android_watcher)
-            edit.setLayoutParams(LinearLayout.LayoutParams(-1, -2))
+            if self._android_watcher is not None:
+                edit.addTextChangedListener(self._android_watcher)
 
             buttons = LinearLayout(activity)
             buttons.setOrientation(LinearLayout.HORIZONTAL)
             buttons.setGravity(Gravity.END)
-            ok_btn = Button(activity)
-            ok_btn.setText(String("אישור"))
-            ok_btn.setOnClickListener(self._android_tap_ok)
             cancel_btn = Button(activity)
             cancel_btn.setText(String("ביטול"))
             cancel_btn.setOnClickListener(self._android_tap_cancel)
+            ok_btn = Button(activity)
+            ok_btn.setText(String("אישור"))
+            ok_btn.setOnClickListener(self._android_tap_ok)
             btn_params = LinearLayout.LayoutParams(-2, -2)
             buttons.addView(cancel_btn, btn_params)
             buttons.addView(ok_btn, btn_params)
 
-            overlay.addView(edit, LinearLayout.LayoutParams(-1, -2))
-            overlay.addView(buttons, LinearLayout.LayoutParams(-1, -2))
+            box.addView(edit, LinearLayout.LayoutParams(-1, -2))
+            box.addView(buttons, LinearLayout.LayoutParams(-1, -2))
 
-            host = activity.findViewById(RId.content)
-            params = FrameLayout.LayoutParams(-1, -2)
-            params.gravity = Gravity.BOTTOM
-            host.addView(overlay, params)
-
-            self._android_overlay = overlay
+            builder = Builder(activity)
+            builder.setTitle(String("טקסט"))
+            builder.setView(box)
+            builder.setCancelable(True)
+            dialog = builder.create()
+            if self._android_dismiss is not None:
+                dialog.setOnDismissListener(self._android_dismiss)
+            try:
+                LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+                dialog.getWindow().setSoftInputMode(
+                    LayoutParams.SOFT_INPUT_STATE_VISIBLE | LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                )
+            except Exception:
+                pass
+            dialog.show()
+            self._android_dialog = dialog
             self._android_edit = edit
             edit.requestFocus()
             try:
                 imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-                imm.restartInput(edit)
                 imm.showSoftInput(edit, 0)
             except Exception:
                 pass
