@@ -126,7 +126,7 @@ SHAPE_ORDER: Sequence[str] = (
 )
 CHROME_HEIGHT_DP = 136.0
 SHAPE_BAR_DP = 40.0
-PASTE_HOLD_S = 1.5
+PASTE_HOLD_S = 1.0
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
 
@@ -226,8 +226,17 @@ def ui_text(text: str) -> str:
         return text
 
 
+def _strip_bidi_marks(text: str) -> str:
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+
+
+def _has_hebrew(text: str) -> bool:
+    return any("\u0590" <= ch <= "\u05FF" for ch in text)
+
+
 def _ui_text_body(text: str) -> str:
-    if not text or not any("\u0590" <= ch <= "\u05FF" for ch in text):
+    text = _strip_bidi_marks(text)
+    if not text or not _has_hebrew(text):
         return text
     chunks: List[str] = []
     buf: List[str] = []
@@ -383,6 +392,14 @@ def mixed_markup(text: str) -> str:
 
     for ch in visual:
         is_he = "\u0590" <= ch <= "\u05FF"
+        is_latin = ("A" <= ch <= "Z") or ("a" <= ch <= "z") or ch.isdigit()
+        if ch.isspace() or not (is_he or is_latin):
+            # Hebrew-only TTFs often lack U+0020; keep spaces on LatinFont.
+            if hebrew_run is True:
+                flush()
+            hebrew_run = False
+            buf.append(ch)
+            continue
         if hebrew_run is None:
             hebrew_run = is_he
         elif is_he != hebrew_run:
@@ -946,6 +963,15 @@ class ToolIcon(ButtonBehavior, Widget):
             elif kind == "copy":
                 Line(rectangle=(x + w * 0.08, y + h * 0.22, w * 0.58, h * 0.62), width=1.2)
                 Line(rectangle=(x + w * 0.32, y + h * 0.08, w * 0.58, h * 0.62), width=1.2)
+            elif kind == "cut":
+                Line(points=[x + w * 0.18, y + h * 0.18, x + w * 0.82, y + h * 0.82], width=1.3)
+                Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.18], width=1.3)
+                Line(circle=(x + w * 0.22, y + h * 0.22, min(w, h) * 0.12), width=1.15)
+                Line(circle=(x + w * 0.22, y + h * 0.78, min(w, h) * 0.12), width=1.15)
+            elif kind == "trash":
+                Line(rectangle=(x + w * 0.22, y + h * 0.12, w * 0.56, h * 0.58), width=1.2)
+                Line(points=[x + w * 0.16, y + h * 0.72, x + w * 0.84, y + h * 0.72], width=1.3)
+                Line(rectangle=(x + w * 0.38, y + h * 0.78, w * 0.24, h * 0.12), width=1.15)
             elif kind == "paste":
                 Line(rectangle=(x + w * 0.18, y + h * 0.08, w * 0.64, h * 0.72), width=1.2)
                 Line(rectangle=(x + w * 0.32, y + h * 0.68, w * 0.36, h * 0.22), width=1.2)
@@ -1072,6 +1098,44 @@ class FloatingChip(ButtonBehavior, BoxLayout):
         if not self.collide_point(*touch.pos):
             return False
         self.dispatch("on_release")
+        return True
+
+
+class SelectionBar(BoxLayout):
+    """Icon-only copy / cut / delete bar above a lasso selection."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("orientation", "horizontal")
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(136), dp(44)))
+        kwargs.setdefault("spacing", dp(2))
+        kwargs.setdefault("padding", (dp(4), dp(4)))
+        super().__init__(**kwargs)
+        with self.canvas.before:
+            self._bg = Color(0.12, 0.12, 0.14, 0.94)
+            self._rect = Rectangle()
+        self.bind(pos=self._sync, size=self._sync)
+        app = App.get_running_app()
+        for kind, handler in (
+            ("copy", app.copy_selection),
+            ("cut", app.cut_selection),
+            ("trash", app.delete_selection),
+        ):
+            self.add_widget(ToolIcon(kind, on_dark=True, size=(dp(40), dp(36)), trigger=handler))
+        Clock.schedule_once(lambda _dt: self._sync(), 0)
+
+    def _sync(self, *_args: Any) -> None:
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
+        if _is_hover_touch(touch):
+            return False
+        if not self.collide_point(*touch.pos):
+            return False
+        super().on_touch_down(touch)
         return True
 
 
@@ -1616,16 +1680,16 @@ class SPenAnnotationCanvas(Widget):
             from kivy.core.text import Label as CoreLabel
 
             kwargs: Dict[str, Any] = {
-                "text": mixed_markup(text),
+                "text": mixed_markup(_strip_bidi_marks(text)),
                 "markup": True,
                 "font_size": font_size,
                 "color": color[:4] if len(color) > 3 else color + (1.0,),
-                "halign": "right" if any("\u0590" <= ch <= "\u05ff" for ch in text) else "left",
+                "halign": "right" if _has_hebrew(text) else "left",
             }
-            if _HEBREW_FONT_READY:
-                kwargs["font_name"] = "HebrewFont"
-            elif _LATIN_FONT_READY:
+            if _LATIN_FONT_READY:
                 kwargs["font_name"] = "LatinFont"
+            elif _HEBREW_FONT_READY:
+                kwargs["font_name"] = "HebrewFont"
             label = CoreLabel(**kwargs)
             label.refresh()
             texture = label.texture
@@ -2581,6 +2645,16 @@ class SPenAnnotationCanvas(Widget):
                 payload.append(json.loads(json.dumps(self.strokes[index])))
         return payload
 
+    def delete_selected(self) -> bool:
+        if not self.selected_ids:
+            return False
+        self.push_history()
+        drop = set(self.selected_ids)
+        self.strokes = [record for index, record in enumerate(self.strokes) if index not in drop]
+        self.selected_ids = []
+        self.redraw_all()
+        return True
+
     def paste_records(self, records: Sequence[StrokeRecord], dx: float = 36.0, dy: float = -36.0) -> None:
         if not records:
             return
@@ -2728,10 +2802,8 @@ class RootLayout(FloatLayout):
         )
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
-        self.copy_chip = FloatingChip("copy", "העתק")
-        self.paste_chip = FloatingChip("paste", "הדבק")
-        self.copy_chip.bind(on_release=self._on_copy_chip)
-        self.paste_chip.bind(on_release=self._on_paste_chip)
+        self.copy_chip = SelectionBar()
+        self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
         self.text_overlay = self._build_text_overlay()
         self.add_widget(self.workspace)
@@ -2777,7 +2849,7 @@ class RootLayout(FloatLayout):
 
     def _place_chip(
         self,
-        chip: FloatingChip,
+        chip: Widget,
         widget: Widget,
         x: float,
         y: float,
@@ -2898,7 +2970,6 @@ class RootLayout(FloatLayout):
         self.text_overlay.pos_hint = {"x": 0, "y": 0}
         self.text_overlay.y = 0
         self.text_overlay.height = dp(168)
-        Clock.schedule_once(lambda _dt: apply_hebrew_ui(self.text_overlay, "טקסט"), 0)
         focus_system_keyboard(self.text_field)
 
     def _commit_text_overlay(self, *_args: Any) -> None:
@@ -4709,12 +4780,130 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.refresh_tool_styles()
 
     def prompt_new_text(self, canvas: SPenAnnotationCanvas, doc: Point) -> None:
-        self.root_layout.show_text_overlay(canvas, doc, None)
+        self._prompt_text(canvas, doc, None)
 
     def prompt_text_record(self, canvas: SPenAnnotationCanvas, index: int) -> None:
         record = canvas.strokes[index]
         rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
-        self.root_layout.show_text_overlay(canvas, (float(rect[0]), float(rect[1])), index)
+        self._prompt_text(canvas, (float(rect[0]), float(rect[1])), index)
+
+    def _prompt_text(
+        self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
+    ) -> None:
+        if is_android():
+            try:
+                self._show_android_text_dialog(canvas, doc, existing)
+                return
+            except Exception:
+                pass
+        self.root_layout.show_text_overlay(canvas, doc, existing)
+
+    def _show_android_text_dialog(
+        self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
+    ) -> None:
+        from android.runnable import run_on_ui_thread
+        from jnius import PythonJavaClass, autoclass, java_method
+
+        initial = ""
+        font_size = 28.0
+        if existing is not None and 0 <= existing < len(canvas.strokes):
+            record = canvas.strokes[existing]
+            initial = str(record.get("text") or "")
+            font_size = float(record.get("font_size") or 28.0)
+
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        Builder = autoclass("android.app.AlertDialog$Builder")
+        EditText = autoclass("android.widget.EditText")
+        InputType = autoclass("android.text.InputType")
+        View = autoclass("android.view.View")
+        Context = autoclass("android.content.Context")
+        InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
+        String = autoclass("java.lang.String")
+        Gravity = autoclass("android.view.Gravity")
+
+        app = self
+
+        class _Click(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+            __javacontext__ = "app"
+
+            def __init__(self, ok: bool) -> None:
+                super().__init__()
+                self.ok = ok
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, dialog: Any, which: int) -> None:
+                text = str(app._android_edit.getText().toString()) if self.ok else ""
+                Clock.schedule_once(lambda _dt, value=text, accept=self.ok: app._finish_android_text(value, accept), 0)
+
+        class _Show(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnShowListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/content/DialogInterface;)V")
+            def onShow(self, dialog: Any) -> None:
+                edit = app._android_edit
+                edit.requestFocus()
+                try:
+                    imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
+                    imm.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
+                except Exception:
+                    pass
+
+        self._android_text_target = (canvas, doc, existing, font_size)
+        self._android_click_ok = _Click(True)
+        self._android_click_cancel = _Click(False)
+        self._android_show = _Show()
+
+        @run_on_ui_thread
+        def _open() -> None:
+            edit = EditText(activity)
+            edit.setText(String(initial))
+            edit.setInputType(
+                InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
+            )
+            edit.setMinLines(3)
+            edit.setGravity(Gravity.START | Gravity.TOP)
+            try:
+                edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
+                edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
+                edit.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
+            except Exception:
+                pass
+            app._android_edit = edit
+            builder = Builder(activity)
+            builder.setTitle(String("טקסט"))
+            builder.setView(edit)
+            builder.setPositiveButton(String("אישור"), app._android_click_ok)
+            builder.setNegativeButton(String("ביטול"), app._android_click_cancel)
+            dialog = builder.create()
+            dialog.setOnShowListener(app._android_show)
+            try:
+                LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+                dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+            except Exception:
+                pass
+            dialog.show()
+            edit.requestFocus()
+
+        _open()
+
+    def _finish_android_text(self, text: str, accept: bool) -> None:
+        target = getattr(self, "_android_text_target", None)
+        self._android_text_target = None
+        if not accept or not target:
+            return
+        value = _strip_bidi_marks(text).strip()
+        if not value:
+            return
+        canvas, doc, existing, font_size = target
+        canvas.place_text_record(doc, value, list(self.current_color), font_size=font_size, index=existing)
+        self._history_role = canvas.view_role
+        self.tool_mode = "lasso"
+        self.root_layout.refresh_tool_styles()
+        self.root_layout.sync_floating_tools()
 
     def toggle_shape_menu(self, *_args: Any) -> None:
         self.root_layout.toggle_shape_menu()
@@ -4731,6 +4920,33 @@ class SamsungNotesCompanionApp(App):
             return
         self._clipboard = payload
         self._notify("הועתק")
+
+    def cut_selection(self, *_args: Any) -> None:
+        payload: List[StrokeRecord] = []
+        for canvas in (self.root_layout.pdf_canvas, self.root_layout.notes_canvas):
+            payload = canvas.copy_selected()
+            if payload:
+                self._history_role = canvas.view_role
+                break
+        if not payload:
+            self._notify("אין בחירה לגזירה")
+            return
+        self._clipboard = payload
+        for canvas in (self.root_layout.pdf_canvas, self.root_layout.notes_canvas):
+            if canvas.selected_ids and canvas.delete_selected():
+                self._history_role = canvas.view_role
+                self.root_layout.sync_floating_tools()
+                break
+        self._notify("נגזר")
+
+    def delete_selection(self, *_args: Any) -> None:
+        for canvas in (self.root_layout.pdf_canvas, self.root_layout.notes_canvas):
+            if canvas.selected_ids and canvas.delete_selected():
+                self._history_role = canvas.view_role
+                self.root_layout.sync_floating_tools()
+                self._notify("נמחק")
+                return
+        self._notify("אין בחירה למחיקה")
 
     def paste_selection(self, *_args: Any) -> None:
         if not self._clipboard:
