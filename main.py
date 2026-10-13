@@ -97,6 +97,7 @@ UP_ACTIONS = {1, 6}
 
 OPEN_REQUEST = 4101
 SAVE_REQUEST = 4102
+IMAGE_REQUEST = 4103
 SPEN_KEYCODES = {110, 139, 188, 189, 308, 309}
 
 SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
@@ -229,6 +230,65 @@ def set_hebrew_font(widget: Any) -> None:
         widget.font_name = "HebrewFont"
     except Exception:
         pass
+
+
+def mixed_markup(text: str) -> str:
+    """Visual Hebrew order, with Latin/digit runs on LatinFont so they are not tofu."""
+    visual = ui_text(text)
+    if not visual:
+        return ""
+    parts: List[str] = []
+    buf: List[str] = []
+    hebrew_run: Optional[bool] = None
+
+    def _escape(chunk: str) -> str:
+        return chunk.replace("&", "&amp;").replace("[", "&bl;").replace("]", "&br;")
+
+    def flush() -> None:
+        if not buf or hebrew_run is None:
+            return
+        chunk = _escape("".join(buf))
+        if hebrew_run and _HEBREW_FONT_READY:
+            parts.append(f"[font=HebrewFont]{chunk}[/font]")
+        elif (not hebrew_run) and _LATIN_FONT_READY:
+            parts.append(f"[font=LatinFont]{chunk}[/font]")
+        else:
+            parts.append(chunk)
+        buf.clear()
+
+    for ch in visual:
+        is_he = "\u0590" <= ch <= "\u05FF"
+        if hebrew_run is None:
+            hebrew_run = is_he
+        elif is_he != hebrew_run:
+            flush()
+            hebrew_run = is_he
+        buf.append(ch)
+    flush()
+    return "".join(parts)
+
+
+def hsv_to_rgb(hue: float, sat: float, val: float) -> Rgba:
+    h = (float(hue) % 1.0) * 6.0
+    s = max(0.0, min(1.0, float(sat)))
+    v = max(0.0, min(1.0, float(val)))
+    chroma = v * s
+    x = chroma * (1.0 - abs(h % 2.0 - 1.0))
+    m = v - chroma
+    idx = int(h)
+    if idx == 0:
+        r, g, b = chroma, x, 0.0
+    elif idx == 1:
+        r, g, b = x, chroma, 0.0
+    elif idx == 2:
+        r, g, b = 0.0, chroma, x
+    elif idx == 3:
+        r, g, b = 0.0, x, chroma
+    elif idx == 4:
+        r, g, b = x, 0.0, chroma
+    else:
+        r, g, b = chroma, 0.0, x
+    return (r + m, g + m, b + m, 1.0)
 
 
 def _dist2(left: Sequence[float], right: Sequence[float]) -> float:
@@ -512,6 +572,29 @@ class ToolIcon(ButtonBehavior, Widget):
                     star.extend([cx + radius * math.cos(angle), cy + radius * math.sin(angle)])
                 star.extend(star[:2])
                 Line(points=star, width=1.2)
+            elif kind == "image":
+                Line(rectangle=(x + w * 0.08, y + h * 0.18, w * 0.84, h * 0.64), width=1.3)
+                Line(circle=(x + w * 0.3, y + h * 0.62, min(w, h) * 0.08), width=1.2)
+                Line(
+                    points=[
+                        x + w * 0.12,
+                        y + h * 0.22,
+                        x + w * 0.42,
+                        y + h * 0.48,
+                        x + w * 0.62,
+                        y + h * 0.34,
+                        x + w * 0.88,
+                        y + h * 0.58,
+                    ],
+                    width=1.2,
+                )
+            elif kind == "fit":
+                Line(rectangle=(x + w * 0.18, y + h * 0.18, w * 0.64, h * 0.64), width=1.2)
+                Line(points=[cx, y + h * 0.08, cx, y + h * 0.28], width=1.3)
+                Line(points=[cx, y + h * 0.72, cx, y + h * 0.92], width=1.3)
+            elif kind == "palette":
+                Line(circle=(cx, cy, min(w, h) * 0.34), width=1.3)
+                Line(circle=(cx, cy, min(w, h) * 0.16), width=1.2)
 
 
 class ColorDot(ButtonBehavior, Widget):
@@ -542,6 +625,124 @@ class ColorDot(ButtonBehavior, Widget):
         radius = min(self.width, self.height) / 2.0 - dp(2)
         self._ring.a = 1.0 if self.selected else 0.0
         self._ring_line.circle = (cx, cy, radius)
+
+
+class InkColorPicker(BoxLayout):
+    """Hue bar + saturation/value square for an exact ink color."""
+
+    hue = NumericProperty(0.0)
+    sat = NumericProperty(1.0)
+    val = NumericProperty(1.0)
+
+    def __init__(self, rgb: Sequence[float], **kwargs: Any) -> None:
+        kwargs.setdefault("orientation", "vertical")
+        kwargs.setdefault("spacing", dp(8))
+        kwargs.setdefault("size_hint_y", None)
+        kwargs.setdefault("height", dp(220))
+        super().__init__(**kwargs)
+        self.hue, self.sat, self.val = self._rgb_to_hsv(rgb)
+        row = BoxLayout(orientation="horizontal", spacing=dp(8))
+        self.sv = Widget()
+        self.hue_bar = Widget(size_hint_x=None, width=dp(28))
+        self.preview = Widget(size_hint_y=None, height=dp(28))
+        row.add_widget(self.sv)
+        row.add_widget(self.hue_bar)
+        self.add_widget(row)
+        self.add_widget(self.preview)
+        self.sv.bind(pos=self._paint, size=self._paint)
+        self.hue_bar.bind(pos=self._paint, size=self._paint)
+        self.bind(hue=self._paint, sat=self._paint, val=self._paint)
+        Clock.schedule_once(lambda _dt: self._paint(), 0)
+
+    def rgb(self) -> Rgba:
+        return hsv_to_rgb(self.hue, self.sat, self.val)
+
+    def _rgb_to_hsv(self, rgb: Sequence[float]) -> Tuple[float, float, float]:
+        r, g, b = [max(0.0, min(1.0, float(c))) for c in list(rgb)[:3]]
+        mx, mn = max(r, g, b), min(r, g, b)
+        df = mx - mn
+        if df < 1e-6:
+            hue = 0.0
+        elif mx == r:
+            hue = ((g - b) / df) % 6.0 / 6.0
+        elif mx == g:
+            hue = (((b - r) / df) + 2.0) / 6.0
+        else:
+            hue = (((r - g) / df) + 4.0) / 6.0
+        sat = 0.0 if mx < 1e-6 else df / mx
+        return (hue, sat, mx)
+
+    def _sv_texture(self) -> Any:
+        size = 96
+        pixels = bytearray()
+        for row in range(size):
+            val = 1.0 - row / float(size - 1)
+            for col in range(size):
+                sat = col / float(size - 1)
+                r, g, b, _a = hsv_to_rgb(self.hue, sat, val)
+                pixels.extend(
+                    (int(r * 255), int(g * 255), int(b * 255), 255)
+                )
+        texture = Texture.create(size=(size, size), colorfmt="rgba")
+        texture.blit_buffer(bytes(pixels), colorfmt="rgba", bufferfmt="ubyte")
+        texture.flip_vertical()
+        return texture
+
+    def _hue_texture(self) -> Any:
+        height = 96
+        pixels = bytearray()
+        for row in range(height):
+            hue = 1.0 - row / float(height - 1)
+            r, g, b, _a = hsv_to_rgb(hue, 1.0, 1.0)
+            for _col in range(8):
+                pixels.extend((int(r * 255), int(g * 255), int(b * 255), 255))
+        texture = Texture.create(size=(8, height), colorfmt="rgba")
+        texture.blit_buffer(bytes(pixels), colorfmt="rgba", bufferfmt="ubyte")
+        texture.flip_vertical()
+        return texture
+
+    def _paint(self, *_args: Any) -> None:
+        rgb = self.rgb()
+        self.sv.canvas.clear()
+        with self.sv.canvas:
+            Color(1, 1, 1, 1)
+            Rectangle(texture=self._sv_texture(), pos=self.sv.pos, size=self.sv.size)
+            Color(1, 1, 1, 1)
+            mark_x = self.sv.x + self.sat * max(1.0, self.sv.width)
+            mark_y = self.sv.y + self.val * max(1.0, self.sv.height)
+            Line(circle=(mark_x, mark_y, dp(5)), width=1.2)
+            Color(0, 0, 0, 1)
+            Line(circle=(mark_x, mark_y, dp(6)), width=0.8)
+        self.hue_bar.canvas.clear()
+        with self.hue_bar.canvas:
+            Color(1, 1, 1, 1)
+            Rectangle(texture=self._hue_texture(), pos=self.hue_bar.pos, size=self.hue_bar.size)
+            Color(1, 1, 1, 1)
+            hy = self.hue_bar.y + (1.0 - self.hue) * max(1.0, self.hue_bar.height)
+            Line(
+                points=[self.hue_bar.x, hy, self.hue_bar.right, hy],
+                width=1.4,
+            )
+        self.preview.canvas.clear()
+        with self.preview.canvas:
+            Color(*rgb)
+            Rectangle(pos=self.preview.pos, size=self.preview.size)
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        return self._handle_touch(touch) or super().on_touch_down(touch)
+
+    def on_touch_move(self, touch: MotionEvent) -> bool:
+        return self._handle_touch(touch) or super().on_touch_move(touch)
+
+    def _handle_touch(self, touch: MotionEvent) -> bool:
+        if self.hue_bar.collide_point(*touch.pos):
+            self.hue = max(0.0, min(1.0, 1.0 - (touch.y - self.hue_bar.y) / max(1.0, self.hue_bar.height)))
+            return True
+        if self.sv.collide_point(*touch.pos):
+            self.sat = max(0.0, min(1.0, (touch.x - self.sv.x) / max(1.0, self.sv.width)))
+            self.val = max(0.0, min(1.0, (touch.y - self.sv.y) / max(1.0, self.sv.height)))
+            return True
+        return False
 
 
 class SliderGlyph(Widget):
@@ -610,6 +811,8 @@ class SPenAnnotationCanvas(Widget):
         self._grid_tex: Any = None
         self._grid_tex_key: Optional[Tuple[int, int]] = None
         self._queued_vis: Optional[Tuple[int, int]] = None
+        self._stamp_textures: Dict[str, Any] = {}
+        self._page_num_textures: Dict[int, Any] = {}
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -862,7 +1065,55 @@ class SPenAnnotationCanvas(Widget):
                 continue
             self._page_textures[index] = None
 
+    def _stamp_texture(self, path: str) -> Optional[Any]:
+        cached = self._stamp_textures.get(path)
+        if cached is not None:
+            return cached
+        try:
+            from PIL import Image
+
+            texture = _pil_to_texture(_image_rgb_on_white(Image.open(path)))
+        except Exception:
+            return None
+        self._stamp_textures[path] = texture
+        return texture
+
+    def _page_number_texture(self, number: int) -> Optional[Any]:
+        cached = self._page_num_textures.get(number)
+        if cached is not None:
+            return cached
+        try:
+            from kivy.core.text import Label as CoreLabel
+
+            kwargs: Dict[str, Any] = {
+                "text": str(number),
+                "font_size": 42,
+                "color": (0.15, 0.15, 0.18, 1),
+            }
+            if _LATIN_FONT_READY:
+                kwargs["font_name"] = "LatinFont"
+            label = CoreLabel(**kwargs)
+            label.refresh()
+            texture = label.texture
+        except Exception:
+            return None
+        self._page_num_textures[number] = texture
+        return texture
+
     def _draw_record(self, record: StrokeRecord) -> None:
+        if record.get("kind") == "image":
+            rect = record.get("rect") or [0.0, 0.0, 1.0, 1.0]
+            path = str(record.get("path") or "")
+            texture = self._stamp_texture(path) if path else None
+            if texture is None:
+                return
+            Color(1, 1, 1, 1)
+            Rectangle(
+                texture=texture,
+                pos=(float(rect[0]), float(rect[1])),
+                size=(float(rect[2]), float(rect[3])),
+            )
+            return
         color = tuple(record.get("color", COLOR_BLACK))
         width = float(record.get("width", self.ink_width))
         points = record.get("points") or []
@@ -960,6 +1211,17 @@ class SPenAnnotationCanvas(Widget):
                 else:
                     rect = Rectangle(pos=(0, page_y), size=(page_w, page_h))
                 self._image_rects[index] = rect
+                number_tex = self._page_number_texture(index + 1)
+                if number_tex is not None:
+                    nw, nh = number_tex.size
+                    target_h = max(12.0, page_h * 0.028)
+                    target_w = target_h * (float(nw) / max(1.0, float(nh)))
+                    Color(0.12, 0.12, 0.14, 0.38)
+                    Rectangle(
+                        texture=number_tex,
+                        pos=(page_w - target_w - page_w * 0.025, page_y + page_h * 0.016),
+                        size=(target_w, target_h),
+                    )
             for record in self.strokes:
                 self._draw_record(record)
             self._live_color_instr = Color(*self._live_color)
@@ -990,6 +1252,17 @@ class SPenAnnotationCanvas(Widget):
         kept: List[StrokeRecord] = []
         changed = False
         for record in self.strokes:
+            if record.get("kind") == "image":
+                rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
+                x0, y0, width, height = [float(v) for v in rect[:4]]
+                if (
+                    x0 - radius <= x <= x0 + width + radius
+                    and y0 - radius <= y <= y0 + height + radius
+                ):
+                    changed = True
+                    continue
+                kept.append(record)
+                continue
             fragment: List[List[float]] = []
             pieces: List[List[List[float]]] = []
             points = record.get("points") or []
@@ -1198,7 +1471,7 @@ class RootLayout(FloatLayout):
         self.tool_buttons: Dict[str, Any] = {}
         self.color_dots: Dict[str, ColorDot] = {}
         self.workspace = FloatLayout()
-        self.pdf_canvas.size_hint = (1, 1)
+        self.pdf_canvas.size_hint = (None, None)
         self.notes_canvas.size_hint = (None, None)
         self.workspace.add_widget(self.pdf_canvas)
         self.workspace.add_widget(self.notes_canvas)
@@ -1232,14 +1505,14 @@ class RootLayout(FloatLayout):
         Clock.schedule_once(lambda _dt: self.apply_orientation(), 0)
 
     def _fit_workspace(self, *_args: Any) -> None:
-        self.workspace.size = self.size
-        self.workspace.pos = self.pos
-        self.pdf_canvas.size = self.size
-        self.pdf_canvas.pos = self.pos
+        chrome_h = float(self.chrome.height) if self.toolbar_visible else 0.0
+        work_h = max(1.0, float(self.height) - chrome_h)
+        self.workspace.size = (float(self.width), work_h)
+        self.workspace.pos = (float(self.x), float(self.y))
         self.dock_notes()
 
     def set_status(self, message: str) -> None:
-        self.status_label.text = ui_text(message)
+        self.status_label.text = mixed_markup(message)
 
     def _build_header(self) -> BoxLayout:
         app = App.get_running_app()
@@ -1259,6 +1532,7 @@ class RootLayout(FloatLayout):
         )
         for key, kind, handler in (
             ("open", "plus", app.open_pdf),
+            ("image", "image", app.import_image),
             ("save_as", "save", app.save_document_as),
             ("toggle", "notes", self.toggle_notes),
         ):
@@ -1272,21 +1546,21 @@ class RootLayout(FloatLayout):
             font_size=dp(13),
             halign="right",
             valign="middle",
+            markup=True,
         )
-        set_hebrew_font(self.status_label)
         self.title_button = Button(
-            text=ui_text(f"> {app.document_title}"),
+            text=mixed_markup(f"> {app.document_title}"),
             color=(0.12, 0.12, 0.14, 1),
             font_size=dp(16),
             bold=True,
+            markup=True,
             size_hint_x=None,
-            width=dp(200),
+            width=dp(220),
             background_normal="",
             background_down="",
             background_color=(1, 1, 1, 1),
             halign="right",
         )
-        set_hebrew_font(self.title_button)
         self.title_button.bind(on_release=app.rename_document)
         header.add_widget(self.status_label)
         header.add_widget(self.title_button)
@@ -1310,6 +1584,7 @@ class RootLayout(FloatLayout):
         )
         actions: Sequence[Tuple[str, str, Any]] = (
             ("pan", "pan", app.clear_tool),
+            ("fit", "fit", app.reset_view),
             ("pen", "pen", app.select_pen),
             ("dashed", "dashed", app.toggle_dashed),
             ("eraser", "eraser", app.enable_eraser),
@@ -1324,6 +1599,10 @@ class RootLayout(FloatLayout):
             dot.bind(on_release=lambda _dot, name=key: app.set_ink_color(name))
             toolbar.add_widget(dot)
             self.color_dots[key] = dot
+        palette_btn = ToolIcon("palette", on_dark=True)
+        palette_btn.bind(on_release=app.open_color_picker)
+        toolbar.add_widget(palette_btn)
+        self.tool_buttons["palette"] = palette_btn
         hide_btn = ToolIcon("hide", on_dark=True)
         hide_btn.bind(on_release=self.hide_toolbar)
         toolbar.add_widget(Widget())
@@ -1395,6 +1674,8 @@ class RootLayout(FloatLayout):
         self.chrome.height = 0
         self.restore_btn.opacity = 1
         self.restore_btn.disabled = False
+        self._fit_workspace()
+        Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
     def show_toolbar(self, *_args: Any) -> None:
         self.toolbar_visible = True
@@ -1403,6 +1684,8 @@ class RootLayout(FloatLayout):
         self.chrome.height = dp(CHROME_HEIGHT_DP)
         self.restore_btn.opacity = 0
         self.restore_btn.disabled = True
+        self._fit_workspace()
+        Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
     def refresh_tool_styles(self) -> None:
         app = App.get_running_app()
@@ -1417,7 +1700,7 @@ class RootLayout(FloatLayout):
         for shape in SHAPE_TOOLS:
             mapping[shape] = app.tool_mode == shape
         for key, button in self.tool_buttons.items():
-            if key in {"open", "save_as", "toggle", "hide"}:
+            if key in {"open", "save_as", "toggle", "hide", "image", "fit", "palette"}:
                 continue
             if isinstance(button, ToolIcon):
                 button.selected = mapping.get(key, False)
@@ -1429,24 +1712,23 @@ class RootLayout(FloatLayout):
             dot.selected = drawing and rgb == tuple(rgba[:3])
 
     def apply_orientation(self, *_args: Any) -> None:
-        self.pdf_canvas.size_hint = (1, 1)
-        self.dock_notes()
+        self._fit_workspace()
 
     def dock_notes(self) -> None:
-        self.notes_canvas.size_hint = (None, None)
-        self.notes_canvas.height = self.height
-        self.notes_canvas.y = self.y
-        if not self.notes_expanded:
+        work_x, work_y = float(self.workspace.x), float(self.workspace.y)
+        work_w, work_h = float(self.workspace.width), float(self.workspace.height)
+        notes_w = 0.0
+        if self.notes_expanded:
+            notes_w = min(dp(360), max(dp(170), work_w * 0.30))
+            self.notes_canvas.opacity = 1
+            self.notes_canvas.disabled = False
+        else:
             self.notes_canvas.opacity = 0
             self.notes_canvas.disabled = True
-            self.notes_canvas.width = 0
-            self.notes_canvas.x = self.x - dp(4)
-            return
-        self.notes_canvas.opacity = 1
-        self.notes_canvas.disabled = False
-        width = min(dp(360), max(dp(170), self.width * 0.30))
-        self.notes_canvas.width = width
-        self.notes_canvas.x = self.x
+        self.notes_canvas.size = (notes_w, max(1.0, work_h))
+        self.notes_canvas.pos = (work_x, work_y)
+        self.pdf_canvas.size = (max(1.0, work_w - notes_w), max(1.0, work_h))
+        self.pdf_canvas.pos = (work_x + notes_w, work_y)
         self.sync_notes_page_size()
 
     def sync_notes_page_size(self) -> None:
@@ -1459,12 +1741,12 @@ class RootLayout(FloatLayout):
 
     def toggle_notes(self, *_args: Any) -> None:
         self.notes_expanded = not self.notes_expanded
-        self.dock_notes()
+        self._fit_workspace()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
     def refresh_title(self) -> None:
         app = App.get_running_app()
-        self.title_button.text = ui_text(f"> {app.document_title}")
+        self.title_button.text = mixed_markup(f"> {app.document_title}")
 
     def set_page_status(self, index: int, count: int) -> None:
         if count <= 0:
@@ -1560,7 +1842,7 @@ class SamsungNotesCompanionApp(App):
         if root.pdf_canvas.width > 1:
             self._clamp_shared_y(root.pdf_canvas)
         if canvas is None:
-            root.dock_notes()
+            root._fit_workspace()
 
     def _clamp_canvas(self, canvas: SPenAnnotationCanvas) -> None:
         _ox, _oy, disp_w, disp_h, _scale, _pw, _ph = canvas._page_metrics()
@@ -1809,6 +2091,8 @@ class SamsungNotesCompanionApp(App):
                 pass
             if request_code == OPEN_REQUEST:
                 self._open_android_uri(uri)
+            elif request_code == IMAGE_REQUEST:
+                self._open_android_image_uri(uri)
             elif request_code == SAVE_REQUEST and self._pending_save:
                 self._write_android_uri(uri, *self._pending_save)
                 self._pending_save = None
@@ -2249,6 +2533,13 @@ class SamsungNotesCompanionApp(App):
             except Exception as exc:
                 self._notify(f"לא ניתן להציג את ה-PDF: {exc}")
             return
+        if self._path_is_image(path, display):
+            try:
+                self._place_imported_image(path)
+                self._notify(f"תמונה נוספה: {display}")
+            except Exception as exc:
+                self._notify(f"לא ניתן לייבא את התמונה: {exc}")
+            return
         try:
             self._load_notes_file(path)
             self._notify(f"נפתח: {display}")
@@ -2336,6 +2627,27 @@ class SamsungNotesCompanionApp(App):
         scale_x = width / page_w if page_w > 1 else 1.0
         scale_y = height / page_h if page_h > 1 else 1.0
         for record in strokes:
+            if record.get("kind") == "image":
+                rect = record.get("rect") or [0.0, 0.0, 0.0, 0.0]
+                path = str(record.get("path") or "")
+                if not path or not os.path.isfile(path):
+                    continue
+                try:
+                    stamp = _image_rgb_on_white(path).convert("RGBA")
+                    box = (
+                        int(float(rect[0]) * scale_x),
+                        int(height - (float(rect[1]) + float(rect[3])) * scale_y),
+                    )
+                    sized = stamp.resize(
+                        (
+                            max(1, int(float(rect[2]) * scale_x)),
+                            max(1, int(float(rect[3]) * scale_y)),
+                        )
+                    )
+                    overlay.paste(sized, box, sized)
+                except Exception:
+                    pass
+                continue
             points = record.get("points") or []
             if len(points) < 2:
                 continue
@@ -2558,7 +2870,17 @@ class SamsungNotesCompanionApp(App):
     def _desktop_open_dialog(self) -> None:
         chooser = FileChooserListView(
             path=self._desktop_start_dir(),
-            filters=["*.pdf", "*.notes", "*.json", "*.sdocx", "*"],
+            filters=[
+                "*.pdf",
+                "*.png",
+                "*.jpg",
+                "*.jpeg",
+                "*.webp",
+                "*.notes",
+                "*.json",
+                "*.sdocx",
+                "*",
+            ],
         )
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
@@ -2591,6 +2913,13 @@ class SamsungNotesCompanionApp(App):
             self.pdf_path = path
             self._set_title_from_filename(path)
             self._notify(f"נבחר PDF: {os.path.basename(path)}")
+            return
+        if self._path_is_image(path, path):
+            try:
+                self._place_imported_image(path)
+                self._notify(f"תמונה נוספה: {os.path.basename(path)}")
+            except Exception as exc:
+                self._notify(f"לא ניתן לייבא את התמונה: {exc}")
             return
         if lower.endswith((".notes", ".json", ".sdocx")):
             self._load_notes_file(path)
@@ -2662,6 +2991,137 @@ class SamsungNotesCompanionApp(App):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(data.decode("utf-8"))
         self._notify(f"נשמר: {path}")
+
+    def _path_is_image(self, path: str, display: str = "") -> bool:
+        name = f"{display} {path}".lower()
+        if any(name.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+            return True
+        try:
+            with open(path, "rb") as handle:
+                head = handle.read(12)
+            return head.startswith(b"\x89PNG") or head.startswith(b"\xff\xd8") or head.startswith(b"RIFF")
+        except Exception:
+            return False
+
+    def _place_imported_image(self, path: str) -> None:
+        from PIL import Image
+
+        canvas = self.root_layout.pdf_canvas
+        image = _image_rgb_on_white(Image.open(path))
+        stored = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        stored.close()
+        image.save(stored.name, "PNG")
+        page_w = max(1.0, float(self.page_width))
+        page_h = max(1.0, float(self.page_height))
+        iw, ih = image.size
+        target_w = page_w * 0.45
+        scale = target_w / max(1.0, float(iw))
+        tw, th = target_w, float(ih) * scale
+        if th > page_h * 0.5:
+            scale = (page_h * 0.5) / max(1.0, float(ih))
+            tw, th = float(iw) * scale, page_h * 0.5
+        first, _last = canvas._visible_pages()
+        page_y = canvas._page_origin_y(first, page_h)
+        x = (page_w - tw) / 2.0
+        y = page_y + (page_h - th) / 2.0
+        canvas.strokes.append(
+            {
+                "kind": "image",
+                "path": stored.name,
+                "rect": [x, y, tw, th],
+                "points": [[x, y], [x + tw, y + th]],
+                "color": [0.0, 0.0, 0.0, 1.0],
+                "width": 1.0,
+                "dashed": False,
+                "eraser": False,
+            }
+        )
+        canvas.redraw_all()
+
+    def _open_android_image_uri(self, uri: Any) -> None:
+        display = self._uri_display_name(uri)
+        suffix = ".png"
+        lower = display.lower()
+        for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+            if lower.endswith(ext):
+                suffix = ext
+                break
+        path = self._copy_uri_to_temp(uri, suffix)
+        self._place_imported_image(path)
+        self._notify(f"תמונה נוספה: {display}")
+
+    def import_image(self, *_args: Any) -> None:
+        if is_android():
+            try:
+                from jnius import autoclass
+
+                Intent = autoclass("android.content.Intent")
+                intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                intent.setType("image/*")
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                self._launch_android_intent(intent, IMAGE_REQUEST)
+                return
+            except Exception as exc:
+                self._notify(f"לא ניתן לפתוח תמונה: {exc}")
+                return
+        chooser = FileChooserListView(
+            path=self._desktop_start_dir(),
+            filters=["*.png", "*.jpg", "*.jpeg", "*.webp", "*"],
+        )
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        popup = Popup(title="Import image", content=body, size_hint=(0.94, 0.94))
+
+        def _load(_instance: Button) -> None:
+            if chooser.selection:
+                try:
+                    self._place_imported_image(chooser.selection[0])
+                    self._notify(f"תמונה נוספה: {os.path.basename(chooser.selection[0])}")
+                except Exception as exc:
+                    self._notify(f"לא ניתן לייבא את התמונה: {exc}")
+            popup.dismiss()
+
+        load_btn = Button(text="Open")
+        cancel_btn = Button(text="Cancel")
+        load_btn.bind(on_release=_load)
+        cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
+        buttons.add_widget(load_btn)
+        buttons.add_widget(cancel_btn)
+        body.add_widget(chooser)
+        body.add_widget(buttons)
+        popup.open()
+
+    def reset_view(self, *_args: Any) -> None:
+        self._reset_view()
+
+    def set_custom_color(self, rgb: Sequence[float], *_args: Any) -> None:
+        red, green, blue = [max(0.0, min(1.0, float(channel))) for channel in list(rgb)[:3]]
+        self.current_color = (red, green, blue, 1.0)
+        if self.tool_mode in {"none", "eraser"}:
+            self.tool_mode = "pen"
+        self.is_eraser = False
+        self.root_layout.refresh_tool_styles()
+
+    def open_color_picker(self, *_args: Any) -> None:
+        picker = InkColorPicker(self.current_color)
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        popup = Popup(title=ui_text("בחירת צבע"), content=body, size_hint=(0.84, 0.64))
+
+        def _ok(_btn: Button) -> None:
+            self.set_custom_color(picker.rgb())
+            popup.dismiss()
+
+        ok_btn = Button(text=ui_text("אישור"))
+        cancel_btn = Button(text=ui_text("ביטול"))
+        ok_btn.bind(on_release=_ok)
+        cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
+        buttons.add_widget(ok_btn)
+        buttons.add_widget(cancel_btn)
+        body.add_widget(picker)
+        body.add_widget(buttons)
+        popup.open()
 
     def open_pdf(self, *_args: Any) -> None:
         if is_android():
