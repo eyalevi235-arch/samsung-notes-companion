@@ -3046,7 +3046,7 @@ class SPenAnnotationCanvas(Widget):
                 )
 
 
-class _HoldButton(ButtonBehavior, FloatLayout):
+class _HoldButton(FloatLayout):
     """Tap or long-press tile used by the document library."""
 
     def __init__(self, on_tap: Any, on_hold: Optional[Any] = None, **kwargs: Any) -> None:
@@ -3055,28 +3055,36 @@ class _HoldButton(ButtonBehavior, FloatLayout):
         self._on_hold = on_hold
         self._hold_ev: Any = None
         self._held = False
+        self._touch_origin: Optional[Point] = None
 
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if self.disabled or not self.collide_point(*touch.pos) or _is_hover_touch(touch):
             return False
-        if super().on_touch_down(touch):
-            return True
+        for child in list(self.children):
+            if child.dispatch("on_touch_down", touch):
+                return True
         touch.grab(self)
         self._held = False
+        self._touch_origin = (float(touch.x), float(touch.y))
         if callable(self._on_hold):
             self._hold_ev = Clock.schedule_once(self._fire_hold, 0.55)
         return True
 
-    def on_touch_up(self, touch: MotionEvent) -> bool:
-        if super().on_touch_up(touch):
-            return True
+    def on_touch_move(self, touch: MotionEvent) -> bool:
         if touch.grab_current is not self:
-            return False
+            return super().on_touch_move(touch)
+        return True
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        if touch.grab_current is not self:
+            return super().on_touch_up(touch)
         touch.ungrab(self)
         if self._hold_ev is not None:
             self._hold_ev.cancel()
             self._hold_ev = None
-        if not self._held and callable(self._on_tap):
+        origin = self._touch_origin or (float(touch.x), float(touch.y))
+        moved = math.hypot(float(touch.x) - origin[0], float(touch.y) - origin[1])
+        if not self._held and moved <= dp(18) and callable(self._on_tap):
             self._on_tap()
         return True
 
@@ -3273,7 +3281,13 @@ class LibraryScreen(Screen):
         scroller.add_widget(self.body)
         root.add_widget(scroller)
         self.add_widget(root)
-        self.bind(size=lambda *_a: self.refresh())
+        self._grid_cols = 0
+        self.bind(size=self._on_size)
+
+    def _on_size(self, *_args: Any) -> None:
+        cols = 4 if self.width >= dp(900) else 3
+        if cols != self._grid_cols:
+            self.refresh()
 
     def _grid(self) -> GridLayout:
         cols = 4 if self.width >= dp(900) else 3
@@ -3282,6 +3296,7 @@ class LibraryScreen(Screen):
         return grid
 
     def refresh(self) -> None:
+        self._grid_cols = 4 if self.width >= dp(900) else 3
         app = App.get_running_app()
         data = app.library_data()
         selected = str(getattr(app, "_library_folder", LIBRARY_ALL) or LIBRARY_ALL)
@@ -4590,20 +4605,67 @@ class SamsungNotesCompanionApp(App):
             return
         self._folder_editor(folder)
 
-    def _folder_editor(self, folder: Optional[Dict[str, Any]]) -> None:
-        chosen = {"color": str((folder or {}).get("color") or FOLDER_PALETTE[5][1])}
+    def _prompt_line(self, title: str, initial: str, on_done: Any) -> None:
+        if is_android():
+            try:
+                self._show_android_line_prompt(title, initial, on_done)
+                return
+            except Exception:
+                pass
         field = TextInput(
-            text=str((folder or {}).get("name") or ""),
+            text=str(initial or ""),
             multiline=False,
             font_size=dp(18),
             size_hint_y=None,
             height=dp(46),
-            hint_text="שם התיקייה",
         )
-        if _INPUT_FONT_READY:
-            field.font_name = _input_font_name()
-        elif _HEBREW_FONT_READY:
-            field.font_name = "HebrewFont"
+        field.font_name = _input_font_name()
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(title="", content=body, size_hint=(0.86, 0.38), auto_dismiss=False)
+
+        def _save(_btn: Button) -> None:
+            popup.dismiss()
+            if callable(on_done):
+                on_done(field.text)
+
+        save_btn = Button(text="שמירה")
+        cancel_btn = Button(text="ביטול")
+        save_btn.bind(on_release=_save)
+        cancel_btn.bind(on_release=lambda *_a: popup.dismiss())
+        buttons.add_widget(save_btn)
+        buttons.add_widget(cancel_btn)
+        body.add_widget(Label(text=mixed_markup(title), markup=True, size_hint_y=None, height=dp(28)))
+        body.add_widget(field)
+        body.add_widget(buttons)
+        popup.open()
+        apply_hebrew_ui(popup, title)
+        focus_system_keyboard(field)
+
+    def _folder_editor(self, folder: Optional[Dict[str, Any]]) -> None:
+        chosen = {"color": str((folder or {}).get("color") or FOLDER_PALETTE[5][1])}
+        name_state = {"text": str((folder or {}).get("name") or "")}
+        name_btn = Button(
+            text=mixed_markup(name_state["text"] or "שם התיקייה"),
+            markup=True,
+            size_hint_y=None,
+            height=dp(46),
+            background_normal="",
+            background_down="",
+            background_color=(0.93, 0.94, 0.96, 1),
+            color=(0.12, 0.13, 0.16, 1),
+            font_size=dp(18),
+            halign="right",
+        )
+
+        def _show_name(value: str) -> None:
+            name_state["text"] = value.strip()
+            name_btn.text = mixed_markup(name_state["text"] or "שם התיקייה")
+
+        def _edit_name(*_args: Any) -> None:
+            self._prompt_line("שם התיקייה", name_state["text"], _show_name)
+
+        name_btn.bind(on_release=_edit_name)
         swatches = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         dots: List[ColorDot] = []
 
@@ -4624,7 +4686,7 @@ class SamsungNotesCompanionApp(App):
         popup = Popup(title="", content=body, size_hint=(0.86, 0.52), auto_dismiss=False)
 
         def _save(_btn: Button) -> None:
-            name = field.text.strip() or "תיקייה"
+            name = name_state["text"].strip() or "תיקייה"
             data = self.library_data()
             folders = data.setdefault("folders", [])
             if folder is None:
@@ -4645,13 +4707,12 @@ class SamsungNotesCompanionApp(App):
         buttons.add_widget(save_btn)
         buttons.add_widget(cancel_btn)
         body.add_widget(Label(text=mixed_markup("שם וצבע לתיקייה"), markup=True, size_hint_y=None, height=dp(28)))
-        body.add_widget(field)
+        body.add_widget(name_btn)
         body.add_widget(swatches)
         body.add_widget(buttons)
-        popup.bind(on_open=lambda *_a: focus_system_keyboard(field))
         popup.open()
         apply_hebrew_ui(popup, "תיקייה")
-        focus_system_keyboard(field)
+        Clock.schedule_once(lambda _dt: _edit_name(), 0.15)
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
@@ -4732,44 +4793,14 @@ class SamsungNotesCompanionApp(App):
             self.view_pan_y = pan_y
 
     def rename_document(self, *_args: Any) -> None:
-        field = TextInput(
-            text=self.document_title,
-            multiline=False,
-            font_size=dp(18),
-            size_hint_y=None,
-            height=dp(48),
-            input_type="text",
-            write_tab=False,
-        )
-        if _HEBREW_FONT_READY:
-            field.font_name = "HebrewFont"
-        elif _LATIN_FONT_READY:
-            field.font_name = "LatinFont"
-        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="", content=body, size_hint=(0.88, 0.42), auto_dismiss=False)
-
-        def _save(_btn: Button) -> None:
-            name = field.text.strip() or "כותרת"
-            self.document_title = name
+        def _apply(name: str) -> None:
+            value = name.strip() or "כותרת"
+            self.document_title = value
             self.root_layout.refresh_title()
             self._register_library_doc()
             self._autosave_library_doc()
-            popup.dismiss()
 
-        save_btn = Button(text="שמירה")
-        cancel_btn = Button(text="ביטול")
-        save_btn.bind(on_release=_save)
-        cancel_btn.bind(on_release=lambda _btn: popup.dismiss())
-        buttons.add_widget(save_btn)
-        buttons.add_widget(cancel_btn)
-        body.add_widget(Label(text="בחרו שם למסמך", size_hint_y=None, height=dp(28)))
-        body.add_widget(field)
-        body.add_widget(buttons)
-        popup.bind(on_open=lambda *_args: focus_system_keyboard(field))
-        popup.open()
-        apply_hebrew_ui(popup, "שם המסמך")
-        focus_system_keyboard(field)
+        self._prompt_line("שם המסמך", self.document_title, _apply)
 
     def _notify(self, message: str) -> None:
         try:
@@ -6227,6 +6258,100 @@ class SamsungNotesCompanionApp(App):
             except Exception:
                 pass
         self.root_layout.show_text_overlay(canvas, doc, existing)
+
+    def _ensure_android_line_listeners(self) -> None:
+        if getattr(self, "_android_line_ui_ver", 0) == 1:
+            return
+        from jnius import PythonJavaClass, java_method
+
+        app = self
+
+        class LineClick(PythonJavaClass):
+            __javacontext__ = "app"
+            __javainterfaces__ = ["android.content.DialogInterface$OnClickListener"]
+
+            def __init__(self, ok: bool) -> None:
+                super().__init__()
+                self.ok = ok
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, _dialog: Any, _which: int) -> None:
+                text = ""
+                if self.ok:
+                    edit = getattr(app, "_android_line_edit", None)
+                    if edit is not None:
+                        text = _java_chars(edit.getText())
+                app._android_line_result = (bool(self.ok), text)
+
+        self._android_line_ok = LineClick(True)
+        self._android_line_cancel = LineClick(False)
+        self._android_line_ui_ver = 1
+
+    def _show_android_line_prompt(self, title: str, initial: str, on_done: Any) -> None:
+        from android.runnable import run_on_ui_thread
+        from jnius import autoclass
+
+        self._ensure_android_line_listeners()
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        self._android_line_callback = on_done
+        self._android_line_result = None
+        self._android_line_ticks = 0
+        Clock.unschedule(self._poll_android_line_prompt)
+        Clock.schedule_interval(self._poll_android_line_prompt, 0.12)
+
+        @run_on_ui_thread
+        def _open() -> None:
+            AlertDialog = autoclass("android.app.AlertDialog$Builder")
+            EditText = autoclass("android.widget.EditText")
+            InputType = autoclass("android.text.InputType")
+            String = autoclass("java.lang.String")
+            ColorCls = autoclass("android.graphics.Color")
+            edit = EditText(activity)
+            edit.setText(String(str(initial or "")))
+            edit.setHint(String(title or "שם"))
+            edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+            edit.setSingleLine(True)
+            edit.setTextColor(ColorCls.parseColor("#FF111111"))
+            edit.setHintTextColor(ColorCls.parseColor("#FF777777"))
+            try:
+                edit.setSelection(edit.getText().length())
+            except Exception:
+                pass
+            self._android_line_edit = edit
+            builder = AlertDialog(activity)
+            builder.setTitle(String(title or "שם"))
+            builder.setView(edit)
+            builder.setPositiveButton(String("שמירה"), self._android_line_ok)
+            builder.setNegativeButton(String("ביטול"), self._android_line_cancel)
+            builder.setCancelable(True)
+            dialog = builder.create()
+            dialog.show()
+            edit.requestFocus()
+            try:
+                imm = activity.getSystemService("input_method")
+                imm.showSoftInput(edit, 0)
+            except Exception:
+                pass
+
+        _open()
+
+    def _poll_android_line_prompt(self, _dt: float) -> bool:
+        result = getattr(self, "_android_line_result", None)
+        if result is None:
+            self._android_line_ticks = int(getattr(self, "_android_line_ticks", 0)) + 1
+            if self._android_line_ticks >= 600:
+                self._android_line_edit = None
+                self._android_line_callback = None
+                return False
+            return True
+        self._android_line_result = None
+        accept, text = result
+        callback = getattr(self, "_android_line_callback", None)
+        self._android_line_callback = None
+        self._android_line_edit = None
+        if accept and callable(callback):
+            callback(_plain_user_text(text) if text else str(text or ""))
+        return False
 
     def _ensure_android_text_listeners(self) -> None:
         if getattr(self, "_android_text_ui_ver", 0) == 7:
