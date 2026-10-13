@@ -467,6 +467,46 @@ def mixed_markup(text: str) -> str:
     return "".join(parts)
 
 
+def _script_runs(text: str) -> List[Tuple[str, Optional[str]]]:
+    """Split visual text into Hebrew/Latin runs without markup tags."""
+    visual = ui_text(_plain_user_text(text))
+    if not visual:
+        return []
+    runs: List[Tuple[str, Optional[str]]] = []
+    buf: List[str] = []
+    hebrew_run: Optional[bool] = None
+
+    def flush() -> None:
+        if not buf or hebrew_run is None:
+            return
+        chunk = "".join(buf)
+        font: Optional[str] = None
+        if hebrew_run and _HEBREW_FONT_READY:
+            font = "HebrewFont"
+        elif (not hebrew_run) and _LATIN_FONT_READY:
+            font = "LatinFont"
+        runs.append((chunk, font))
+        buf.clear()
+
+    for ch in visual:
+        is_he = "\u0590" <= ch <= "\u05FF"
+        is_latin = ("A" <= ch <= "Z") or ("a" <= ch <= "z") or ch.isdigit()
+        if ch.isspace() or not (is_he or is_latin):
+            if hebrew_run is True:
+                flush()
+            hebrew_run = False
+            buf.append(ch)
+            continue
+        if hebrew_run is None:
+            hebrew_run = is_he
+        elif is_he != hebrew_run:
+            flush()
+            hebrew_run = is_he
+        buf.append(ch)
+    flush()
+    return runs
+
+
 def hsv_to_rgb(hue: float, sat: float, val: float) -> Rgba:
     h = (float(hue) % 1.0) * 6.0
     s = max(0.0, min(1.0, float(sat)))
@@ -1735,22 +1775,44 @@ class SPenAnnotationCanvas(Widget):
             return cached
         try:
             from kivy.core.text import Label as CoreLabel
+            from PIL import Image
 
             plain = _plain_user_text(text)
-            kwargs: Dict[str, Any] = {
-                "text": mixed_markup(plain),
-                "markup": True,
-                "font_size": font_size,
-                "color": color[:4] if len(color) > 3 else color + (1.0,),
-                "halign": "right" if _has_hebrew(plain) else "left",
-            }
-            if _LATIN_FONT_READY:
-                kwargs["font_name"] = "LatinFont"
-            elif _HEBREW_FONT_READY:
-                kwargs["font_name"] = "HebrewFont"
-            label = CoreLabel(**kwargs)
-            label.refresh()
-            texture = label.texture
+            ink = color[:4] if len(color) > 3 else color + (1.0,)
+            pieces = []
+            for chunk, font_name in _script_runs(plain):
+                if not chunk:
+                    continue
+                kwargs: Dict[str, Any] = {
+                    "text": chunk,
+                    "markup": False,
+                    "font_size": font_size,
+                    "color": ink,
+                }
+                if font_name:
+                    kwargs["font_name"] = font_name
+                label = CoreLabel(**kwargs)
+                label.refresh()
+                piece = label.texture
+                if piece is None or not piece.size[0] or not piece.size[1]:
+                    continue
+                pieces.append(
+                    Image.frombytes("RGBA", tuple(piece.size), bytes(piece.pixels))
+                )
+            if not pieces:
+                return None
+            width = sum(item.size[0] for item in pieces)
+            height = max(item.size[1] for item in pieces)
+            sheet = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            cursor = 0
+            for item in pieces:
+                sheet.paste(item, (cursor, (height - item.size[1]) // 2), item)
+                cursor += item.size[0]
+            texture = Texture.create(size=sheet.size, colorfmt="rgba")
+            texture.blit_buffer(sheet.tobytes(), colorfmt="rgba", bufferfmt="ubyte")
+            texture.wrap = "clamp_to_edge"
+            texture.mag_filter = "linear"
+            texture.min_filter = "linear"
             if texture is None or not texture.size[0] or not texture.size[1]:
                 raise RuntimeError("empty text texture")
         except Exception:
@@ -4875,18 +4937,6 @@ class SamsungNotesCompanionApp(App):
                 opened = False
         if not opened:
             self.root_layout.show_text_overlay(canvas, doc, existing)
-            return
-        Clock.schedule_once(
-            lambda _dt: self._ensure_text_editor_visible(canvas, doc, existing),
-            0.45,
-        )
-
-    def _ensure_text_editor_visible(
-        self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
-    ) -> None:
-        if getattr(self, "_android_dialog_visible", False):
-            return
-        self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
         if getattr(self, "_android_text_ui_ver", 0) == 5:
@@ -4933,7 +4983,8 @@ class SamsungNotesCompanionApp(App):
 
             @java_method("(Landroid/content/DialogInterface;)V")
             def onShow(self, _dialog: Any) -> None:
-                app._show_android_ime()
+                if not getattr(app, "_android_ime_shown", False):
+                    app._show_android_ime()
 
         class DialogDismiss(PythonJavaClass):
             __javacontext__ = "app"
@@ -4966,6 +5017,8 @@ class SamsungNotesCompanionApp(App):
         self._android_dialog_result = (bool(accept), str(text or ""))
 
     def _show_android_ime(self) -> None:
+        if getattr(self, "_android_ime_shown", False):
+            return
         try:
             from jnius import autoclass
 
@@ -4975,12 +5028,12 @@ class SamsungNotesCompanionApp(App):
             edit = getattr(self, "_android_edit", None)
             if edit is None:
                 return
+            self._android_ime_shown = True
             edit.requestFocus()
             imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-            imm.restartInput(edit)
             imm.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
         except Exception:
-            pass
+            self._android_ime_shown = False
 
     def _poll_android_text_dialog(self, _dt: float) -> bool:
         result = getattr(self, "_android_dialog_result", None)
@@ -5040,6 +5093,7 @@ class SamsungNotesCompanionApp(App):
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
         self._android_dialog_visible = False
+        self._android_ime_shown = False
         self._android_typed = initial
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
@@ -5102,16 +5156,13 @@ class SamsungNotesCompanionApp(App):
                 dialog.setOnDismissListener(self._android_dismiss)
             try:
                 LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
-                dialog.getWindow().setSoftInputMode(
-                    LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE | LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-                )
+                dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             except Exception:
                 pass
+            self._android_edit = edit
             dialog.show()
             self._android_dialog = dialog
-            self._android_edit = edit
             self._android_dialog_visible = True
-            self._show_android_ime()
 
         _open()
 
