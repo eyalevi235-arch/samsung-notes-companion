@@ -818,7 +818,7 @@ def _jpeg_pages_to_pdf(pages: Sequence[Tuple[bytes, int, int]]) -> bytes:
                 f"/Contents {page_id + 1} 0 R >>"
             ).encode("ascii")
         )
-        stream = f"q {width} 0 0 {-height} 0 {height} cm /Im0 Do Q".encode("ascii")
+        stream = f"q {width} 0 0 {height} 0 0 cm /Im0 Do Q".encode("ascii")
         add(
             f"<< /Length {len(stream)} >>\nstream\n".encode("ascii")
             + stream
@@ -3172,6 +3172,109 @@ class NoteGlyph(Widget):
         self._ring.circle = (x + w - dp(11), y + h - dp(11), dp(8))
 
 
+class FolderFlowChart(Widget):
+    """Compact top-down flowchart of nested folders."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.size_hint = (None, None)
+        self._root: Dict[str, Any] = {"id": "", "name": "הספרייה", "color": "#9AA0A8", "children": []}
+        self._selected = ""
+        self._hits: List[Tuple[str, float, float, float, float]] = []
+        self.bind(pos=lambda *_a: self._redraw())
+
+    def set_tree(self, root: Dict[str, Any], selected: str) -> None:
+        self._root = root or {"id": "", "name": "הספרייה", "color": "#9AA0A8", "children": []}
+        self._selected = str(selected or "")
+        self._measure(self._root)
+        pad = dp(6)
+        self.width = max(dp(80), float(self._root.get("_sw") or 0) + pad * 2)
+        self.height = max(dp(28), float(self._root.get("_sh") or 0) + pad * 2)
+        self._place(self._root, self.x + pad, self.y + self.height - pad)
+        self._redraw()
+
+    def _measure(self, node: Dict[str, Any]) -> None:
+        kids = list(node.get("children") or [])
+        nw, nh, gx, gy = dp(58), dp(18), dp(6), dp(12)
+        if not kids:
+            node["_sw"] = nw
+            node["_sh"] = nh
+            return
+        for child in kids:
+            self._measure(child)
+        node["_sw"] = max(nw, sum(float(c["_sw"]) for c in kids) + gx * (len(kids) - 1))
+        node["_sh"] = nh + gy + max(float(c["_sh"]) for c in kids)
+
+    def _place(self, node: Dict[str, Any], left: float, top: float) -> None:
+        kids = list(node.get("children") or [])
+        nw, nh, gx, gy = dp(58), dp(18), dp(6), dp(12)
+        node["_x"] = left + (float(node["_sw"]) - nw) / 2.0
+        node["_y"] = top - nh
+        node["_nw"] = nw
+        node["_nh"] = nh
+        cursor = left
+        for child in kids:
+            self._place(child, cursor, float(node["_y"]) - gy)
+            cursor += float(child["_sw"]) + gx
+
+    def _redraw(self, *_args: Any) -> None:
+        if self._root:
+            pad = dp(6)
+            self._place(self._root, self.x + pad, self.y + self.height - pad)
+        self.canvas.clear()
+        self.clear_widgets()
+        self._hits = []
+        with self.canvas:
+            self._draw_node(self._root)
+
+    def _draw_node(self, node: Dict[str, Any]) -> None:
+        kids = list(node.get("children") or [])
+        x = float(node.get("_x") or self.x)
+        y = float(node.get("_y") or self.y)
+        nw = float(node.get("_nw") or dp(58))
+        nh = float(node.get("_nh") or dp(18))
+        fid = str(node.get("id") or "")
+        selected = fid == self._selected
+        rgba = _folder_rgba(str(node.get("color") or "#9AA0A8"))
+        px, py = x + nw / 2.0, y
+        for child in kids:
+            cx = float(child.get("_x") or 0) + float(child.get("_nw") or dp(58)) / 2.0
+            cy = float(child.get("_y") or 0) + float(child.get("_nh") or dp(18))
+            Color(0.45, 0.48, 0.54, 0.9)
+            Line(points=[px, py, px, (py + cy) / 2.0, cx, (py + cy) / 2.0, cx, cy], width=0.8)
+        if selected:
+            Color(0.35, 0.52, 0.82, 1)
+        else:
+            Color(*rgba)
+        RoundedRectangle(pos=(x, y), size=(nw, nh), radius=[dp(4)])
+        self._hits.append((fid, x, y, nw, nh))
+        caption = Label(
+            text=mixed_markup(_short_label(str(node.get("name") or "תיקייה"), 8)),
+            markup=True,
+            color=(1, 1, 1, 1),
+            font_size=dp(10),
+            halign="center",
+            valign="middle",
+            size_hint=(None, None),
+            size=(nw, nh),
+            pos=(x, y),
+        )
+        caption.bind(size=lambda inst, _v: setattr(inst, "text_size", inst.size))
+        self.add_widget(caption)
+        for child in kids:
+            self._draw_node(child)
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if not self.collide_point(*touch.pos):
+            return super().on_touch_down(touch)
+        app = App.get_running_app()
+        for fid, x, y, nw, nh in reversed(self._hits):
+            if x <= touch.x <= x + nw and y <= touch.y <= y + nh:
+                app.select_library_folder(fid or LIBRARY_ALL)
+                return True
+        return super().on_touch_down(touch)
+
+
 class FolderTile(_HoldButton):
     """Folder icon + truncated name, Samsung Notes style."""
 
@@ -3239,40 +3342,28 @@ class LibraryScreen(Screen):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._tree_open = False
-        shell = BoxLayout(orientation="horizontal", spacing=0)
-        with shell.canvas.before:
+        root = BoxLayout(orientation="vertical", padding=(dp(16), dp(14), dp(16), dp(10)), spacing=dp(6))
+        with root.canvas.before:
             Color(0.16, 0.17, 0.19, 1)
             self._bg = Rectangle()
-        shell.bind(
-            pos=lambda *_a: setattr(self._bg, "pos", shell.pos),
-            size=lambda *_a: setattr(self._bg, "size", shell.size),
+        root.bind(
+            pos=lambda *_a: setattr(self._bg, "pos", root.pos),
+            size=lambda *_a: setattr(self._bg, "size", root.size),
         )
-        self.tree_panel = BoxLayout(orientation="vertical", size_hint_x=None, width=0, padding=(dp(8), dp(10), dp(6), dp(10)), spacing=dp(4))
-        with self.tree_panel.canvas.before:
+        self.tree_host = BoxLayout(orientation="vertical", size_hint_y=None, height=0, padding=(dp(4), dp(2)))
+        with self.tree_host.canvas.before:
             Color(0.12, 0.13, 0.15, 1)
             self._tree_bg = Rectangle()
-        self.tree_panel.bind(
-            pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_panel.pos),
-            size=lambda *_a: setattr(self._tree_bg, "size", self.tree_panel.size),
+        self.tree_host.bind(
+            pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_host.pos),
+            size=lambda *_a: setattr(self._tree_bg, "size", self.tree_host.size),
         )
-        tree_title = Label(
-            text=mixed_markup("עץ תיקיות"),
-            markup=True,
-            color=(0.82, 0.84, 0.88, 1),
-            font_size=dp(13),
-            size_hint_y=None,
-            height=dp(24),
-            halign="right",
-        )
-        self.tree_list = GridLayout(cols=1, spacing=dp(2), size_hint_y=None)
-        self.tree_list.bind(minimum_height=self.tree_list.setter("height"))
-        tree_scroll = ScrollView(do_scroll_x=False, bar_width=dp(2))
-        tree_scroll.add_widget(self.tree_list)
-        self.tree_panel.add_widget(tree_title)
-        self.tree_panel.add_widget(tree_scroll)
-        self.tree_panel.opacity = 0
-        self.tree_panel.disabled = True
-        root = BoxLayout(orientation="vertical", padding=(dp(16), dp(14), dp(16), dp(10)), spacing=dp(6))
+        self.tree_chart = FolderFlowChart()
+        tree_scroll = ScrollView(do_scroll_x=True, do_scroll_y=True, bar_width=dp(2), size_hint=(1, 1))
+        tree_scroll.add_widget(self.tree_chart)
+        self.tree_host.add_widget(tree_scroll)
+        self.tree_host.opacity = 0
+        self.tree_host.disabled = True
         self.header = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.header.add_widget(
             ToolIcon("menu", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: self.toggle_tree())
@@ -3308,22 +3399,21 @@ class LibraryScreen(Screen):
             ToolIcon("plus", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().library_new_menu())
         )
         root.add_widget(self.header)
+        root.add_widget(self.tree_host)
         self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8), padding=(0, dp(4)))
         self.body.bind(minimum_height=self.body.setter("height"))
         scroller = ScrollView(do_scroll_x=False, bar_width=dp(3))
         scroller.add_widget(self.body)
         root.add_widget(scroller)
-        shell.add_widget(self.tree_panel)
-        shell.add_widget(root)
-        self.add_widget(shell)
+        self.add_widget(root)
         self._grid_cols = 0
         self.bind(size=self._on_size)
 
     def toggle_tree(self, *_args: Any) -> None:
         self._tree_open = not bool(self._tree_open)
-        self.tree_panel.width = dp(188) if self._tree_open else 0
-        self.tree_panel.opacity = 1 if self._tree_open else 0
-        self.tree_panel.disabled = not self._tree_open
+        self.tree_host.height = dp(108) if self._tree_open else 0
+        self.tree_host.opacity = 1 if self._tree_open else 0
+        self.tree_host.disabled = not self._tree_open
 
     def _on_size(self, *_args: Any) -> None:
         cols = 4 if self.width >= dp(900) else 3
@@ -3389,36 +3479,29 @@ class LibraryScreen(Screen):
             self.body.add_widget(note_grid)
 
     def _fill_tree(self, app: Any, data: Dict[str, Any], current: str) -> None:
-        self.tree_list.clear_widgets()
-        self.tree_list.add_widget(self._tree_row(app, "", "הספרייה", 0, not current))
-        for folder, depth in app._walk_library_folders(data):
-            folder_id = str(folder.get("id") or "")
-            self.tree_list.add_widget(
-                self._tree_row(
-                    app,
-                    folder_id,
-                    str(folder.get("name") or "תיקייה"),
-                    depth + 1,
-                    folder_id == current,
+        def _branch(parent_id: str) -> List[Dict[str, Any]]:
+            nodes: List[Dict[str, Any]] = []
+            for folder in app._child_folders(data, parent_id):
+                folder_id = str(folder.get("id") or "")
+                nodes.append(
+                    {
+                        "id": folder_id,
+                        "name": str(folder.get("name") or "תיקייה"),
+                        "color": str(folder.get("color") or "#9AA0A8"),
+                        "children": _branch(folder_id),
+                    }
                 )
-            )
+            return nodes
 
-    def _tree_row(self, app: Any, folder_id: str, title: str, depth: int, selected: bool) -> Button:
-        pad = "  " * depth
-        button = Button(
-            text=mixed_markup(f"{pad}{_short_label(title, 16)}"),
-            markup=True,
-            size_hint_y=None,
-            height=dp(32),
-            background_normal="",
-            background_down="",
-            background_color=(0.22, 0.28, 0.38, 1) if selected else (0.14, 0.15, 0.17, 1),
-            color=(0.94, 0.95, 0.97, 1) if selected else (0.78, 0.80, 0.84, 1),
-            font_size=dp(12),
-            halign="right",
+        self.tree_chart.set_tree(
+            {
+                "id": "",
+                "name": "הספרייה",
+                "color": "#9AA0A8",
+                "children": _branch(""),
+            },
+            current,
         )
-        button.bind(on_release=lambda *_a, fid=folder_id: app.select_library_folder(fid or LIBRARY_ALL))
-        return button
 
 
 class RootLayout(FloatLayout):
@@ -4828,6 +4911,7 @@ class SamsungNotesCompanionApp(App):
         if sdk >= 29:
             Downloads = autoclass("android.provider.MediaStore$Downloads")
             values.put("relative_path", String("Download"))
+            values.put("is_pending", 1)
             uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
         else:
             FilesTable = autoclass("android.provider.MediaStore$Files")
@@ -4837,54 +4921,35 @@ class SamsungNotesCompanionApp(App):
         stream = resolver.openOutputStream(uri)
         if stream is None:
             raise RuntimeError("MediaStore stream failed")
-        self._pipe_file_to_stream(path, stream)
+        self._copy_file_to_stream(path, stream)
+        if sdk >= 29:
+            pending = ContentValues()
+            pending.put("is_pending", 0)
+            resolver.update(uri, pending, None, None)
         return uri
 
-    def _copy_share_pdf(self, activity: Any, src: str) -> str:
+    def _copy_file_to_stream(self, src: str, stream: Any) -> None:
         from jnius import autoclass
 
-        name = f"note-{uuid.uuid4().hex[:8]}.pdf"
-        Environment = autoclass("android.os.Environment")
-        File = autoclass("java.io.File")
-        folders = []
+        source = None
+        copied = False
         try:
-            folders.append(activity.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS))
+            source = autoclass("java.io.FileInputStream")(str(src))
+            autoclass("android.os.FileUtils").copy(source, stream)
+            copied = True
         except Exception:
-            pass
-        try:
-            folders.append(activity.getExternalFilesDir(None))
-        except Exception:
-            pass
-        try:
-            folders.append(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS))
-        except Exception:
-            pass
-        last_error: Optional[Exception] = None
-        for folder in folders:
-            if folder is None:
-                continue
-            try:
-                dest = File(folder, name)
-                shutil.copy2(src, str(dest.getAbsolutePath()))
-                if dest.exists():
-                    return str(dest.getAbsolutePath())
-            except Exception as exc:
-                last_error = exc
-        dest_path = self._share_cache_dir() / name
-        shutil.copy2(src, dest_path)
-        if last_error and not dest_path.is_file():
-            raise last_error
-        return str(dest_path)
-
-    def _android_allow_file_uri(self) -> None:
-        try:
-            from jnius import autoclass
-
-            StrictMode = autoclass("android.os.StrictMode")
-            Builder = autoclass("android.os.StrictMode$VmPolicy$Builder")
-            StrictMode.setVmPolicy(Builder().build())
-        except Exception:
-            pass
+            copied = False
+        finally:
+            if source is not None:
+                try:
+                    source.close()
+                except Exception:
+                    pass
+        if not copied:
+            data = Path(src).read_bytes()
+            stream.write(data)
+        stream.flush()
+        stream.close()
 
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from android.runnable import run_on_ui_thread
@@ -4929,37 +4994,21 @@ class SamsungNotesCompanionApp(App):
         if not is_android():
             self._notify(f"PDF נשמר: {files[0]}")
             return
-        try:
-            from jnius import autoclass
+        from android.runnable import run_on_ui_thread
+        from jnius import autoclass
 
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            activity = PythonActivity.mActivity
-            Uri = autoclass("android.net.Uri")
-            File = autoclass("java.io.File")
-            copied = [self._copy_share_pdf(activity, path) for path in files]
-            uris = []
-            errors: List[str] = []
-            for path in copied:
-                try:
-                    uris.append(self._android_mediastore_pdf_uri(activity, path, title))
-                    continue
-                except Exception as exc:
-                    errors.append(str(exc))
-                try:
-                    uris.append(self._android_file_uri(activity, path))
-                    continue
-                except Exception as exc:
-                    errors.append(str(exc))
-                try:
-                    self._android_allow_file_uri()
-                    uris.append(Uri.fromFile(File(path)))
-                except Exception as exc:
-                    errors.append(str(exc))
-            if not uris:
-                raise RuntimeError("; ".join(errors) or "no uri")
-            self._launch_share_intent(activity, uris, title)
-        except Exception as exc:
-            self._notify(f"שיתוף נכשל: {exc}")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+
+        @run_on_ui_thread
+        def _share() -> None:
+            try:
+                uris = [self._android_mediastore_pdf_uri(activity, path, title) for path in files]
+                self._launch_share_intent(activity, uris, title)
+            except Exception:
+                Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל: אין גישה לקובץ"), 0)
+
+        _share()
 
     def create_library_folder(self, *_args: Any) -> None:
         self._folder_editor(None, parent_id=self._library_parent_id())
@@ -5967,7 +6016,7 @@ class SamsungNotesCompanionApp(App):
                             tuple(snapshot.texture.size),
                             bytes(snapshot.texture.pixels),
                         )
-                        line_img = raw.transpose(Image.FLIP_TOP_BOTTOM)
+                        line_img = raw
                         left = max_w - line_img.size[0] if align_right else 0
                         stamp.paste(line_img, (left, top), line_img)
                         top += int(round(line_h))
