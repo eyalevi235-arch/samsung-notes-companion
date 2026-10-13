@@ -136,6 +136,7 @@ CHROME_HEIGHT_DP = 136.0
 SHAPE_BAR_DP = 40.0
 PASTE_HOLD_S = 1.0
 LIBRARY_ALL = "all"
+LIBRARY_UNFILED = "unfiled"
 FOLDER_PALETTE: Sequence[Tuple[str, str, Rgba]] = (
     ("yellow", "#F2C94C", (0.95, 0.79, 0.30, 1.0)),
     ("orange", "#F2994A", (0.95, 0.60, 0.29, 1.0)),
@@ -969,6 +970,17 @@ class ToolIcon(ButtonBehavior, Widget):
             elif kind == "plus":
                 Line(points=[cx - w * 0.28, cy, cx + w * 0.28, cy], width=1.5)
                 Line(points=[cx, cy - h * 0.28, cx, cy + h * 0.28], width=1.5)
+            elif kind == "share":
+                r = min(w, h) * 0.09
+                nodes = (
+                    (x + w * 0.78, y + h * 0.78),
+                    (x + w * 0.22, cy),
+                    (x + w * 0.78, y + h * 0.22),
+                )
+                Line(points=[nodes[0][0], nodes[0][1], nodes[1][0], nodes[1][1]], width=1.35)
+                Line(points=[nodes[1][0], nodes[1][1], nodes[2][0], nodes[2][1]], width=1.35)
+                for nx, ny in nodes:
+                    Ellipse(pos=(nx - r, ny - r), size=(r * 2.0, r * 2.0))
             elif kind == "home":
                 Line(
                     points=[
@@ -3156,7 +3168,7 @@ class FolderTile(_HoldButton):
         app = App.get_running_app()
         super().__init__(
             on_tap=lambda: app.select_library_folder(folder_id),
-            on_hold=None if folder_id == LIBRARY_ALL else lambda: app.edit_library_folder(folder_id),
+            on_hold=None if folder_id in {LIBRARY_ALL, LIBRARY_UNFILED} else lambda: app.library_folder_menu(folder_id),
             size_hint_y=None,
             height=dp(124),
             **kwargs,
@@ -3166,7 +3178,7 @@ class FolderTile(_HoldButton):
         name = Label(
             text=mixed_markup(_short_label(title)),
             markup=True,
-            color=(0.16, 0.17, 0.20, 1) if selected else (0.28, 0.30, 0.34, 1),
+            color=(0.94, 0.95, 0.97, 1) if selected else (0.82, 0.84, 0.88, 1),
             font_size=dp(13),
             halign="center",
             valign="top",
@@ -3187,7 +3199,7 @@ class NoteTile(_HoldButton):
         doc_id = str(doc.get("id") or "")
         super().__init__(
             on_tap=lambda: app.on_library_note_tap(doc_id),
-            on_hold=lambda: app.place_library_document(doc_id),
+            on_hold=lambda: app.library_document_menu(doc_id),
             size_hint_y=None,
             height=dp(136),
             **kwargs,
@@ -3197,7 +3209,7 @@ class NoteTile(_HoldButton):
         name = Label(
             text=mixed_markup(_short_label(str(doc.get("title") or "מסמך"))),
             markup=True,
-            color=(0.16, 0.17, 0.20, 1),
+            color=(0.90, 0.91, 0.94, 1),
             font_size=dp(13),
             halign="center",
             valign="top",
@@ -3206,17 +3218,8 @@ class NoteTile(_HoldButton):
             pos_hint={"x": 0, "y": 0.0},
         )
         name.bind(size=lambda inst, _v: setattr(inst, "text_size", (inst.width, inst.height)))
-        move = ToolIcon(
-            "folder",
-            on_dark=False,
-            size=(dp(30), dp(28)),
-            pos_hint={"x": 0.04, "top": 0.98},
-            trigger=lambda *_a: app.place_library_document(doc_id),
-        )
         self.add_widget(glyph)
         self.add_widget(name)
-        if not checked:
-            self.add_widget(move)
 
 
 class LibraryScreen(Screen):
@@ -3226,7 +3229,7 @@ class LibraryScreen(Screen):
         super().__init__(**kwargs)
         root = BoxLayout(orientation="vertical", padding=(dp(16), dp(14), dp(16), dp(10)), spacing=dp(6))
         with root.canvas.before:
-            Color(0.94, 0.95, 0.97, 1)
+            Color(0.16, 0.17, 0.19, 1)
             self._bg = Rectangle()
         root.bind(
             pos=lambda *_a: setattr(self._bg, "pos", root.pos),
@@ -3234,9 +3237,9 @@ class LibraryScreen(Screen):
         )
         self.header = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.title = Label(
-            text=mixed_markup("המסמכים שלי"),
+            text=mixed_markup("התיקיות שלי"),
             markup=True,
-            color=(0.11, 0.12, 0.16, 1),
+            color=(0.94, 0.95, 0.97, 1),
             font_size=dp(24),
             bold=True,
             halign="right",
@@ -3251,29 +3254,19 @@ class LibraryScreen(Screen):
             width=dp(78),
             background_normal="",
             background_down="",
-            background_color=(0.91, 0.93, 0.96, 1),
-            color=(0.18, 0.42, 0.86, 1),
+            background_color=(0.26, 0.28, 0.32, 1),
+            color=(0.72, 0.82, 0.98, 1),
             font_size=dp(14),
         )
         self.move_btn.bind(on_release=lambda *_a: App.get_running_app().toggle_library_move_mode())
         self.header.add_widget(self.move_btn)
         self.header.add_widget(
-            ToolIcon("folder", on_dark=False, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().create_library_folder())
+            ToolIcon("folder", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().create_library_folder())
         )
         self.header.add_widget(
-            ToolIcon("plus", on_dark=False, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().library_new_menu())
+            ToolIcon("plus", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().library_new_menu())
         )
         root.add_widget(self.header)
-        self.hint = Label(
-            text=mixed_markup("הקשה פותחת · אייקון תיקייה מעביר"),
-            markup=True,
-            color=(0.45, 0.47, 0.52, 1),
-            font_size=dp(13),
-            size_hint_y=None,
-            height=dp(22),
-            halign="right",
-        )
-        root.add_widget(self.hint)
         self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8), padding=(0, dp(4)))
         self.body.bind(minimum_height=self.body.setter("height"))
         scroller = ScrollView(do_scroll_x=False, bar_width=dp(3))
@@ -3281,23 +3274,6 @@ class LibraryScreen(Screen):
         root.add_widget(scroller)
         self.add_widget(root)
         self.bind(size=lambda *_a: self.refresh())
-
-    def set_hint(self, message: str) -> None:
-        self.hint.text = mixed_markup(message)
-
-    def _section(self, title: str) -> Label:
-        label = Label(
-            text=mixed_markup(title),
-            markup=True,
-            color=(0.38, 0.40, 0.45, 1),
-            font_size=dp(13),
-            bold=True,
-            size_hint_y=None,
-            height=dp(26),
-            halign="right",
-        )
-        label.bind(size=lambda inst, _v: setattr(inst, "text_size", inst.size))
-        return label
 
     def _grid(self) -> GridLayout:
         cols = 4 if self.width >= dp(900) else 3
@@ -3316,69 +3292,51 @@ class LibraryScreen(Screen):
         docs = list(data.get("documents") or [])
         docs.sort(key=lambda item: float(item.get("updated") or 0.0), reverse=True)
         self.move_btn.text = mixed_markup("ביטול" if moving else "העברה")
+        self.move_btn.opacity = 0 if selected == LIBRARY_ALL else 1
+        self.move_btn.disabled = selected == LIBRARY_ALL
         if selected == LIBRARY_ALL:
-            self.title.text = mixed_markup("המסמכים שלי")
-            if folders:
-                self.body.add_widget(self._section("תיקיות"))
-                folder_grid = self._grid()
-                for folder in folders:
-                    folder_grid.add_widget(
-                        FolderTile(
-                            str(folder.get("id") or ""),
-                            str(folder.get("name") or "תיקייה"),
-                            str(folder.get("color") or "#9AA0A8"),
-                        )
+            self.title.text = mixed_markup("התיקיות שלי")
+            folder_grid = self._grid()
+            folder_grid.add_widget(FolderTile(LIBRARY_UNFILED, "ללא תיקייה", "#9AA0A8"))
+            for folder in folders:
+                folder_grid.add_widget(
+                    FolderTile(
+                        str(folder.get("id") or ""),
+                        str(folder.get("name") or "תיקייה"),
+                        str(folder.get("color") or "#9AA0A8"),
                     )
-                self.body.add_widget(folder_grid)
-            self.body.add_widget(self._section("מסמכים"))
-            visible = docs
+                )
+            self.body.add_widget(folder_grid)
+            return
+        if selected == LIBRARY_UNFILED:
+            name = "ללא תיקייה"
+            visible = [doc for doc in docs if not str(doc.get("folder_id") or "")]
+            color = "#9AA0A8"
         else:
             folder = next((item for item in folders if str(item.get("id")) == selected), None)
             name = str((folder or {}).get("name") or "תיקייה")
-            self.title.text = mixed_markup(_short_label(name, 16))
-            back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-            back = Button(
-                text=mixed_markup("הכל"),
-                markup=True,
-                size_hint=(None, 1),
-                width=dp(72),
-                background_normal="",
-                background_down="",
-                background_color=(0.91, 0.93, 0.96, 1),
-                color=(0.18, 0.42, 0.86, 1),
-            )
-            back.bind(on_release=lambda *_a: app.select_library_folder(LIBRARY_ALL))
-            edit = Button(
-                text=mixed_markup("עריכה"),
-                markup=True,
-                size_hint=(None, 1),
-                width=dp(72),
-                background_normal="",
-                background_down="",
-                background_color=(0.91, 0.93, 0.96, 1),
-                color=(0.18, 0.42, 0.86, 1),
-            )
-            edit.bind(on_release=lambda *_a: app.edit_library_folder(selected))
-            back_row.add_widget(Widget())
-            back_row.add_widget(edit)
-            back_row.add_widget(back)
-            self.body.add_widget(back_row)
             visible = [doc for doc in docs if str(doc.get("folder_id") or "") == selected]
+            color = str((folder or {}).get("color") or "#2F80ED")
+        self.title.text = mixed_markup(_short_label(name, 16))
+        back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        back = Button(
+            text=mixed_markup("תיקיות"),
+            markup=True,
+            size_hint=(None, 1),
+            width=dp(84),
+            background_normal="",
+            background_down="",
+            background_color=(0.26, 0.28, 0.32, 1),
+            color=(0.82, 0.86, 0.94, 1),
+        )
+        back.bind(on_release=lambda *_a: app.select_library_folder(LIBRARY_ALL))
+        back_row.add_widget(Widget())
+        back_row.add_widget(back)
+        self.body.add_widget(back_row)
         note_grid = self._grid()
-        folder_map = {str(folder.get("id")): folder for folder in folders}
         for doc in visible:
-            folder_id = str(doc.get("folder_id") or "")
-            color = str((folder_map.get(folder_id) or {}).get("color") or "#2F80ED")
             note_grid.add_widget(NoteTile(doc, color, checked=str(doc.get("id")) in picked))
         self.body.add_widget(note_grid)
-        if moving:
-            self.set_hint("בחרו מסמכים ואז לחצו שוב על העברה כדי לבחור תיקייה")
-        elif not visible and selected != LIBRARY_ALL:
-            self.set_hint("התיקייה ריקה. לחצו + או העבירו לכאן מסמך")
-        elif not visible and not folders:
-            self.set_hint("לחצו + למסמך חדש, או על אייקון התיקייה ליצירת תיקייה")
-        else:
-            self.set_hint("הקשה פותחת · אייקון תיקייה על המסמך מעביר")
 
 
 class RootLayout(FloatLayout):
@@ -3722,6 +3680,7 @@ class RootLayout(FloatLayout):
             ("open", "plus", app.open_pdf),
             ("image", "image", app.import_image),
             ("save_as", "save", app.save_document_as),
+            ("share", "share", app.share_current_document),
             ("toggle", "notes", self.toggle_notes),
         ):
             button = ToolIcon(kind, on_dark=False, size=(dp(44), dp(36)), trigger=handler)
@@ -3913,7 +3872,7 @@ class RootLayout(FloatLayout):
         for shape in SHAPE_TOOLS:
             mapping[shape] = app.tool_mode == shape
         for key, button in self.tool_buttons.items():
-            if key in {"home", "open", "save_as", "toggle", "hide", "image", "fit", "palette", "undo", "redo"}:
+            if key in {"home", "open", "save_as", "share", "toggle", "hide", "image", "fit", "palette", "undo", "redo"}:
                 continue
             if isinstance(button, ToolIcon):
                 button.selected = mapping.get(key, False)
@@ -4111,7 +4070,6 @@ class SamsungNotesCompanionApp(App):
         self._library_moving = True
         self._library_move_ids = set()
         self.library_screen.refresh()
-        self._notify("בחרו מסמכים ואז לחצו העברה שוב")
 
     def library_new_menu(self, *_args: Any) -> None:
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
@@ -4163,7 +4121,8 @@ class SamsungNotesCompanionApp(App):
             self._current_doc_id = doc_id
         data = self.library_data()
         docs = data.setdefault("documents", [])
-        folder_id = "" if self._library_folder == LIBRARY_ALL else str(self._library_folder)
+        current_folder = str(self._library_folder or LIBRARY_ALL)
+        folder_id = "" if current_folder in {LIBRARY_ALL, LIBRARY_UNFILED} else current_folder
         entry = {
             "id": doc_id,
             "title": self.document_title,
@@ -4204,11 +4163,16 @@ class SamsungNotesCompanionApp(App):
 
     def open_library_document(self, doc_id: str) -> None:
         self._autosave_library_doc()
+        if not self._hydrate_library_document(doc_id):
+            return
+        self.show_editor()
+
+    def _hydrate_library_document(self, doc_id: str) -> bool:
         data = self.library_data()
         entry = next((item for item in data.get("documents") or [] if str(item.get("id")) == doc_id), None)
         if entry is None:
             self._notify("המסמך לא נמצא")
-            return
+            return False
         payload_path = str(entry.get("payload") or "")
         pdf_copy = str(entry.get("pdf") or "")
         self._current_doc_id = doc_id
@@ -4227,9 +4191,10 @@ class SamsungNotesCompanionApp(App):
                     self.root_layout.set_page_status(0, self.page_count)
             self.document_title = str(entry.get("title") or self.document_title)
             self.root_layout.refresh_title()
-            self.show_editor()
+            return True
         except Exception as exc:
             self._notify(f"לא ניתן לפתוח את המסמך: {exc}")
+            return False
 
     def place_library_document(self, doc_id: str) -> None:
         self.place_library_documents([doc_id])
@@ -4243,7 +4208,7 @@ class SamsungNotesCompanionApp(App):
         body = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
         popup = Popup(title="", content=body, size_hint=(0.86, 0.62), separator_height=0, background_color=(0, 0, 0, 0))
         with body.canvas.before:
-            Color(1, 1, 1, 1)
+            Color(0.20, 0.21, 0.24, 1)
             sheet = RoundedRectangle(radius=[dp(22)])
         body.bind(
             pos=lambda *_a: setattr(sheet, "pos", body.pos),
@@ -4252,7 +4217,7 @@ class SamsungNotesCompanionApp(App):
         heading = Label(
             text=mixed_markup("העברה לתיקייה"),
             markup=True,
-            color=(0.12, 0.13, 0.16, 1),
+            color=(0.94, 0.95, 0.97, 1),
             font_size=dp(18),
             bold=True,
             size_hint_y=None,
@@ -4285,7 +4250,7 @@ class SamsungNotesCompanionApp(App):
             label = Label(
                 text=mixed_markup(_short_label(title)),
                 markup=True,
-                color=(0.16, 0.17, 0.20, 1),
+                color=(0.88, 0.90, 0.93, 1),
                 font_size=dp(13),
                 halign="center",
                 size_hint=(1, None),
@@ -4302,8 +4267,8 @@ class SamsungNotesCompanionApp(App):
             height=dp(42),
             background_normal="",
             background_down="",
-            background_color=(0.93, 0.94, 0.96, 1),
-            color=(0.20, 0.22, 0.26, 1),
+            background_color=(0.28, 0.30, 0.34, 1),
+            color=(0.90, 0.91, 0.94, 1),
         )
         cancel.bind(on_release=lambda *_a: popup.dismiss())
         body.add_widget(heading)
@@ -4321,6 +4286,299 @@ class SamsungNotesCompanionApp(App):
                 break
         self._save_library_data(data)
         self.library_screen.refresh()
+
+    def _sheet_button(self, caption: str, on_press: Any, danger: bool = False) -> Button:
+        button = Button(
+            text=mixed_markup(caption),
+            markup=True,
+            size_hint_y=None,
+            height=dp(46),
+            background_normal="",
+            background_down="",
+            background_color=(0.42, 0.22, 0.22, 1) if danger else (0.28, 0.30, 0.34, 1),
+            color=(0.98, 0.86, 0.86, 1) if danger else (0.94, 0.95, 0.97, 1),
+        )
+        button.bind(on_release=lambda *_a: on_press())
+        return button
+
+    def _action_sheet(self, heading: str, actions: Sequence[Tuple[str, Any, bool]]) -> None:
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(16))
+        popup = Popup(title="", content=body, size_hint=(0.82, None), separator_height=0, background_color=(0, 0, 0, 0))
+        popup.height = dp(86 + 54 * (len(actions) + 1))
+        with body.canvas.before:
+            Color(0.20, 0.21, 0.24, 1)
+            sheet = RoundedRectangle(radius=[dp(22)])
+        body.bind(
+            pos=lambda *_a: setattr(sheet, "pos", body.pos),
+            size=lambda *_a: setattr(sheet, "size", body.size),
+        )
+        title = Label(
+            text=mixed_markup(_short_label(heading, 22)),
+            markup=True,
+            color=(0.94, 0.95, 0.97, 1),
+            font_size=dp(18),
+            bold=True,
+            size_hint_y=None,
+            height=dp(32),
+        )
+        body.add_widget(title)
+
+        def _run(callback: Any) -> None:
+            popup.dismiss()
+            if callable(callback):
+                callback()
+
+        for caption, callback, danger in actions:
+            body.add_widget(self._sheet_button(caption, lambda cb=callback: _run(cb), danger=danger))
+        body.add_widget(self._sheet_button("ביטול", popup.dismiss))
+        popup.open()
+        apply_hebrew_ui(popup, heading)
+
+    def library_document_menu(self, doc_id: str) -> None:
+        data = self.library_data()
+        entry = next((item for item in data.get("documents") or [] if str(item.get("id")) == doc_id), None)
+        title = str((entry or {}).get("title") or "מסמך")
+        self._action_sheet(
+            title,
+            (
+                ("העברה", lambda: self.place_library_document(doc_id), False),
+                ("העתקה", lambda: self.copy_library_document(doc_id), False),
+                ("שיתוף", lambda: self.share_library_document(doc_id), False),
+                ("מחיקה", lambda: self.confirm_delete_library_document(doc_id), True),
+            ),
+        )
+
+    def library_folder_menu(self, folder_id: str) -> None:
+        data = self.library_data()
+        folder = next((item for item in data.get("folders") or [] if str(item.get("id")) == folder_id), None)
+        if folder is None:
+            return
+        name = str(folder.get("name") or "תיקייה")
+        self._action_sheet(
+            name,
+            (
+                ("העברה", lambda: self.move_library_folder_documents(folder_id), False),
+                ("העתקה", lambda: self.copy_library_folder(folder_id), False),
+                ("עריכה", lambda: self.edit_library_folder(folder_id), False),
+                ("שיתוף", lambda: self.share_library_folder(folder_id), False),
+                ("מחיקה", lambda: self.confirm_delete_library_folder(folder_id), True),
+            ),
+        )
+
+    def copy_library_document(self, doc_id: str, folder_id: Optional[str] = None) -> Optional[str]:
+        data = self.library_data()
+        entry = next((item for item in data.get("documents") or [] if str(item.get("id")) == doc_id), None)
+        if entry is None:
+            return None
+        new_id = uuid.uuid4().hex
+        docs_dir = self.library_dir() / "docs"
+        src_payload = Path(str(entry.get("payload") or docs_dir / f"{doc_id}.json"))
+        src_pdf = Path(str(entry.get("pdf") or docs_dir / f"{doc_id}.pdf"))
+        dest_payload = docs_dir / f"{new_id}.json"
+        dest_pdf = docs_dir / f"{new_id}.pdf"
+        if src_payload.is_file():
+            shutil.copy2(src_payload, dest_payload)
+            try:
+                payload = json.loads(dest_payload.read_text(encoding="utf-8"))
+                payload["title"] = f"עותק של {entry.get('title') or 'מסמך'}"
+                payload["pdf_path"] = str(dest_pdf) if src_pdf.is_file() else payload.get("pdf_path")
+                dest_payload.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+        if src_pdf.is_file():
+            shutil.copy2(src_pdf, dest_pdf)
+        clone = dict(entry)
+        clone["id"] = new_id
+        clone["title"] = f"עותק של {entry.get('title') or 'מסמך'}"
+        clone["folder_id"] = folder_id if folder_id is not None else str(entry.get("folder_id") or "")
+        clone["updated"] = time.time()
+        clone["payload"] = str(dest_payload)
+        clone["pdf"] = str(dest_pdf)
+        data.setdefault("documents", []).append(clone)
+        self._save_library_data(data)
+        self.library_screen.refresh()
+        return new_id
+
+    def move_library_folder_documents(self, folder_id: str) -> None:
+        data = self.library_data()
+        ids = [
+            str(item.get("id") or "")
+            for item in data.get("documents") or []
+            if str(item.get("folder_id") or "") == folder_id
+        ]
+        self.place_library_documents([item for item in ids if item])
+
+    def copy_library_folder(self, folder_id: str) -> None:
+        data = self.library_data()
+        folder = next((item for item in data.get("folders") or [] if str(item.get("id")) == folder_id), None)
+        if folder is None:
+            return
+        new_folder_id = uuid.uuid4().hex
+        data.setdefault("folders", []).append(
+            {
+                "id": new_folder_id,
+                "name": f"עותק של {folder.get('name') or 'תיקייה'}",
+                "color": folder.get("color") or "#9AA0A8",
+            }
+        )
+        self._save_library_data(data)
+        for item in list(data.get("documents") or []):
+            if str(item.get("folder_id") or "") == folder_id:
+                self.copy_library_document(str(item.get("id") or ""), folder_id=new_folder_id)
+        self.library_screen.refresh()
+
+    def confirm_delete_library_document(self, doc_id: str) -> None:
+        self._action_sheet(
+            "למחוק את המסמך?",
+            (("מחיקה", lambda: self.delete_library_document(doc_id), True),),
+        )
+
+    def confirm_delete_library_folder(self, folder_id: str) -> None:
+        self._action_sheet(
+            "למחוק את התיקייה?",
+            (("מחיקה", lambda: self.delete_library_folder(folder_id), True),),
+        )
+
+    def delete_library_document(self, doc_id: str) -> None:
+        data = self.library_data()
+        entry = next((item for item in data.get("documents") or [] if str(item.get("id")) == doc_id), None)
+        data["documents"] = [item for item in data.get("documents") or [] if str(item.get("id")) != doc_id]
+        self._save_library_data(data)
+        for key in ("payload", "pdf"):
+            path = str((entry or {}).get(key) or "")
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        if str(getattr(self, "_current_doc_id", "") or "") == doc_id:
+            self._current_doc_id = None
+        self.library_screen.refresh()
+
+    def delete_library_folder(self, folder_id: str) -> None:
+        data = self.library_data()
+        data["folders"] = [item for item in data.get("folders") or [] if str(item.get("id")) != folder_id]
+        for item in data.get("documents") or []:
+            if str(item.get("folder_id") or "") == folder_id:
+                item["folder_id"] = ""
+        self._save_library_data(data)
+        if str(self._library_folder) == folder_id:
+            self._library_folder = LIBRARY_ALL
+        self.library_screen.refresh()
+
+    def share_current_document(self, *_args: Any) -> None:
+        self._autosave_library_doc()
+        self._share_active_document()
+
+    def share_library_document(self, doc_id: str) -> None:
+        previous = str(getattr(self, "_current_doc_id", "") or "")
+        was_editor = getattr(self, "_sm", None) is not None and self._sm.current == "editor"
+        if previous == doc_id:
+            self._autosave_library_doc()
+            self._share_active_document()
+            return
+        self._autosave_library_doc()
+        if not self._hydrate_library_document(doc_id):
+            return
+        self._share_active_document()
+        if previous and previous != doc_id:
+            self._hydrate_library_document(previous)
+        if not was_editor:
+            self.show_library()
+
+    def share_library_folder(self, folder_id: str) -> None:
+        data = self.library_data()
+        ids = [
+            str(item.get("id") or "")
+            for item in data.get("documents") or []
+            if str(item.get("folder_id") or "") == folder_id
+        ]
+        ids = [item for item in ids if item]
+        if not ids:
+            self._notify("התיקייה ריקה")
+            return
+        previous = str(getattr(self, "_current_doc_id", "") or "")
+        was_editor = getattr(self, "_sm", None) is not None and self._sm.current == "editor"
+        self._autosave_library_doc()
+        paths: List[str] = []
+        for doc_id in ids:
+            if not self._hydrate_library_document(doc_id):
+                continue
+            path = self._write_share_pdf()
+            if path:
+                paths.append(path)
+        if previous:
+            self._hydrate_library_document(previous)
+        if not was_editor:
+            self.show_library()
+        if not paths:
+            self._notify("לא ניתן לייצא PDF")
+            return
+        self._android_share_pdfs(paths, "תיקייה")
+
+    def _share_active_document(self) -> None:
+        path = self._write_share_pdf()
+        if not path:
+            self._notify("לא ניתן לייצא PDF")
+            return
+        self._android_share_pdfs([path], self.document_title)
+
+    def _write_share_pdf(self) -> Optional[str]:
+        try:
+            pdf_bytes = self._export_pdf_bytes()
+        except Exception as exc:
+            self._notify(f"ייצוא נכשל: {exc}")
+            return None
+        folder = Path(str(self.user_data_dir)) / "share"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = self._file_stem()
+        path = folder / f"{stem}-{uuid.uuid4().hex[:6]}.pdf"
+        path.write_bytes(pdf_bytes)
+        return str(path)
+
+    def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
+        files = [item for item in paths if item and os.path.isfile(item)]
+        if not files:
+            return
+        if not is_android():
+            self._notify("השיתוף זמין בטאבלט")
+            return
+        try:
+            from jnius import autoclass
+
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            Intent = autoclass("android.content.Intent")
+            String = autoclass("java.lang.String")
+            File = autoclass("java.io.File")
+            try:
+                FileProvider = autoclass("androidx.core.content.FileProvider")
+            except Exception:
+                FileProvider = autoclass("android.support.v4.content.FileProvider")
+            authority = activity.getPackageName() + ".fileprovider"
+            uris = []
+            for path in files:
+                uri = FileProvider.getUriForFile(activity, authority, File(path))
+                uris.append(uri)
+            if len(uris) == 1:
+                intent = Intent(Intent.ACTION_SEND)
+                intent.setType("application/pdf")
+                intent.putExtra(Intent.EXTRA_STREAM, uris[0])
+            else:
+                ArrayList = autoclass("java.util.ArrayList")
+                stream = ArrayList()
+                for uri in uris:
+                    stream.add(uri)
+                intent = Intent(Intent.ACTION_SEND_MULTIPLE)
+                intent.setType("application/pdf")
+                intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
+            intent.putExtra(Intent.EXTRA_SUBJECT, String(title or "PDF"))
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            chooser = Intent.createChooser(intent, String("שיתוף"))
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            activity.startActivity(chooser)
+        except Exception as exc:
+            self._notify(f"שיתוף נכשל: {exc}")
 
     def create_library_folder(self, *_args: Any) -> None:
         self._folder_editor(None)
@@ -4518,11 +4776,6 @@ class SamsungNotesCompanionApp(App):
             self.root_layout.set_status(message)
         except Exception:
             pass
-        if getattr(self, "_sm", None) is not None and self._sm.current == "library":
-            try:
-                self.library_screen.set_hint(message)
-            except Exception:
-                pass
         if not is_android():
             return
         try:
