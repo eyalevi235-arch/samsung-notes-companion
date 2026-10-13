@@ -2359,8 +2359,7 @@ class SPenAnnotationCanvas(Widget):
             self._sync_live()
             touch.ud["mode"] = "text"
             touch.ud["text_doc"] = doc
-            self._launch_text_tool(doc)
-            touch.ud["text_opened"] = True
+            touch.ud["text_opened"] = False
             return True
         color = tuple(getattr(app, "current_color", COLOR_BLACK))[:3]
         opacity = max(0.12, min(1.0, float(getattr(app, "ink_opacity", 1.0))))
@@ -4695,6 +4694,68 @@ class SamsungNotesCompanionApp(App):
                 raise last_error
             raise RuntimeError("FileProvider unavailable")
 
+    def _pipe_file_to_stream(self, src: str, stream: Any) -> None:
+        from jnius import autoclass
+
+        try:
+            Files = autoclass("java.nio.file.Files")
+            Paths = autoclass("java.nio.file.Paths")
+            Files.copy(Paths.get(str(src)), stream)
+            stream.flush()
+            stream.close()
+            return
+        except Exception:
+            pass
+        data = Path(src).read_bytes()
+        try:
+            stream.write(data)
+        except Exception:
+            inp = autoclass("java.io.FileInputStream")(str(src))
+            buf = bytes(8192)
+            try:
+                while True:
+                    count = inp.read(buf)
+                    if count <= 0:
+                        break
+                    stream.write(buf, 0, count)
+            finally:
+                inp.close()
+        stream.flush()
+        stream.close()
+
+    def _android_mediastore_pdf_uri(self, activity: Any, path: str, title: str) -> Any:
+        from jnius import autoclass
+
+        ContentValues = autoclass("android.content.ContentValues")
+        Build = autoclass("android.os.Build")
+        String = autoclass("java.lang.String")
+        Integer = autoclass("java.lang.Integer")
+        resolver = activity.getContentResolver()
+        values = ContentValues()
+        display = "".join(ch if ch.isalnum() or ch in " ._-" else "_" for ch in (title or "note"))[:40] or "note"
+        values.put("_display_name", String(f"{display}.pdf"))
+        values.put("mime_type", String("application/pdf"))
+        sdk = int(Build.VERSION.SDK_INT)
+        if sdk >= 29:
+            Downloads = autoclass("android.provider.MediaStore$Downloads")
+            values.put("relative_path", String("Download"))
+            values.put("is_pending", Integer(1))
+            uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
+        else:
+            FilesTable = autoclass("android.provider.MediaStore$Files")
+            uri = resolver.insert(FilesTable.getContentUri("external"), values)
+        if uri is None:
+            raise RuntimeError("MediaStore insert failed")
+        stream = resolver.openOutputStream(uri)
+        if stream is None:
+            raise RuntimeError("MediaStore stream failed")
+        self._pipe_file_to_stream(path, stream)
+        if sdk >= 29:
+            done = ContentValues()
+            done.put("is_pending", Integer(0))
+            resolver.update(uri, done, None, None)
+        return uri
+
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
         if not files:
@@ -4712,7 +4773,19 @@ class SamsungNotesCompanionApp(App):
             Intent = autoclass("android.content.Intent")
             String = autoclass("java.lang.String")
             ClipData = autoclass("android.content.ClipData")
-            uris = [self._android_file_uri(activity, path) for path in files]
+            uris = []
+            errors: List[str] = []
+            for path in files:
+                try:
+                    uris.append(self._android_mediastore_pdf_uri(activity, path, title))
+                except Exception as exc:
+                    errors.append(str(exc))
+                    try:
+                        uris.append(self._android_file_uri(activity, path))
+                    except Exception as exc2:
+                        errors.append(str(exc2))
+            if not uris:
+                raise RuntimeError("; ".join(errors) or "no uri")
             if len(uris) == 1:
                 intent = Intent(Intent.ACTION_SEND)
                 intent.setType("application/pdf")
@@ -4733,10 +4806,11 @@ class SamsungNotesCompanionApp(App):
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             chooser = Intent.createChooser(intent, String("שיתוף"))
             chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             try:
                 PackageManager = autoclass("android.content.pm.PackageManager")
-                resolved = activity.getPackageManager().queryIntentActivities(intent, int(getattr(PackageManager, "MATCH_DEFAULT_ONLY", 65536)))
+                resolved = activity.getPackageManager().queryIntentActivities(
+                    intent, int(getattr(PackageManager, "MATCH_DEFAULT_ONLY", 65536))
+                )
                 for index in range(int(resolved.size())):
                     package_name = resolved.get(index).activityInfo.packageName
                     for uri in uris:
@@ -6415,13 +6489,27 @@ class SamsungNotesCompanionApp(App):
     def _prompt_text(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
+        initial = ""
+        font_size = 28.0
+        if existing is not None and 0 <= existing < len(canvas.strokes):
+            record = canvas.strokes[existing]
+            initial = str(record.get("text") or "")
+            font_size = float(record.get("font_size") or 28.0)
+        self._android_text_target = (canvas, doc, existing, font_size)
         if is_android():
             try:
-                self._show_android_text_panel(canvas, doc, existing)
+                self._show_android_line_prompt("טקסט", initial, self._accept_android_text, multiline=True)
                 return
             except Exception:
-                pass
+                try:
+                    self._show_android_text_panel(canvas, doc, existing)
+                    return
+                except Exception:
+                    pass
         self.root_layout.show_text_overlay(canvas, doc, existing)
+
+    def _accept_android_text(self, text: str) -> None:
+        self._finish_android_text(text, True)
 
     def _ensure_android_line_listeners(self) -> None:
         if getattr(self, "_android_line_ui_ver", 0) == 1:
@@ -6451,7 +6539,7 @@ class SamsungNotesCompanionApp(App):
         self._android_line_cancel = LineClick(False)
         self._android_line_ui_ver = 1
 
-    def _show_android_line_prompt(self, title: str, initial: str, on_done: Any) -> None:
+    def _show_android_line_prompt(self, title: str, initial: str, on_done: Any, multiline: bool = False) -> None:
         from android.runnable import run_on_ui_thread
         from jnius import autoclass
 
@@ -6470,11 +6558,24 @@ class SamsungNotesCompanionApp(App):
             InputType = autoclass("android.text.InputType")
             String = autoclass("java.lang.String")
             ColorCls = autoclass("android.graphics.Color")
+            Gravity = autoclass("android.view.Gravity")
             edit = EditText(activity)
             edit.setText(String(str(initial or "")))
             edit.setHint(String(title or "שם"))
-            edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
-            edit.setSingleLine(True)
+            if multiline:
+                edit.setSingleLine(False)
+                edit.setMinLines(4)
+                edit.setMaxLines(8)
+                edit.setGravity(Gravity.TOP | Gravity.START)
+                edit.setInputType(
+                    InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    | InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                )
+            else:
+                edit.setSingleLine(True)
+                edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
             edit.setTextColor(ColorCls.parseColor("#FF111111"))
             edit.setHintTextColor(ColorCls.parseColor("#FF777777"))
             try:

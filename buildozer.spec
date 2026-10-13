@@ -72,6 +72,9 @@ android.allow_backup = True
 
 # Needed so the system document picker (My Files / Drive) can return a URI.
 android.enable_androidx = True
+android.gradle_dependencies = androidx.core:core:1.12.0
+android.res_xml = src/android/file_paths.xml
+android.extra_manifest_xml = src/android/file_provider.xml
 
 [buildozer]
 
