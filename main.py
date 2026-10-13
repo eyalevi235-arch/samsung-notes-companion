@@ -2052,11 +2052,14 @@ class SPenAnnotationCanvas(Widget):
 
     def _launch_text_tool(self, doc: Point) -> None:
         app = App.get_running_app()
-        hit = self._hit_object(doc)
-        if hit is not None and self.strokes[hit].get("kind") == "text":
-            app.prompt_text_record(self, hit)
-            return
-        app.prompt_new_text(self, doc)
+        try:
+            hit = self._hit_object(doc)
+            if hit is not None and self.strokes[hit].get("kind") == "text":
+                app.prompt_text_record(self, hit)
+            else:
+                app.prompt_new_text(self, doc)
+        except Exception:
+            app._notify("לא ניתן לפתוח את תיבת הטקסט")
 
     def _begin_two_finger_view(self, touch: MotionEvent) -> None:
         self._cancel_paste_hold()
@@ -4895,14 +4898,12 @@ class SamsungNotesCompanionApp(App):
     def _prompt_text(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
+        self.root_layout.show_text_overlay(canvas, doc, existing)
         if is_android():
             try:
-                self.root_layout.hide_text_overlay()
                 self._show_android_text_dialog(canvas, doc, existing)
-                return
             except Exception:
                 pass
-        self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
         if getattr(self, "_android_text_ui_ver", 0) == 6:
@@ -5031,9 +5032,6 @@ class SamsungNotesCompanionApp(App):
         Gravity = autoclass("android.view.Gravity")
         LinearLayout = autoclass("android.widget.LinearLayout")
         Button = autoclass("android.widget.Button")
-        EditorInfo = autoclass("android.view.inputmethod.EditorInfo")
-        Context = autoclass("android.content.Context")
-        InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
         density = float(activity.getResources().getDisplayMetrics().density)
         pad = int(18 * density)
 
@@ -5059,27 +5057,14 @@ class SamsungNotesCompanionApp(App):
                 edit = EditText(activity)
                 edit.setText(String(initial))
                 edit.setHint(String("כתבו טקסט"))
-                edit.setInputType(
-                    InputType.TYPE_CLASS_TEXT
-                    | InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                    | InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
-                )
-                try:
-                    edit.setImeOptions(EditorInfo.IME_FLAG_NO_ENTER_ACTION)
-                except Exception:
-                    pass
+                edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
                 edit.setMinLines(4)
                 edit.setGravity(Gravity.TOP | Gravity.LEFT)
                 edit.setFocusable(True)
                 edit.setFocusableInTouchMode(True)
                 try:
-                    edit.setHorizontallyScrolling(False)
-                except Exception:
-                    pass
-                try:
                     edit.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
                     edit.setTextDirection(View.TEXT_DIRECTION_LTR)
-                    edit.setTextAlignment(View.TEXT_ALIGNMENT_GRAVITY)
                 except Exception:
                     pass
 
@@ -5110,18 +5095,10 @@ class SamsungNotesCompanionApp(App):
                     dialog.setOnDismissListener(self._android_dismiss)
                 win = dialog.getWindow()
                 try:
-                    win.getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
-                except Exception:
-                    pass
-                try:
                     LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
-                    ViewGroup = autoclass("android.view.ViewGroup")
-                    win.setGravity(Gravity.TOP | Gravity.FILL_HORIZONTAL)
-                    win.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    win.setSoftInputMode(
-                        LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
-                        | LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-                    )
+                    win.setGravity(Gravity.TOP)
+                    win.setLayout(-1, -2)
+                    win.setSoftInputMode(LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
                 except Exception:
                     pass
                 self._android_edit = edit
