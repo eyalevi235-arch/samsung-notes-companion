@@ -385,48 +385,17 @@ def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
 
 
 def focus_system_keyboard(field: TextInput) -> None:
-    """Focus a TextInput and request the Android tablet keyboard."""
+    """Focus a TextInput without fighting an already-open Android IME."""
 
     def _focus(_dt: float = 0.0) -> None:
         try:
             field.disabled = False
             field.readonly = False
             field.focus = True
-            if hasattr(field, "show_keyboard"):
-                field.show_keyboard()
-        except Exception:
-            pass
-        try:
-            Window.request_keyboard(lambda: None, field, "text")
-        except Exception:
-            pass
-        if not is_android():
-            return
-        try:
-            from android.runnable import run_on_ui_thread
-            from jnius import autoclass
-
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            Context = autoclass("android.content.Context")
-            InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
-            imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-
-            @run_on_ui_thread
-            def _show() -> None:
-                view = activity.getCurrentFocus()
-                if view is None:
-                    view = activity.getWindow().getDecorView()
-                imm.restartInput(view)
-                imm.showSoftInput(view, InputMethodManager.SHOW_FORCED)
-                imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
-
-            _show()
         except Exception:
             pass
 
     Clock.schedule_once(_focus, 0.05)
-    Clock.schedule_once(_focus, 0.25)
-    Clock.schedule_once(_focus, 0.55)
 
 
 def mixed_markup(text: str) -> str:
@@ -3072,9 +3041,7 @@ class RootLayout(FloatLayout):
             write_tab=False,
             size_hint_y=1,
         )
-        if _HEBREW_FONT_READY:
-            self.text_field.font_name = "HebrewFont"
-        elif _LATIN_FONT_READY:
+        if _LATIN_FONT_READY:
             self.text_field.font_name = "LatinFont"
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         ok_btn = Button(text="אישור")
@@ -4937,20 +4904,11 @@ class SamsungNotesCompanionApp(App):
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
         if is_android():
-            self._android_dialog_visible = False
             try:
                 self._show_android_text_dialog(canvas, doc, existing)
-            except Exception:
-                self.root_layout.show_text_overlay(canvas, doc, existing)
                 return
-
-            def _fallback(_dt: float) -> None:
-                if getattr(self, "_android_dialog_visible", False):
-                    return
-                self.root_layout.show_text_overlay(canvas, doc, existing)
-
-            Clock.schedule_once(_fallback, 0.35)
-            return
+            except Exception:
+                pass
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
@@ -4998,8 +4956,12 @@ class SamsungNotesCompanionApp(App):
 
             @java_method("(Landroid/content/DialogInterface;)V")
             def onShow(self, _dialog: Any) -> None:
-                if not getattr(app, "_android_ime_shown", False):
-                    app._show_android_ime()
+                try:
+                    edit = getattr(app, "_android_edit", None)
+                    if edit is not None:
+                        edit.requestFocus()
+                except Exception:
+                    pass
 
         class DialogDismiss(PythonJavaClass):
             __javacontext__ = "app"
@@ -5007,6 +4969,7 @@ class SamsungNotesCompanionApp(App):
 
             @java_method("(Landroid/content/DialogInterface;)V")
             def onDismiss(self, _dialog: Any) -> None:
+                Clock.schedule_once(lambda _dt: app._restore_kivy_softinput(), 0)
                 if getattr(app, "_android_dialog_result", None) is None:
                     app._queue_android_text_result(False, "")
 
@@ -5031,24 +4994,25 @@ class SamsungNotesCompanionApp(App):
             return
         self._android_dialog_result = (bool(accept), str(text or ""))
 
-    def _show_android_ime(self) -> None:
-        if getattr(self, "_android_ime_shown", False):
-            return
+    def _pause_kivy_softinput(self) -> None:
+        self._prev_softinput = getattr(Window, "softinput_mode", "")
         try:
-            from jnius import autoclass
-
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            Context = autoclass("android.content.Context")
-            InputMethodManager = autoclass("android.view.inputmethod.InputMethodManager")
-            edit = getattr(self, "_android_edit", None)
-            if edit is None:
-                return
-            self._android_ime_shown = True
-            edit.requestFocus()
-            imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
-            imm.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
+            Window.softinput_mode = ""
         except Exception:
-            self._android_ime_shown = False
+            pass
+        try:
+            Window.release_all_keyboards()
+        except Exception:
+            try:
+                Window.release_keyboard()
+            except Exception:
+                pass
+
+    def _restore_kivy_softinput(self) -> None:
+        try:
+            Window.softinput_mode = str(getattr(self, "_prev_softinput", None) or "pan")
+        except Exception:
+            pass
 
     def _poll_android_text_dialog(self, _dt: float) -> bool:
         result = getattr(self, "_android_dialog_result", None)
@@ -5108,8 +5072,8 @@ class SamsungNotesCompanionApp(App):
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
         self._android_dialog_visible = False
-        self._android_ime_shown = False
         self._android_typed = initial
+        self._pause_kivy_softinput()
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
         Clock.schedule_interval(self._poll_android_text_dialog, 0.12)
@@ -5121,16 +5085,21 @@ class SamsungNotesCompanionApp(App):
                 box.setOrientation(LinearLayout.VERTICAL)
                 box.setPadding(pad, pad, pad, pad)
                 try:
-                    box.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
+                    box.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
                 except Exception:
                     pass
 
                 edit = EditText(activity)
+                try:
+                    Typeface = autoclass("android.graphics.Typeface")
+                    edit.setTypeface(Typeface.SANS_SERIF)
+                except Exception:
+                    pass
                 edit.setText(String(initial))
                 edit.setHint(String("כתבו טקסט"))
                 edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
                 try:
-                    edit.setImeOptions(EditorInfo.IME_ACTION_DONE)
+                    edit.setImeOptions(EditorInfo.IME_ACTION_NONE)
                 except Exception:
                     pass
                 edit.setMinLines(3)
@@ -5138,10 +5107,14 @@ class SamsungNotesCompanionApp(App):
                 edit.setFocusable(True)
                 edit.setFocusableInTouchMode(True)
                 try:
-                    edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
-                    edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
+                    edit.setTextDirection(View.TEXT_DIRECTION_ANY_RTL)
+                    edit.setTextAlignment(View.TEXT_ALIGNMENT_TEXT_START)
+                    edit.setLayoutDirection(View.LAYOUT_DIRECTION_LOCALE)
                 except Exception:
-                    pass
+                    try:
+                        edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
+                    except Exception:
+                        pass
                 if self._android_watcher is not None:
                     try:
                         edit.addTextChangedListener(self._android_watcher)
@@ -5175,7 +5148,7 @@ class SamsungNotesCompanionApp(App):
                     dialog.setOnDismissListener(self._android_dismiss)
                 try:
                     LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
-                    dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                    dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
                 except Exception:
                     pass
                 self._android_edit = edit
@@ -5193,6 +5166,7 @@ class SamsungNotesCompanionApp(App):
 
     def _finish_android_text(self, text: str, accept: bool) -> None:
         Clock.unschedule(self._poll_android_text_dialog)
+        self._restore_kivy_softinput()
         target = getattr(self, "_android_text_target", None)
         self._android_text_target = None
         self._android_dialog_result = None
