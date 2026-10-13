@@ -2006,6 +2006,14 @@ class SPenAnnotationCanvas(Widget):
         fit_y = self.y + self.height - notebook_h * scale
         self._set_pan(mid[0] - fit_x - doc_x * scale, mid[1] - fit_y - doc_y * scale)
 
+    def _launch_text_tool(self, doc: Point) -> None:
+        app = App.get_running_app()
+        hit = self._hit_object(doc)
+        if hit is not None and self.strokes[hit].get("kind") == "text":
+            app.prompt_text_record(self, hit)
+            return
+        app.prompt_new_text(self, doc)
+
     def _begin_two_finger_view(self, touch: MotionEvent) -> None:
         self._cancel_paste_hold()
         app = App.get_running_app()
@@ -2019,6 +2027,8 @@ class SPenAnnotationCanvas(Widget):
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
+        if _is_hover_touch(touch):
+            return False
         app = App.get_running_app()
         kind = self._classify(touch)
         if kind == "wheel":
@@ -2030,11 +2040,12 @@ class SPenAnnotationCanvas(Widget):
         layout = getattr(app, "root_layout", None)
         if layout is not None:
             layout.hide_paste_chip()
-        self._arm_paste_hold(touch)
+        tool_mode = str(getattr(app, "tool_mode", "none"))
+        if tool_mode != "text":
+            self._arm_paste_hold(touch)
         if len(app._pointers) >= 2:
             self._begin_two_finger_view(touch)
             return True
-        tool_mode = str(getattr(app, "tool_mode", "none"))
         doc = self.to_doc(touch.x, touch.y)
         if tool_mode == "lasso":
             handle = self._hit_handle(doc)
@@ -2117,6 +2128,8 @@ class SPenAnnotationCanvas(Widget):
             self._sync_live()
             touch.ud["mode"] = "text"
             touch.ud["text_doc"] = doc
+            self._launch_text_tool(doc)
+            touch.ud["text_opened"] = True
             return True
         color = tuple(getattr(app, "current_color", COLOR_BLACK))[:3]
         opacity = max(0.12, min(1.0, float(getattr(app, "ink_opacity", 1.0))))
@@ -2228,12 +2241,8 @@ class SPenAnnotationCanvas(Widget):
         if touch.ud.get("mode") == "text":
             self.current_stroke = []
             self._sync_live()
-            doc = touch.ud.get("text_doc", self.to_doc(touch.x, touch.y))
-            hit = self._hit_object(doc)
-            if hit is not None and self.strokes[hit].get("kind") == "text":
-                App.get_running_app().prompt_text_record(self, hit)
-            else:
-                App.get_running_app().prompt_new_text(self, doc)
+            if not touch.ud.get("text_opened"):
+                self._launch_text_tool(touch.ud.get("text_doc", self.to_doc(touch.x, touch.y)))
             return True
         if touch.ud.get("mode") == "lasso":
             poly = list(self.current_stroke)
@@ -4836,12 +4845,26 @@ class SamsungNotesCompanionApp(App):
     def _prompt_text(
         self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
     ) -> None:
+        opened = False
         if is_android():
             try:
                 self._show_android_text_dialog(canvas, doc, existing)
-                return
+                opened = True
             except Exception:
-                pass
+                opened = False
+        if not opened:
+            self.root_layout.show_text_overlay(canvas, doc, existing)
+            return
+        Clock.schedule_once(
+            lambda _dt: self._ensure_text_editor_visible(canvas, doc, existing),
+            0.45,
+        )
+
+    def _ensure_text_editor_visible(
+        self, canvas: SPenAnnotationCanvas, doc: Point, existing: Optional[int]
+    ) -> None:
+        if getattr(self, "_android_dialog_visible", False):
+            return
         self.root_layout.show_text_overlay(canvas, doc, existing)
 
     def _ensure_android_text_listeners(self) -> None:
@@ -4968,6 +4991,7 @@ class SamsungNotesCompanionApp(App):
 
         self._android_text_target = (canvas, doc, existing, font_size)
         self._android_dialog_result = None
+        self._android_dialog_visible = False
         self._android_typed = initial
         self._android_poll_ticks = 0
         Clock.unschedule(self._poll_android_text_dialog)
@@ -5040,6 +5064,7 @@ class SamsungNotesCompanionApp(App):
             dialog.show()
             self._android_dialog = dialog
             self._android_edit = edit
+            self._android_dialog_visible = True
             edit.requestFocus()
             try:
                 imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
