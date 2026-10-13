@@ -3079,9 +3079,12 @@ class RootLayout(FloatLayout):
         self.text_field.text = initial
         self.text_overlay.disabled = False
         self.text_overlay.opacity = 1
-        self.text_overlay.pos_hint = {"x": 0, "y": 0}
-        self.text_overlay.y = 0
+        self.text_overlay.pos_hint = {}
         self.text_overlay.height = dp(168)
+        self.text_overlay.x = float(self.x)
+        self.text_overlay.width = float(self.width)
+        top = float(self.chrome.y) if self.toolbar_visible else float(self.top)
+        self.text_overlay.top = max(self.text_overlay.height, top)
         focus_system_keyboard(self.text_field)
 
     def _commit_text_overlay(self, *_args: Any) -> None:
@@ -5090,35 +5093,24 @@ class SamsungNotesCompanionApp(App):
                     pass
 
                 edit = EditText(activity)
-                try:
-                    Typeface = autoclass("android.graphics.Typeface")
-                    font_path = _first_existing(
-                        (
-                            "/system/fonts/Roboto-Regular.ttf",
-                            "/system/fonts/NotoSans-Regular.ttf",
-                            "/system/fonts/DroidSans.ttf",
-                        )
-                    )
-                    if font_path:
-                        edit.setTypeface(Typeface.createFromFile(font_path))
-                    else:
-                        edit.setTypeface(Typeface.DEFAULT)
-                except Exception:
-                    pass
                 edit.setText(String(initial))
                 edit.setHint(String("כתבו טקסט"))
-                edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE)
+                edit.setInputType(
+                    InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    | InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE
+                )
                 try:
-                    edit.setImeOptions(EditorInfo.IME_ACTION_NONE)
+                    edit.setImeOptions(EditorInfo.IME_FLAG_NO_ENTER_ACTION)
                 except Exception:
                     pass
                 edit.setMinLines(3)
-                edit.setGravity(Gravity.LEFT | Gravity.TOP)
+                edit.setGravity(Gravity.TOP | Gravity.LEFT)
                 edit.setFocusable(True)
                 edit.setFocusableInTouchMode(True)
                 try:
                     edit.setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
-                    edit.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG)
+                    edit.setTextDirection(View.TEXT_DIRECTION_LTR)
                     edit.setTextAlignment(View.TEXT_ALIGNMENT_GRAVITY)
                 except Exception:
                     pass
@@ -5153,9 +5145,20 @@ class SamsungNotesCompanionApp(App):
                     dialog.setOnShowListener(self._android_show)
                 if self._android_dismiss is not None:
                     dialog.setOnDismissListener(self._android_dismiss)
+                win = dialog.getWindow()
+                try:
+                    win.getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_LTR)
+                except Exception:
+                    pass
                 try:
                     LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
-                    dialog.getWindow().setSoftInputMode(LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+                    ViewGroup = autoclass("android.view.ViewGroup")
+                    win.setGravity(Gravity.TOP | Gravity.FILL_HORIZONTAL)
+                    win.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    win.setSoftInputMode(
+                        LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                        | LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    )
                 except Exception:
                     pass
                 self._android_edit = edit
