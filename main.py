@@ -71,6 +71,8 @@ MIN_SCALE = 0.45
 MAX_SCALE = 6.0
 PDF_RENDER_SCALE = 2.0
 PDF_RENDER_MAX_SIDE = 2048.0
+PDF_PREVIEW_SCALE = 1.15
+PDF_PREVIEW_MAX_SIDE = 1280.0
 PAGE_GAP = 28.0
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
@@ -87,7 +89,7 @@ INK_COLORS: Sequence[Tuple[str, Rgba]] = (
     ("purple", COLOR_PURPLE),
 )
 SHAPE_TOOLS = frozenset({"line", "square", "rectangle", "circle", "triangle", "star"})
-CHROME_HEIGHT_DP = 124.0
+CHROME_HEIGHT_DP = 164.0
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
 
@@ -478,6 +480,44 @@ class ColorDot(ButtonBehavior, Widget):
         self._ring_line.circle = (cx, cy, radius)
 
 
+class SliderGlyph(Widget):
+    """Tiny legend next to a slider: width, opacity, or dash gap."""
+
+    kind = StringProperty("width")
+    amount = NumericProperty(1.0)
+
+    def __init__(self, kind: str, **kwargs: Any) -> None:
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("size", (dp(28), dp(28)))
+        super().__init__(**kwargs)
+        self.kind = kind
+        self.bind(pos=self._redraw, size=self._redraw, amount=self._redraw, kind=self._redraw)
+        Clock.schedule_once(lambda _dt: self._redraw(), 0)
+
+    def _redraw(self, *_args: Any) -> None:
+        self.canvas.clear()
+        cx, cy = self.center_x, self.center_y
+        with self.canvas:
+            Color(1, 1, 1, 1)
+            kind = self.kind
+            if kind == "width":
+                thick = max(1.2, min(8.0, float(self.amount) * 0.45))
+                Line(points=[self.x + dp(3), cy, self.right - dp(3), cy], width=thick)
+            elif kind == "opacity":
+                Color(1, 1, 1, max(0.15, min(1.0, float(self.amount))))
+                Ellipse(pos=(cx - dp(8), cy - dp(8)), size=(dp(16), dp(16)))
+                Color(1, 1, 1, 1)
+                Line(circle=(cx, cy, dp(8)), width=1.1)
+            else:
+                gap = max(4.0, float(self.amount) * 0.35)
+                x = self.x + dp(3)
+                right = self.right - dp(3)
+                while x < right:
+                    end = min(right, x + dp(6))
+                    Line(points=[x, cy, end, cy], width=1.3)
+                    x = end + gap
+
+
 class SPenAnnotationCanvas(Widget):
     """Page-aligned canvas: one contact draws, two contacts pan/pinch."""
 
@@ -594,6 +634,24 @@ class SPenAnnotationCanvas(Widget):
             app.page_count = max(1, len(textures))
         self.redraw_all()
 
+    def set_page_image_at(self, index: int, path: str, total: int) -> None:
+        from PIL import Image
+
+        total = max(1, int(total))
+        while len(self._page_textures) < total:
+            self._page_textures.append(None)
+        try:
+            texture = _pil_to_texture(_image_rgb_on_white(Image.open(path)))
+        except Exception:
+            return
+        self._page_textures[index] = texture
+        app = App.get_running_app()
+        if index == 0 or float(app.page_width) <= 1:
+            app.page_width = float(texture.size[0])
+            app.page_height = float(texture.size[1])
+        app.page_count = total
+        self.redraw_all()
+
     def set_blank_notebook(self, count: int, width: float = 0.0, height: float = 0.0) -> None:
         self._page_textures = []
         app = App.get_running_app()
@@ -671,7 +729,11 @@ class SPenAnnotationCanvas(Widget):
             return
         Color(*color)
         if record.get("dashed"):
-            for dash in dashed_polylines(points):
+            for dash in dashed_polylines(
+                points,
+                float(record.get("dash_len", DASH_LENGTH)),
+                float(record.get("gap_len", GAP_LENGTH)),
+            ):
                 Line(points=dash, width=width, cap="round", joint="round")
         else:
             flat: List[float] = []
@@ -718,6 +780,8 @@ class SPenAnnotationCanvas(Widget):
                         "color": list(self._live_color),
                         "width": self._live_width,
                         "dashed": self._live_dashed,
+                        "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
+                        "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
                     }
                 )
             PopMatrix()
@@ -853,6 +917,8 @@ class SPenAnnotationCanvas(Widget):
         self._live_color = (color[0], color[1], color[2], opacity)
         self._live_width = self._line_width_for_touch(touch)
         self._live_dashed = bool(getattr(app, "is_dashed", False))
+        self._live_dash_len = float(getattr(app, "dash_length", DASH_LENGTH))
+        self._live_gap_len = float(getattr(app, "dash_gap", GAP_LENGTH))
         if tool_mode in SHAPE_TOOLS:
             touch.ud["shape"] = tool_mode
             touch.ud["shape_start"] = doc
@@ -924,6 +990,8 @@ class SPenAnnotationCanvas(Widget):
                     "color": list(self._live_color),
                     "width": self._live_width,
                     "dashed": self._live_dashed,
+                    "dash_len": getattr(self, "_live_dash_len", DASH_LENGTH),
+                    "gap_len": getattr(self, "_live_gap_len", GAP_LENGTH),
                     "eraser": False,
                 }
             )
@@ -969,6 +1037,7 @@ class RootLayout(FloatLayout):
         self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
         self.chrome.add_widget(self._build_shape_bar())
+        self.chrome.add_widget(self._build_slider_bar())
         self.restore_btn = ToolIcon(
             "restore",
             on_dark=True,
@@ -1108,28 +1177,40 @@ class RootLayout(FloatLayout):
             button.bind(on_press=lambda _btn, name=kind: app.select_shape(name))
             bar.add_widget(button)
             self.tool_buttons[kind] = button
-        width_slider = Slider(
-            min=1.0,
-            max=16.0,
-            value=float(app.ink_width),
-            step=0.5,
-            size_hint_x=None,
-            width=dp(110),
+        bar.add_widget(Widget())
+        return bar
+
+    def _make_slider(
+        self, kind: str, minimum: float, maximum: float, value: float, on_change: Any
+    ) -> BoxLayout:
+        cluster = BoxLayout(orientation="horizontal", size_hint_x=None, width=dp(138), spacing=dp(2))
+        glyph = SliderGlyph(kind, amount=value)
+        slider = Slider(min=minimum, max=maximum, value=value, size_hint_x=1)
+        slider.bind(value=lambda _slider, amount, g=glyph, cb=on_change: (setattr(g, "amount", amount), cb(amount)))
+        cluster.add_widget(glyph)
+        cluster.add_widget(slider)
+        return cluster
+
+    def _build_slider_bar(self) -> BoxLayout:
+        app = App.get_running_app()
+        bar = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            padding=(dp(8), dp(4)),
+            spacing=dp(8),
         )
-        width_slider.bind(value=lambda _slider, value: app.set_ink_width(value))
-        opacity_slider = Slider(
-            min=0.15,
-            max=1.0,
-            value=float(app.ink_opacity),
-            step=0.05,
-            size_hint_x=None,
-            width=dp(110),
+        with bar.canvas.before:
+            Color(*TOOLBAR_BG)
+            self._slider_bg = Rectangle()
+        bar.bind(
+            pos=lambda *_args: setattr(self._slider_bg, "pos", bar.pos),
+            size=lambda *_args: setattr(self._slider_bg, "size", bar.size),
         )
-        opacity_slider.bind(value=lambda _slider, value: app.set_ink_opacity(value))
-        bar.add_widget(width_slider)
-        bar.add_widget(opacity_slider)
-        self.width_slider = width_slider
-        self.opacity_slider = opacity_slider
+        bar.add_widget(self._make_slider("width", 1.0, 16.0, float(app.ink_width), app.set_ink_width))
+        bar.add_widget(self._make_slider("opacity", 0.15, 1.0, float(app.ink_opacity), app.set_ink_opacity))
+        bar.add_widget(self._make_slider("dash", 4.0, 40.0, float(app.dash_gap), app.set_dash_gap))
+        bar.add_widget(Widget())
         return bar
 
     def hide_toolbar(self, *_args: Any) -> None:
@@ -1241,8 +1322,13 @@ class SamsungNotesCompanionApp(App):
         self.current_color: Rgba = COLOR_BLACK
         self.ink_width: float = 2.5
         self.ink_opacity: float = 1.0
+        self.dash_length: float = DASH_LENGTH
+        self.dash_gap: float = GAP_LENGTH
         self.is_eraser: bool = False
         self.is_dashed: bool = False
+        self._preview_token: int = 0
+        self._preview_renderer: Any = None
+        self._preview_pfd: Any = None
         self.spen_button_held: bool = False
         self.pointer_count = 1
         self.down_tool_type = 0
@@ -1621,14 +1707,18 @@ class SamsungNotesCompanionApp(App):
         pfd.close()
         return count
 
-    def _bitmap_to_png(self, bitmap: Any) -> Optional[str]:
+    def _bitmap_to_file(self, bitmap: Any, jpeg: bool = False) -> Optional[str]:
         from jnius import autoclass
 
-        handle = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        suffix = ".jpg" if jpeg else ".png"
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         handle.close()
         stream = autoclass("java.io.FileOutputStream")(handle.name)
         fmt = autoclass("android.graphics.Bitmap$CompressFormat")
-        ok = bool(bitmap.compress(fmt.PNG, 100, stream))
+        if jpeg:
+            ok = bool(bitmap.compress(fmt.JPEG, 82, stream))
+        else:
+            ok = bool(bitmap.compress(fmt.PNG, 100, stream))
         stream.close()
         if not ok:
             return None
@@ -1648,12 +1738,15 @@ class SamsungNotesCompanionApp(App):
         matrix.setScale(width / page_w, height / page_h)
         page.render(bitmap, clip, matrix, mode)
 
-    def _render_opened_page(self, page: Any) -> Optional[str]:
+    def _render_opened_page(self, page: Any, for_export: bool = False) -> Optional[str]:
         from jnius import autoclass
 
         page_w = max(1.0, float(page.getWidth()))
         page_h = max(1.0, float(page.getHeight()))
-        scale = min(PDF_RENDER_SCALE, PDF_RENDER_MAX_SIDE / max(page_w, page_h))
+        if for_export:
+            scale = min(PDF_RENDER_SCALE, PDF_RENDER_MAX_SIDE / max(page_w, page_h))
+        else:
+            scale = min(PDF_PREVIEW_SCALE, PDF_PREVIEW_MAX_SIDE / max(page_w, page_h))
         width = max(1, int(round(page_w * scale)))
         height = max(1, int(round(page_h * scale)))
         bitmap_cls = autoclass("android.graphics.Bitmap")
@@ -1664,7 +1757,7 @@ class SamsungNotesCompanionApp(App):
         paint.setARGB(255, 255, 255, 255)
         canvas.drawRect(0.0, 0.0, float(width), float(height), paint)
         self._call_page_render(page, bitmap)
-        path = self._bitmap_to_png(bitmap)
+        path = self._bitmap_to_file(bitmap, jpeg=not for_export)
         try:
             bitmap.recycle()
         except Exception:
@@ -1686,7 +1779,7 @@ class SamsungNotesCompanionApp(App):
             for index in range(count):
                 page = renderer.openPage(int(index))
                 try:
-                    path = self._render_opened_page(page)
+                    path = self._render_opened_page(page, for_export=False)
                     if path:
                         paths.append(path)
                 except Exception as exc:
@@ -1704,7 +1797,7 @@ class SamsungNotesCompanionApp(App):
             pfd = self._open_pdf_pfd(uri)
             renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
             page = renderer.openPage(int(index))
-            path = self._render_opened_page(page)
+            path = self._render_opened_page(page, for_export=True)
             page.close()
             renderer.close()
             pfd.close()
@@ -1768,33 +1861,95 @@ class SamsungNotesCompanionApp(App):
         self.notes_pan_y = 0.0
         Clock.schedule_once(lambda _dt: self.clamp_view(), 0)
 
+    def _close_preview_renderer(self) -> None:
+        renderer = getattr(self, "_preview_renderer", None)
+        pfd = getattr(self, "_preview_pfd", None)
+        self._preview_renderer = None
+        self._preview_pfd = None
+        if renderer is not None:
+            try:
+                renderer.close()
+            except Exception:
+                pass
+        if pfd is not None:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+
     def _load_notebook(self, uri: Any = None) -> None:
         if uri is not None and (not self.pdf_path or str(self.pdf_path).startswith("content:")):
             self.pdf_path = self._copy_uri_to_temp(uri, ".pdf")
+        self._preview_token += 1
+        token = self._preview_token
+        self._close_preview_renderer()
         try:
-            paths, error = self._render_pdf_pages()
+            from jnius import autoclass
+
+            pfd = self._open_pdf_pfd()
+            renderer = autoclass("android.graphics.pdf.PdfRenderer")(pfd)
+            count = int(renderer.getPageCount())
         except Exception as exc:
-            paths, error = [], str(exc)
-        self.page_count = max(1, int(self._pdf_page_count or 1))
-        if paths:
-            self.root_layout.pdf_canvas.set_page_images(paths)
-            if not self.root_layout.pdf_canvas._page_textures:
-                self._notify("ה-PDF נפתח אבל טעינת התמונות נכשלה")
-        else:
-            self.root_layout.pdf_canvas.set_blank_notebook(
-                self._pdf_page_count, self.page_width, self.page_height
-            )
-            self._notify_long(f"לא ניתן לרנדר את ה-PDF: {error or 'שגיאה לא ידועה'}")
-        self.root_layout.notes_canvas.set_blank_notebook(self._pdf_page_count)
+            self._pdf_page_count = 0
+            self.page_count = 1
+            self.root_layout.pdf_canvas.set_blank_notebook(1, self.page_width, self.page_height)
+            self.root_layout.notes_canvas.set_blank_notebook(1)
+            self._notify_long(f"לא ניתן לפתוח את ה-PDF: {exc}")
+            return
+        if count <= 0:
+            renderer.close()
+            pfd.close()
+            self._notify_long("PdfRenderer reported 0 pages")
+            return
+        self._pdf_page_count = count
+        self.page_count = count
+        self._preview_pfd = pfd
+        self._preview_renderer = renderer
+        self.root_layout.pdf_canvas.set_blank_notebook(count, self.page_width, self.page_height)
+        self.root_layout.notes_canvas.set_blank_notebook(count)
         self.root_layout.sync_notes_page_size()
-        self.root_layout.pdf_canvas.load_strokes(
-            self._pages_to_stacked(self._page_strokes)
-        )
-        self.root_layout.notes_canvas.load_strokes(
-            self._pages_to_stacked(self._notes_strokes)
-        )
-        Clock.schedule_once(lambda _dt: self.root_layout.sync_notes_page_size(), 0)
-        self.root_layout.set_page_status(0, self._pdf_page_count)
+        self.root_layout.pdf_canvas.load_strokes(self._pages_to_stacked(self._page_strokes))
+        self.root_layout.notes_canvas.load_strokes(self._pages_to_stacked(self._notes_strokes))
+        self.root_layout.set_status(f"טוען 0/{count}")
+        Clock.schedule_once(lambda _dt: self._preview_next_page(token, 0), 0)
+
+    def _preview_next_page(self, token: int, index: int) -> None:
+        if token != self._preview_token:
+            return
+        renderer = self._preview_renderer
+        count = int(self._pdf_page_count or 0)
+        if renderer is None or index >= count:
+            self._close_preview_renderer()
+            self.root_layout.set_page_status(0, count)
+            textures = self.root_layout.pdf_canvas._page_textures
+            if count > 0 and any(tex is not None for tex in textures):
+                self._notify(f"PDF נפתח לכתיבה: {self.document_title}")
+            elif count > 0:
+                self._notify("ה-PDF נפתח אבל טעינת התמונות נכשלה")
+            return
+        path = None
+        try:
+            page = renderer.openPage(int(index))
+            try:
+                path = self._render_opened_page(page, for_export=False)
+            finally:
+                page.close()
+            if path:
+                self.root_layout.pdf_canvas.set_page_image_at(index, path, count)
+                if index == 0:
+                    self.root_layout.sync_notes_page_size()
+                    Clock.schedule_once(lambda _dt: self.root_layout.sync_notes_page_size(), 0)
+            self.root_layout.set_status(f"טוען {index + 1}/{count}")
+        except Exception as exc:
+            if index == 0:
+                self._notify_long(f"לא ניתן לרנדר את ה-PDF: {exc}")
+        finally:
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+        Clock.schedule_once(lambda _dt: self._preview_next_page(token, index + 1), 0)
 
     def _uri_display_name(self, uri: Any) -> str:
         try:
@@ -1841,10 +1996,9 @@ class SamsungNotesCompanionApp(App):
         self._pdf_page_count = 0
         self.root_layout.pdf_canvas.load_strokes([])
         self.root_layout.notes_canvas.load_strokes([])
-        self._load_notebook()
         self._set_title_from_filename(display)
-        if self.root_layout.pdf_canvas._page_textures:
-            self._notify(f"PDF נפתח לכתיבה: {display}")
+        self._notify(f"טוען PDF: {display}")
+        self._load_notebook()
 
     def _open_android_uri(self, uri: Any) -> None:
         display = self._uri_display_name(uri)
@@ -1962,7 +2116,11 @@ class SamsungNotesCompanionApp(App):
                 (float(p[0]) * scale_x, height - float(p[1]) * scale_y) for p in points
             ]
             if record.get("dashed"):
-                dashes = dashed_polylines(points)
+                dashes = dashed_polylines(
+                    points,
+                    float(record.get("dash_len", DASH_LENGTH)),
+                    float(record.get("gap_len", GAP_LENGTH)),
+                )
                 for dash in dashes:
                     pair = [
                         (dash[i] * scale_x, height - dash[i + 1] * scale_y)
@@ -2323,6 +2481,9 @@ class SamsungNotesCompanionApp(App):
 
     def set_ink_opacity(self, value: float, *_args: Any) -> None:
         self.ink_opacity = max(0.15, min(1.0, float(value)))
+
+    def set_dash_gap(self, value: float, *_args: Any) -> None:
+        self.dash_gap = max(4.0, min(40.0, float(value)))
 
     def select_shape(self, kind: str, *_args: Any) -> None:
         if kind not in SHAPE_TOOLS:
