@@ -3222,6 +3222,8 @@ class FolderFlowChart(Widget):
         self._selected = ""
         self._hits: List[Tuple[str, float, float, float, float]] = []
         self._drawing = False
+        self._picker: Optional[Any] = None
+        self._blocked: set = set()
         self.bind(pos=self._on_geom, size=self._on_geom)
 
     def _on_geom(self, *_args: Any) -> None:
@@ -3231,9 +3233,17 @@ class FolderFlowChart(Widget):
     def _metrics(self) -> Tuple[float, float, float, float]:
         return dp(52), dp(24), dp(8), dp(16)
 
-    def set_tree(self, root: Dict[str, Any], selected: str) -> None:
+    def set_tree(
+        self,
+        root: Dict[str, Any],
+        selected: str,
+        on_pick: Optional[Any] = None,
+        blocked: Optional[set] = None,
+    ) -> None:
         self._root = root or {"id": "", "name": "הספרייה", "color": "#9AA0A8", "children": []}
         self._selected = str(selected or "")
+        self._picker = on_pick
+        self._blocked = {str(item) for item in (blocked or set())}
         self._measure(self._root)
         self._layout_centered()
         parent = self.parent
@@ -3250,7 +3260,7 @@ class FolderFlowChart(Widget):
         self.width = max(host_w, content_w + pad * 2)
         self.height = max(host_h, content_h + pad * 2)
         left = self.x + (self.width - content_w) / 2.0
-        top = self.y + (self.height + content_h) / 2.0
+        top = self.y + self.height - pad
         self._place(self._root, left, top)
 
     def _measure(self, node: Dict[str, Any]) -> None:
@@ -3334,7 +3344,9 @@ class FolderFlowChart(Widget):
             cy = float(child.get("_y") or 0) + float(child.get("_nh") or dp(24))
             Color(0.45, 0.48, 0.54, 0.9)
             Line(points=[px, py, px, (py + cy) / 2.0, cx, (py + cy) / 2.0, cx, cy], width=1.0)
-        if selected:
+        if fid in self._blocked:
+            Color(rgba[0], rgba[1], rgba[2], 0.28)
+        elif selected:
             Color(0.35, 0.52, 0.82, 1)
         else:
             Color(*rgba)
@@ -3353,10 +3365,14 @@ class FolderFlowChart(Widget):
             self._draw_node(child)
 
     def select_at(self, x: float, y: float) -> bool:
-        app = App.get_running_app()
         for fid, nx, ny, nw, nh in reversed(self._hits):
             if nx <= x <= nx + nw and ny <= y <= ny + nh:
-                app.select_library_folder(fid or LIBRARY_ALL)
+                if fid in self._blocked:
+                    return True
+                if callable(self._picker):
+                    self._picker(fid)
+                    return True
+                App.get_running_app().select_library_folder(fid or LIBRARY_ALL)
                 return True
         return False
 
@@ -3454,19 +3470,6 @@ class LibraryScreen(Screen):
         )
         self.header.add_widget(self.title)
         self.header.add_widget(Widget())
-        self.move_btn = Button(
-            text=mixed_markup("העברה"),
-            markup=True,
-            size_hint=(None, 1),
-            width=dp(78),
-            background_normal="",
-            background_down="",
-            background_color=(0.26, 0.28, 0.32, 1),
-            color=(0.72, 0.82, 0.98, 1),
-            font_size=dp(14),
-        )
-        self.move_btn.bind(on_release=lambda *_a: App.get_running_app().toggle_library_move_mode())
-        self.header.add_widget(self.move_btn)
         self.header.add_widget(
             ToolIcon("folder", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().create_library_folder())
         )
@@ -3527,10 +3530,8 @@ class LibraryScreen(Screen):
         app = App.get_running_app()
         data = app.library_data()
         selected = str(getattr(app, "_library_folder", LIBRARY_ALL) or LIBRARY_ALL)
-        moving = bool(getattr(app, "_library_moving", False))
         picked = set(getattr(app, "_library_move_ids", set()) or [])
         self.body.clear_widgets()
-        self.move_btn.text = mixed_markup("ביטול" if moving else "העברה")
         current = app._library_parent_id(selected)
         self._fill_tree(app, data, current)
         child_folders = app._child_folders(data, current)
@@ -3552,7 +3553,7 @@ class LibraryScreen(Screen):
                 background_color=(0.26, 0.28, 0.32, 1),
                 color=(0.82, 0.86, 0.94, 1),
             )
-            back.bind(on_release=lambda *_a, pid=parent_id: app.select_library_folder(pid or LIBRARY_ALL))
+            back.bind(on_release=lambda *_a: app.library_go_back())
             back_row.add_widget(Widget())
             back_row.add_widget(back)
             self.body.add_widget(back_row)
@@ -3575,29 +3576,7 @@ class LibraryScreen(Screen):
             self.body.add_widget(note_grid)
 
     def _fill_tree(self, app: Any, data: Dict[str, Any], current: str) -> None:
-        def _branch(parent_id: str) -> List[Dict[str, Any]]:
-            nodes: List[Dict[str, Any]] = []
-            for folder in app._child_folders(data, parent_id):
-                folder_id = str(folder.get("id") or "")
-                nodes.append(
-                    {
-                        "id": folder_id,
-                        "name": str(folder.get("name") or "תיקייה"),
-                        "color": str(folder.get("color") or "#9AA0A8"),
-                        "children": _branch(folder_id),
-                    }
-                )
-            return nodes
-
-        self.tree_chart.set_tree(
-            {
-                "id": "",
-                "name": "הספרייה",
-                "color": "#9AA0A8",
-                "children": _branch(""),
-            },
-            current,
-        )
+        self.tree_chart.set_tree(app._folder_tree_nodes(data), current)
 
 
 class RootLayout(FloatLayout):
@@ -4257,7 +4236,11 @@ class SamsungNotesCompanionApp(App):
         editor.add_widget(self.root_layout)
         self._sm.add_widget(self.library_screen)
         self._sm.add_widget(editor)
-        Window.bind(on_key_down=self._on_key_down, on_key_up=self._on_key_up)
+        Window.bind(
+            on_key_down=self._on_key_down,
+            on_key_up=self._on_key_up,
+            on_keyboard=self._on_keyboard,
+        )
         if is_android():
             self._setup_android()
         Clock.schedule_interval(lambda _dt: self._autosave_library_doc(), 20.0)
@@ -4362,6 +4345,28 @@ class SamsungNotesCompanionApp(App):
         _walk(parent_id, 0)
         return rows
 
+    def _folder_tree_nodes(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        def _branch(parent_id: str) -> List[Dict[str, Any]]:
+            nodes: List[Dict[str, Any]] = []
+            for folder in self._child_folders(data, parent_id):
+                folder_id = str(folder.get("id") or "")
+                nodes.append(
+                    {
+                        "id": folder_id,
+                        "name": str(folder.get("name") or "תיקייה"),
+                        "color": str(folder.get("color") or "#9AA0A8"),
+                        "children": _branch(folder_id),
+                    }
+                )
+            return nodes
+
+        return {
+            "id": "",
+            "name": "הספרייה",
+            "color": "#9AA0A8",
+            "children": _branch(""),
+        }
+
     def _folder_tree_doc_ids(self, data: Dict[str, Any], folder_id: str) -> List[str]:
         ids = [str(item.get("id") or "") for item in self._docs_in_folder(data, folder_id)]
         for child_id in self._folder_descendants(data, folder_id):
@@ -4384,6 +4389,23 @@ class SamsungNotesCompanionApp(App):
     def select_library_folder(self, folder_id: str) -> None:
         self._library_folder = str(folder_id or LIBRARY_ALL)
         self.library_screen.refresh()
+
+    def library_go_back(self) -> bool:
+        if getattr(self, "_sm", None) is not None and self._sm.current == "editor":
+            self.show_library()
+            return True
+        if self._library_moving:
+            self._library_moving = False
+            self._library_move_ids = set()
+            self.library_screen.refresh()
+            return True
+        current = self._library_parent_id()
+        if not current:
+            return False
+        folder = self._folder_by_id(self.library_data(), current)
+        parent_id = str((folder or {}).get("parent_id") or "") or LIBRARY_ALL
+        self.select_library_folder(parent_id)
+        return True
 
     def on_library_note_tap(self, doc_id: str) -> None:
         if self._library_moving:
@@ -4575,12 +4597,12 @@ class SamsungNotesCompanionApp(App):
         return data
 
     def _pick_library_destination(self, heading: str, on_pick: Any, exclude: Optional[set] = None) -> None:
-        blocked = set(exclude or set())
+        blocked = {str(item) for item in (exclude or set())}
         data = self.library_data()
         body = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
-        popup = Popup(title="", content=body, size_hint=(0.86, 0.72), separator_height=0, background_color=(0, 0, 0, 0))
+        popup = Popup(title="", content=body, size_hint=(0.9, 0.82), separator_height=0, background_color=(0, 0, 0, 0))
         with body.canvas.before:
-            Color(0.20, 0.21, 0.24, 1)
+            Color(0.14, 0.15, 0.18, 1)
             sheet = RoundedRectangle(radius=[dp(22)])
         body.bind(
             pos=lambda *_a: setattr(sheet, "pos", body.pos),
@@ -4595,48 +4617,23 @@ class SamsungNotesCompanionApp(App):
             size_hint_y=None,
             height=dp(32),
         )
-        grid = GridLayout(cols=3, spacing=dp(8), size_hint_y=None)
-        grid.bind(minimum_height=grid.setter("height"))
-        scroller = ScrollView(do_scroll_x=False, size_hint_y=1)
-        scroller.add_widget(grid)
+        hint = Label(
+            text=mixed_markup("בחרי תיקייה בעץ"),
+            markup=True,
+            color=(0.72, 0.74, 0.78, 1),
+            font_size=dp(13),
+            size_hint_y=None,
+            height=dp(22),
+        )
+        chart = FolderFlowChart()
+        scatter = TreeScatter(size_hint=(1, 1))
+        scatter.add_widget(chart)
 
         def _choose(folder_id: str) -> None:
             popup.dismiss()
             on_pick(folder_id)
 
-        options = [("", "הספרייה", "#9AA0A8")]
-        for folder in data.get("folders") or []:
-            folder_id = str(folder.get("id") or "")
-            if not folder_id or folder_id in blocked:
-                continue
-            options.append(
-                (
-                    folder_id,
-                    self._folder_path_label(data, folder_id),
-                    str(folder.get("color") or "#9AA0A8"),
-                )
-            )
-        for folder_id, label_text, color in options:
-            tile = _HoldButton(
-                on_tap=lambda fid=folder_id: _choose(fid),
-                size_hint_y=None,
-                height=dp(120),
-            )
-            glyph = FolderGlyph(color)
-            glyph.pos_hint = {"center_x": 0.5, "top": 0.92}
-            label = Label(
-                text=mixed_markup(_short_label(label_text, 14)),
-                markup=True,
-                color=(0.88, 0.90, 0.93, 1),
-                font_size=dp(12),
-                halign="center",
-                size_hint=(1, None),
-                height=dp(34),
-                pos_hint={"x": 0, "y": 0.02},
-            )
-            tile.add_widget(glyph)
-            tile.add_widget(label)
-            grid.add_widget(tile)
+        chart.set_tree(self._folder_tree_nodes(data), "", on_pick=_choose, blocked=blocked)
         cancel = Button(
             text=mixed_markup("ביטול"),
             markup=True,
@@ -4649,7 +4646,8 @@ class SamsungNotesCompanionApp(App):
         )
         cancel.bind(on_release=lambda *_a: popup.dismiss())
         body.add_widget(title)
-        body.add_widget(scroller)
+        body.add_widget(hint)
+        body.add_widget(scatter)
         body.add_widget(cancel)
         popup.open()
         apply_hebrew_ui(popup, heading)
@@ -4932,6 +4930,23 @@ class SamsungNotesCompanionApp(App):
         return str(path)
 
     def _copy_share_into_cache(self, activity: Any, src: str) -> str:
+        name = Path(src).name or f"note-{uuid.uuid4().hex[:8]}.pdf"
+        try:
+            from jnius import autoclass
+
+            File = autoclass("java.io.File")
+            folder = File(activity.getCacheDir(), "share")
+            folder.mkdirs()
+            dest = File(folder, name)
+            source = autoclass("java.io.FileInputStream")(str(src))
+            output = autoclass("java.io.FileOutputStream")(dest)
+            autoclass("android.os.FileUtils").copy(source, output)
+            source.close()
+            output.close()
+            if dest.exists() and dest.length() > 0:
+                return str(dest.getAbsolutePath())
+        except Exception:
+            pass
         folders: List[Path] = []
         try:
             folders.append(Path(str(activity.getCacheDir().getAbsolutePath())) / "share")
@@ -4945,7 +4960,6 @@ class SamsungNotesCompanionApp(App):
             pass
         folders.append(self._share_cache_dir())
         last_error: Optional[Exception] = None
-        name = Path(src).name or f"note-{uuid.uuid4().hex[:8]}.pdf"
         for folder in folders:
             try:
                 folder.mkdir(parents=True, exist_ok=True)
@@ -5137,6 +5151,7 @@ class SamsungNotesCompanionApp(App):
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        self._share_keep = [list(uris), intent, clip, chooser]
 
         @run_on_ui_thread
         def _open() -> None:
@@ -5440,6 +5455,22 @@ class SamsungNotesCompanionApp(App):
         except (TypeError, ValueError):
             pass
         return False
+
+    def _on_keyboard(self, _window: Any, key: Any, *_args: Any, **_kwargs: Any) -> bool:
+        try:
+            code = int(key)
+        except (TypeError, ValueError):
+            return False
+        if code in {27, 4, 1001}:
+            return self._handle_hardware_back()
+        return False
+
+    def _handle_hardware_back(self) -> bool:
+        for child in reversed(list(Window.children)):
+            if isinstance(child, Popup):
+                child.dismiss()
+                return True
+        return self.library_go_back()
 
     def _on_key_up(self, *_args: Any, **kwargs: Any) -> bool:
         key = _args[1] if len(_args) > 1 else None

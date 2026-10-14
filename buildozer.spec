@@ -73,6 +73,11 @@ android.allow_backup = True
 # Needed so the system document picker (My Files / Drive) can return a URI.
 android.enable_androidx = True
 
+# Modern loading screen shown while Python starts.
+presplash.filename = assets/presplash.png
+icon.filename = assets/icon.png
+android.presplash_color = #101218
+
 [buildozer]
 
 # (int) Log level (0 = error only, 1 = info, 2 = debug)
