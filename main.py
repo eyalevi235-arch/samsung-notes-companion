@@ -3183,19 +3183,22 @@ class FolderFlowChart(Widget):
         self._hits: List[Tuple[str, float, float, float, float]] = []
         self.bind(pos=lambda *_a: self._redraw())
 
+    def _metrics(self) -> Tuple[float, float, float, float]:
+        return dp(76), dp(26), dp(10), dp(18)
+
     def set_tree(self, root: Dict[str, Any], selected: str) -> None:
         self._root = root or {"id": "", "name": "הספרייה", "color": "#9AA0A8", "children": []}
         self._selected = str(selected or "")
         self._measure(self._root)
-        pad = dp(6)
-        self.width = max(dp(80), float(self._root.get("_sw") or 0) + pad * 2)
-        self.height = max(dp(28), float(self._root.get("_sh") or 0) + pad * 2)
+        pad = dp(8)
+        self.width = max(dp(120), float(self._root.get("_sw") or 0) + pad * 2)
+        self.height = max(dp(48), float(self._root.get("_sh") or 0) + pad * 2)
         self._place(self._root, self.x + pad, self.y + self.height - pad)
         self._redraw()
 
     def _measure(self, node: Dict[str, Any]) -> None:
         kids = list(node.get("children") or [])
-        nw, nh, gx, gy = dp(58), dp(18), dp(6), dp(12)
+        nw, nh, gx, gy = self._metrics()
         if not kids:
             node["_sw"] = nw
             node["_sh"] = nh
@@ -3207,8 +3210,8 @@ class FolderFlowChart(Widget):
 
     def _place(self, node: Dict[str, Any], left: float, top: float) -> None:
         kids = list(node.get("children") or [])
-        nw, nh, gx, gy = dp(58), dp(18), dp(6), dp(12)
-        node["_x"] = left + (float(node["_sw"]) - nw) / 2.0
+        nw, nh, gx, gy = self._metrics()
+        node["_x"] = left
         node["_y"] = top - nh
         node["_nw"] = nw
         node["_nh"] = nh
@@ -3219,7 +3222,7 @@ class FolderFlowChart(Widget):
 
     def _redraw(self, *_args: Any) -> None:
         if self._root:
-            pad = dp(6)
+            pad = dp(8)
             self._place(self._root, self.x + pad, self.y + self.height - pad)
         self.canvas.clear()
         self.clear_widgets()
@@ -3231,28 +3234,28 @@ class FolderFlowChart(Widget):
         kids = list(node.get("children") or [])
         x = float(node.get("_x") or self.x)
         y = float(node.get("_y") or self.y)
-        nw = float(node.get("_nw") or dp(58))
-        nh = float(node.get("_nh") or dp(18))
+        nw = float(node.get("_nw") or dp(76))
+        nh = float(node.get("_nh") or dp(26))
         fid = str(node.get("id") or "")
         selected = fid == self._selected
         rgba = _folder_rgba(str(node.get("color") or "#9AA0A8"))
         px, py = x + nw / 2.0, y
         for child in kids:
-            cx = float(child.get("_x") or 0) + float(child.get("_nw") or dp(58)) / 2.0
-            cy = float(child.get("_y") or 0) + float(child.get("_nh") or dp(18))
+            cx = float(child.get("_x") or 0) + float(child.get("_nw") or dp(76)) / 2.0
+            cy = float(child.get("_y") or 0) + float(child.get("_nh") or dp(26))
             Color(0.45, 0.48, 0.54, 0.9)
-            Line(points=[px, py, px, (py + cy) / 2.0, cx, (py + cy) / 2.0, cx, cy], width=0.8)
+            Line(points=[px, py, px, (py + cy) / 2.0, cx, (py + cy) / 2.0, cx, cy], width=1.0)
         if selected:
             Color(0.35, 0.52, 0.82, 1)
         else:
             Color(*rgba)
-        RoundedRectangle(pos=(x, y), size=(nw, nh), radius=[dp(4)])
+        RoundedRectangle(pos=(x, y), size=(nw, nh), radius=[dp(5)])
         self._hits.append((fid, x, y, nw, nh))
         caption = Label(
-            text=mixed_markup(_short_label(str(node.get("name") or "תיקייה"), 8)),
+            text=mixed_markup(_short_label(str(node.get("name") or "תיקייה"), 10)),
             markup=True,
             color=(1, 1, 1, 1),
-            font_size=dp(10),
+            font_size=dp(11),
             halign="center",
             valign="middle",
             size_hint=(None, None),
@@ -3350,20 +3353,6 @@ class LibraryScreen(Screen):
             pos=lambda *_a: setattr(self._bg, "pos", root.pos),
             size=lambda *_a: setattr(self._bg, "size", root.size),
         )
-        self.tree_host = BoxLayout(orientation="vertical", size_hint_y=None, height=0, padding=(dp(4), dp(2)))
-        with self.tree_host.canvas.before:
-            Color(0.12, 0.13, 0.15, 1)
-            self._tree_bg = Rectangle()
-        self.tree_host.bind(
-            pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_host.pos),
-            size=lambda *_a: setattr(self._tree_bg, "size", self.tree_host.size),
-        )
-        self.tree_chart = FolderFlowChart()
-        tree_scroll = ScrollView(do_scroll_x=True, do_scroll_y=True, bar_width=dp(2), size_hint=(1, 1))
-        tree_scroll.add_widget(self.tree_chart)
-        self.tree_host.add_widget(tree_scroll)
-        self.tree_host.opacity = 0
-        self.tree_host.disabled = True
         self.header = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.header.add_widget(
             ToolIcon("menu", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: self.toggle_tree())
@@ -3399,19 +3388,46 @@ class LibraryScreen(Screen):
             ToolIcon("plus", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().library_new_menu())
         )
         root.add_widget(self.header)
-        root.add_widget(self.tree_host)
+        shell = BoxLayout(orientation="horizontal", spacing=dp(8))
+        self.tree_host = BoxLayout(
+            orientation="vertical",
+            size_hint_x=None,
+            width=0,
+            padding=(dp(8), dp(8), dp(8), dp(8)),
+        )
+        with self.tree_host.canvas.before:
+            Color(0.12, 0.13, 0.15, 1)
+            self._tree_bg = Rectangle()
+        self.tree_host.bind(
+            pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_host.pos),
+            size=lambda *_a: setattr(self._tree_bg, "size", self.tree_host.size),
+        )
+        self.tree_chart = FolderFlowChart()
+        tree_scroll = ScrollView(
+            do_scroll_x=True,
+            do_scroll_y=True,
+            bar_width=dp(3),
+            bar_pos_y="left",
+            size_hint=(1, 1),
+        )
+        tree_scroll.add_widget(self.tree_chart)
+        self.tree_host.add_widget(tree_scroll)
+        self.tree_host.opacity = 0
+        self.tree_host.disabled = True
         self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8), padding=(0, dp(4)))
         self.body.bind(minimum_height=self.body.setter("height"))
         scroller = ScrollView(do_scroll_x=False, bar_width=dp(3))
         scroller.add_widget(self.body)
-        root.add_widget(scroller)
+        shell.add_widget(self.tree_host)
+        shell.add_widget(scroller)
+        root.add_widget(shell)
         self.add_widget(root)
         self._grid_cols = 0
         self.bind(size=self._on_size)
 
     def toggle_tree(self, *_args: Any) -> None:
         self._tree_open = not bool(self._tree_open)
-        self.tree_host.height = dp(108) if self._tree_open else 0
+        self.tree_host.width = dp(268) if self._tree_open else 0
         self.tree_host.opacity = 1 if self._tree_open else 0
         self.tree_host.disabled = not self._tree_open
 
@@ -4835,13 +4851,42 @@ class SamsungNotesCompanionApp(App):
         path.write_bytes(pdf_bytes)
         return str(path)
 
+    def _copy_share_into_cache(self, activity: Any, src: str) -> str:
+        folders: List[Path] = []
+        try:
+            folders.append(Path(str(activity.getCacheDir().getAbsolutePath())) / "share")
+        except Exception:
+            pass
+        try:
+            ext = activity.getExternalCacheDir()
+            if ext is not None:
+                folders.append(Path(str(ext.getAbsolutePath())) / "share")
+        except Exception:
+            pass
+        folders.append(self._share_cache_dir())
+        last_error: Optional[Exception] = None
+        name = Path(src).name or f"note-{uuid.uuid4().hex[:8]}.pdf"
+        for folder in folders:
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                dest = folder / name
+                if os.path.abspath(src) != os.path.abspath(str(dest)):
+                    shutil.copy2(src, dest)
+                if dest.is_file() and dest.stat().st_size > 0:
+                    return str(dest)
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("cannot copy share file")
+
     def _android_file_uri(self, activity: Any, path: str) -> Any:
         from jnius import autoclass
 
         File = autoclass("java.io.File")
         java_file = File(str(path))
         package = str(activity.getPackageName())
-        authorities = (package + ".fileprovider", package + ".GenericFileProvider")
+        authorities = (package + ".fileprovider",)
         providers = (
             "org.kivy.android.GenericFileProvider",
             "androidx.core.content.FileProvider",
@@ -4859,13 +4904,9 @@ class SamsungNotesCompanionApp(App):
                     return provider.getUriForFile(activity, authority, java_file)
                 except Exception as exc:
                     last_error = exc
-        Uri = autoclass("android.net.Uri")
-        try:
-            return Uri.fromFile(java_file)
-        except Exception:
-            if last_error is not None:
-                raise last_error
-            raise RuntimeError("FileProvider unavailable")
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("FileProvider unavailable")
 
     def _pipe_file_to_stream(self, src: str, stream: Any) -> None:
         from jnius import autoclass
@@ -4908,12 +4949,15 @@ class SamsungNotesCompanionApp(App):
         values.put("_display_name", String(f"{display}.pdf"))
         values.put("mime_type", String("application/pdf"))
         sdk = int(Build.VERSION.SDK_INT)
+        uri = None
         if sdk >= 29:
-            Downloads = autoclass("android.provider.MediaStore$Downloads")
-            values.put("relative_path", String("Download"))
-            values.put("is_pending", 1)
-            uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
-        else:
+            try:
+                Downloads = autoclass("android.provider.MediaStore$Downloads")
+                values.put("relative_path", String("Download"))
+                uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
+            except Exception:
+                uri = None
+        if uri is None:
             FilesTable = autoclass("android.provider.MediaStore$Files")
             uri = resolver.insert(FilesTable.getContentUri("external"), values)
         if uri is None:
@@ -4922,32 +4966,30 @@ class SamsungNotesCompanionApp(App):
         if stream is None:
             raise RuntimeError("MediaStore stream failed")
         self._copy_file_to_stream(path, stream)
-        if sdk >= 29:
-            pending = ContentValues()
-            pending.put("is_pending", 0)
-            resolver.update(uri, pending, None, None)
         return uri
 
     def _copy_file_to_stream(self, src: str, stream: Any) -> None:
         from jnius import autoclass
 
-        source = None
-        copied = False
+        FileInputStream = autoclass("java.io.FileInputStream")
+        source = FileInputStream(str(src))
         try:
-            source = autoclass("java.io.FileInputStream")(str(src))
             autoclass("android.os.FileUtils").copy(source, stream)
-            copied = True
         except Exception:
-            copied = False
-        finally:
-            if source is not None:
-                try:
-                    source.close()
-                except Exception:
-                    pass
-        if not copied:
-            data = Path(src).read_bytes()
-            stream.write(data)
+            try:
+                source.close()
+            except Exception:
+                pass
+            source = FileInputStream(str(src))
+            buf = autoclass("java.lang.reflect.Array").newInstance(
+                autoclass("java.lang.Byte").TYPE, 8192
+            )
+            while True:
+                count = int(source.read(buf))
+                if count <= 0:
+                    break
+                stream.write(buf, 0, count)
+        source.close()
         stream.flush()
         stream.close()
 
@@ -4976,9 +5018,24 @@ class SamsungNotesCompanionApp(App):
         intent.setClipData(clip)
         intent.putExtra(Intent.EXTRA_SUBJECT, String(title or "PDF"))
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         chooser = Intent.createChooser(intent, String("שיתוף"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try:
+            pm = activity.getPackageManager()
+            matches = pm.queryIntentActivities(intent, 0)
+            count = int(matches.size()) if hasattr(matches, "size") else len(list(matches))
+            for index in range(count):
+                item = matches.get(index) if hasattr(matches, "get") else matches[index]
+                package_name = item.activityInfo.packageName
+                for uri in uris:
+                    activity.grantUriPermission(
+                        package_name,
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+        except Exception:
+            pass
 
         @run_on_ui_thread
         def _open() -> None:
@@ -5002,8 +5059,16 @@ class SamsungNotesCompanionApp(App):
 
         @run_on_ui_thread
         def _share() -> None:
+            uris = []
             try:
-                uris = [self._android_mediastore_pdf_uri(activity, path, title) for path in files]
+                for path in files:
+                    cached = self._copy_share_into_cache(activity, path)
+                    try:
+                        uris.append(self._android_file_uri(activity, cached))
+                    except Exception:
+                        uris.append(self._android_mediastore_pdf_uri(activity, cached, title))
+                if not uris:
+                    raise RuntimeError("no uri")
                 self._launch_share_intent(activity, uris, title)
             except Exception:
                 Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל: אין גישה לקובץ"), 0)
