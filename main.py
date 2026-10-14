@@ -369,9 +369,29 @@ def _plain_user_text(text: str) -> str:
     lowered = cleaned.lower()
     if not cleaned.strip():
         return ""
-    if cleaned.startswith("<") or "jnius" in lowered or "javaobject" in lowered or "nativeproxy" in lowered:
+    if (
+        cleaned.startswith("<")
+        or "jnius" in lowered
+        or "javaobject" in lowered
+        or "nativeproxy" in lowered
+        or "ljava/" in lowered
+        or "java/lang" in lowered
+        or "(l" in lowered
+    ):
         return ""
     return _strip_carried_lines(cleaned.strip())
+
+
+def _safe_ui_message(message: Any) -> str:
+    raw = message if isinstance(message, str) else _java_chars(message)
+    raw = str(raw or "")
+    if "Ljava/" in raw or "java/lang" in raw or "(L" in raw or "jnius" in raw.lower():
+        prefix = raw.split(":")[0].strip()
+        if prefix and "Ljava" not in prefix and "(L" not in prefix:
+            return prefix[:80]
+        return "שיתוף נכשל"
+    cleaned = _plain_user_text(raw)
+    return (cleaned or raw.strip())[:160]
 
 
 def _java_chars(value: Any) -> str:
@@ -3339,6 +3359,7 @@ class FolderFlowChart(Widget):
         self._drawing = False
         self._picker: Optional[Any] = None
         self._blocked: set = set()
+        self._caption_keep: List[Any] = []
         with self.canvas.before:
             Color(0.12, 0.13, 0.15, 1)
             self._pane_bg = Rectangle()
@@ -3420,41 +3441,38 @@ class FolderFlowChart(Widget):
                 self._layout_centered()
             self.canvas.clear()
             self._hits = []
+            self._caption_keep = []
             with self.canvas:
                 self._draw_node(self._root)
         finally:
             self._drawing = False
 
-    def _caption_texture(self, title: str, width: float, height: float) -> Optional[Any]:
-        kwargs: Dict[str, Any] = {
-            "text": mixed_markup(_short_label(title, 14)),
-            "markup": True,
-            "font_size": int(dp(11)),
-            "color": (1, 1, 1, 1),
-            "halign": "center",
-            "valign": "middle",
-        }
-        if _LATIN_FONT_READY:
-            kwargs["font_name"] = "LatinFont"
-        elif _HEBREW_FONT_READY:
-            kwargs["font_name"] = "HebrewFont"
-        label = CoreLabel(**kwargs)
-        label.refresh()
-        texture = label.texture
-        if texture is None:
-            return None
-        tw, th = texture.size
-        if tw > width or th > height:
-            scale = min(width / max(tw, 1), height / max(th, 1))
-            label = CoreLabel(
-                **{
-                    **kwargs,
-                    "font_size": max(8, int(int(dp(11)) * scale)),
-                }
-            )
+    def _caption_runs(self, title: str) -> List[Tuple[Any, float, float]]:
+        plain = _short_label(str(title or "תיקייה"), 14)
+        runs = _script_runs(plain)
+        if not runs:
+            font = "LatinFont" if _LATIN_FONT_READY else ("HebrewFont" if _HEBREW_FONT_READY else None)
+            runs = [(plain, font)]
+        out: List[Tuple[Any, float, float]] = []
+        for chunk, font in runs:
+            kwargs: Dict[str, Any] = {
+                "text": chunk,
+                "font_size": int(dp(11)),
+                "color": (1, 1, 1, 1),
+                "halign": "center",
+                "valign": "middle",
+            }
+            if font:
+                kwargs["font_name"] = font
+            label = CoreLabel(**kwargs)
             label.refresh()
             texture = label.texture
-        return texture
+            if texture is None:
+                continue
+            self._caption_keep.append(label)
+            tw, th = texture.size
+            out.append((texture, float(tw), float(th)))
+        return out
 
     def _draw_node(self, node: Dict[str, Any]) -> None:
         kids = list(node.get("children") or [])
@@ -3478,15 +3496,17 @@ class FolderFlowChart(Widget):
         else:
             Color(*rgba)
         RoundedRectangle(pos=(x, y), size=(nw, nh), radius=[dp(5)])
-        texture = self._caption_texture(str(node.get("name") or "תיקייה"), nw, nh)
-        if texture is not None:
+        chunks = self._caption_runs(str(node.get("name") or "תיקייה"))
+        if chunks:
+            total_w = sum(tw for _tex, tw, _th in chunks)
+            max_h = max(th for _tex, _tw, th in chunks)
+            scale = min(1.0, (nw - dp(4)) / max(total_w, 1.0), (nh - dp(2)) / max(max_h, 1.0))
+            cursor = x + (nw - total_w * scale) / 2.0
             Color(1, 1, 1, 1)
-            tw, th = texture.size
-            Rectangle(
-                texture=texture,
-                pos=(x + (nw - tw) / 2.0, y + (nh - th) / 2.0),
-                size=(tw, th),
-            )
+            for texture, tw, th in chunks:
+                dw, dh = tw * scale, th * scale
+                Rectangle(texture=texture, pos=(cursor, y + (nh - dh) / 2.0), size=(dw, dh))
+                cursor += dw
         self._hits.append((fid, x, y, nw, nh))
         for child in kids:
             self._draw_node(child)
@@ -3822,7 +3842,21 @@ class RootLayout(FloatLayout):
         self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
         self.text_overlay = self._build_text_overlay()
+        self.page_scroll = Slider(
+            orientation="vertical",
+            min=0.0,
+            max=1.0,
+            value=1.0,
+            size_hint=(None, None),
+            width=dp(14),
+            height=dp(160),
+            opacity=0.38,
+            cursor_size=(dp(14), dp(22)),
+        )
+        self._scroll_syncing = False
+        self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
+        self.add_widget(self.page_scroll)
         self.add_widget(self.chrome)
         self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
@@ -3832,12 +3866,18 @@ class RootLayout(FloatLayout):
         self.hide_text_overlay()
         self.refresh_tool_styles()
         app = App.get_running_app()
+
+        def _on_view_change(*_args: Any) -> None:
+            self.sync_floating_tools()
+            self._sync_page_scroll()
+
         app.bind(
-            view_scale=self.sync_floating_tools,
+            view_scale=_on_view_change,
             view_pan_x=self.sync_floating_tools,
-            view_pan_y=self.sync_floating_tools,
+            view_pan_y=_on_view_change,
             notes_scale=self.sync_floating_tools,
             notes_pan_x=self.sync_floating_tools,
+            page_count=lambda *_a: self._sync_page_scroll(),
         )
         self.bind(size=self._fit_workspace, pos=self._fit_workspace)
         Window.bind(size=lambda *_args: self.apply_orientation())
@@ -3849,6 +3889,7 @@ class RootLayout(FloatLayout):
         self.workspace.size = (float(self.width), work_h)
         self.workspace.pos = (float(self.x), float(self.y))
         self.dock_notes()
+        self._place_page_scroll()
         self.sync_floating_tools()
 
     def hide_copy_chip(self) -> None:
@@ -4089,7 +4130,63 @@ class RootLayout(FloatLayout):
         self.sync_floating_tools()
 
     def set_status(self, message: str) -> None:
-        self.status_label.text = mixed_markup(message)
+        self.status_label.text = mixed_markup(_safe_ui_message(message))
+
+    def _page_scroll_range(self) -> Tuple[float, float]:
+        canvas = self.pdf_canvas
+        if canvas.width <= 1 or canvas.height <= 1:
+            return (0.0, 0.0)
+        _ox, _oy, _dw, disp_h, _scale, _pw, _ph = canvas._page_metrics()
+        board_y = float(canvas.y)
+        board_h = float(canvas.height)
+        base_y = canvas.y + canvas.height - disp_h
+        if disp_h <= board_h:
+            min_y, max_y = board_y - base_y, board_y + board_h - disp_h - base_y
+        else:
+            min_y, max_y = board_y + board_h - disp_h - base_y, board_y - base_y
+        if min_y > max_y:
+            min_y, max_y = max_y, min_y
+        return (float(min_y), float(max_y))
+
+    def _place_page_scroll(self) -> None:
+        bar = getattr(self, "page_scroll", None)
+        if bar is None:
+            return
+        height = min(dp(220), max(dp(96), float(self.workspace.height) * 0.42))
+        bar.size = (dp(14), height)
+        bar.right = float(self.pdf_canvas.right) - dp(2)
+        bar.center_y = float(self.pdf_canvas.center_y)
+        self._sync_page_scroll()
+
+    def _sync_page_scroll(self, *_args: Any) -> None:
+        bar = getattr(self, "page_scroll", None)
+        if bar is None:
+            return
+        min_y, max_y = self._page_scroll_range()
+        span = max_y - min_y
+        if span < 8.0:
+            bar.opacity = 0
+            bar.disabled = True
+            return
+        bar.opacity = 0.38
+        bar.disabled = False
+        app = App.get_running_app()
+        t = (float(app.view_pan_y) - min_y) / span
+        value = max(0.0, min(1.0, 1.0 - t))
+        if abs(float(bar.value) - value) < 0.004:
+            return
+        self._scroll_syncing = True
+        bar.value = value
+        self._scroll_syncing = False
+
+    def _on_page_scroll(self, _bar: Slider, value: float) -> None:
+        if getattr(self, "_scroll_syncing", False):
+            return
+        min_y, max_y = self._page_scroll_range()
+        span = max_y - min_y
+        if span < 8.0:
+            return
+        App.get_running_app().view_pan_y = min_y + (1.0 - float(value)) * span
 
     def _build_header(self) -> BoxLayout:
         app = App.get_running_app()
@@ -5546,77 +5643,61 @@ class SamsungNotesCompanionApp(App):
         from jnius import autoclass, cast
 
         Intent = autoclass("android.content.Intent")
-        for payload in (
-            cast("android.os.Parcelable", uri),
-            cast("android.net.Uri", uri),
-            uri,
-        ):
-            try:
-                intent.putExtra(Intent.EXTRA_STREAM, payload)
-                return
-            except Exception:
-                continue
-        intent.putExtra("android.intent.extra.STREAM", uri)
-
-    def _share_content_uri(self, activity: Any, path: str, title: str) -> Any:
+        parcel = cast("android.os.Parcelable", uri)
         try:
-            return self._android_file_uri(activity, path)
-        except Exception:
-            return self._android_mediastore_pdf_uri(activity, path, title)
-
-    def _grant_share_uri(self, activity: Any, intent: Any, uris: Sequence[Any]) -> None:
-        from jnius import autoclass
-
-        Intent = autoclass("android.content.Intent")
-        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-        try:
-            PackageManager = autoclass("android.content.pm.PackageManager")
-            matches = activity.getPackageManager().queryIntentActivities(
-                intent, PackageManager.MATCH_DEFAULT_ONLY
-            )
-            count = int(matches.size())
-            for index in range(count):
-                info = matches.get(index)
-                name = str(info.activityInfo.packageName)
-                for uri in uris:
-                    try:
-                        activity.grantUriPermission(name, uri, flags)
-                    except Exception:
-                        pass
+            bundle = autoclass("android.os.Bundle")()
+            bundle.putParcelable(Intent.EXTRA_STREAM, parcel)
+            intent.putExtras(bundle)
+            return
         except Exception:
             pass
+        try:
+            intent.putExtra(Intent.EXTRA_STREAM, parcel)
+        except Exception:
+            intent.putExtra("android.intent.extra.STREAM", uri)
+
+    def _share_content_uri(self, activity: Any, path: str, title: str) -> Any:
+        last_error: Optional[Exception] = None
+        try:
+            return self._android_file_uri(activity, path)
+        except Exception as exc:
+            last_error = exc
+        try:
+            return self._android_mediastore_pdf_uri(activity, path, title)
+        except Exception as exc:
+            last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("share uri failed")
 
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from jnius import autoclass, cast
 
         Intent = autoclass("android.content.Intent")
         String = autoclass("java.lang.String")
-        ClipData = autoclass("android.content.ClipData")
-        mime = "application/pdf"
+        uri = cast("android.net.Uri", uris[0])
         if len(uris) == 1:
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType(mime)
-            self._put_share_stream(intent, uris[0])
+            intent.setType("application/pdf")
+            self._put_share_stream(intent, uri)
         else:
             ArrayList = autoclass("java.util.ArrayList")
             stream = ArrayList()
-            for uri in uris:
-                stream.add(cast("android.os.Parcelable", uri))
+            for item in uris:
+                stream.add(cast("android.os.Parcelable", item))
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-            intent.setType(mime)
+            intent.setType("application/pdf")
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
-        clip = ClipData.newRawUri(String(title or "pdf"), uris[0])
-        for uri in uris[1:]:
-            clip.addItem(ClipData.Item(uri))
-        intent.setClipData(clip)
-        intent.putExtra(Intent.EXTRA_SUBJECT, String(title or "PDF"))
+        try:
+            clip = autoclass("android.content.ClipData").newUri(
+                activity.getContentResolver(), String("pdf"), uri
+            )
+            intent.setClipData(clip)
+        except Exception:
+            clip = None
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        self._grant_share_uri(activity, intent, uris)
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        self._grant_share_uri(activity, chooser, uris)
         self._share_keep = [list(uris), intent, clip, chooser, activity]
         activity.startActivity(chooser)
 
@@ -5648,7 +5729,12 @@ class SamsungNotesCompanionApp(App):
                     raise RuntimeError("no uri")
                 self._launch_share_intent(activity, uris, title)
             except Exception as exc:
-                Clock.schedule_once(lambda *_a, err=exc: self._notify(f"שיתוף נכשל: {err}"), 0)
+                Clock.schedule_once(
+                    lambda *_a, err=exc: self._notify(
+                        f"שיתוף נכשל: {_safe_ui_message(err)}"
+                    ),
+                    0,
+                )
 
         _share()
 
@@ -5867,8 +5953,9 @@ class SamsungNotesCompanionApp(App):
         self._prompt_line("שם המסמך", self.document_title, _apply)
 
     def _notify(self, message: str) -> None:
+        text = _safe_ui_message(message)
         try:
-            self.root_layout.set_status(message)
+            self.root_layout.set_status(text)
         except Exception:
             pass
         if not is_android():
@@ -5883,7 +5970,7 @@ class SamsungNotesCompanionApp(App):
 
             @run_on_ui_thread
             def _toast() -> None:
-                Toast.makeText(activity, String(message), Toast.LENGTH_LONG).show()
+                Toast.makeText(activity, String(text), Toast.LENGTH_LONG).show()
 
             _toast()
         except Exception:
@@ -7223,7 +7310,25 @@ class SamsungNotesCompanionApp(App):
         apply_hebrew_ui(popup, "ייבוא תמונה")
 
     def reset_view(self, *_args: Any) -> None:
-        self._reset_view()
+        root = self.root_layout
+        pdf = root.pdf_canvas
+        notes = root.notes_canvas
+        focus = (float(pdf.center_x), float(pdf.center_y))
+        doc = pdf.to_doc(*focus)
+        notes_focus = (float(notes.center_x), float(notes.center_y))
+        notes_doc = notes.to_doc(*notes_focus)
+        self.view_scale = 1.0
+        self.notes_scale = 1.0
+
+        def _keep(_dt: float) -> None:
+            now = pdf.from_doc(*doc)
+            self.view_pan_x += focus[0] - now[0]
+            self.view_pan_y += focus[1] - now[1]
+            n_now = notes.from_doc(*notes_doc)
+            self.notes_pan_x += notes_focus[0] - n_now[0]
+            self.clamp_view()
+
+        Clock.schedule_once(_keep, 0)
         self._notify("תצוגה 100%")
 
     def set_custom_color(self, rgb: Sequence[float], *_args: Any) -> None:
