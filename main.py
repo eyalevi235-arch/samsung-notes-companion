@@ -1081,15 +1081,28 @@ class ToolIcon(ButtonBehavior, Widget):
                 self._line([x + w * 0.08, cy, cx, y + h * 0.86, x + w * 0.92, cy], 1.4)
                 Line(rectangle=(x + w * 0.22, y + h * 0.1, w * 0.56, h * 0.42), width=1.25)
                 Line(rectangle=(cx - w * 0.08, y + h * 0.1, w * 0.16, h * 0.22), width=1.15)
-            elif kind == "folder":
+            elif kind in {"folder", "folder_add"}:
+                fw = w * (0.72 if kind == "folder_add" else 0.8)
+                fh = h * (0.58 if kind == "folder_add" else 0.54)
+                fx = x + w * (0.04 if kind == "folder_add" else 0.1)
+                fy = y + h * 0.12
                 self._fill(ink, 0.22)
-                RoundedRectangle(pos=(x + w * 0.1, y + h * 0.14), size=(w * 0.8, h * 0.54), radius=[dp(3)])
+                RoundedRectangle(pos=(fx, fy), size=(fw, fh), radius=[dp(3)])
                 Color(*ink)
                 self._line(
-                    [x + w * 0.1, y + h * 0.68, x + w * 0.1, y + h * 0.82, x + w * 0.4, y + h * 0.82, x + w * 0.5, y + h * 0.68],
+                    [fx, fy + fh, fx, fy + fh + h * 0.14, fx + fw * 0.38, fy + fh + h * 0.14, fx + fw * 0.5, fy + fh],
                     1.3,
                 )
-                Line(rectangle=(x + w * 0.1, y + h * 0.14, w * 0.8, h * 0.54), width=1.25)
+                Line(rectangle=(fx, fy, fw, fh), width=1.25)
+                if kind == "folder_add":
+                    badge = min(w, h) * 0.20
+                    bx, by = x + w * 0.80, y + h * 0.74
+                    self._fill((0.12, 0.12, 0.14, 1), 1.0)
+                    self._disk(bx, by, badge + dp(1.2))
+                    Color(*ink)
+                    Line(circle=(bx, by, badge), width=1.15)
+                    self._line([bx - badge * 0.52, by, bx + badge * 0.52, by], 1.35)
+                    self._line([bx, by - badge * 0.52, bx, by + badge * 0.52], 1.35)
             elif kind == "save":
                 self._fill(ink, 0.18)
                 RoundedRectangle(pos=(x + w * 0.18, y + h * 0.08), size=(w * 0.64, h * 0.28), radius=[dp(2)])
@@ -3678,23 +3691,23 @@ class LibraryScreen(Screen):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._tree_open = False
-        root = BoxLayout(orientation="vertical", padding=(dp(16), dp(14), dp(16), dp(10)), spacing=dp(6))
+        root = BoxLayout(orientation="vertical", padding=(dp(18), dp(12), dp(18), dp(12)), spacing=0)
         with root.canvas.before:
-            Color(0.16, 0.17, 0.19, 1)
+            Color(0.11, 0.12, 0.14, 1)
             self._bg = Rectangle()
         root.bind(
             pos=lambda *_a: setattr(self._bg, "pos", root.pos),
             size=lambda *_a: setattr(self._bg, "size", root.size),
         )
-        self.header = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+        self.header = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8), padding=(0, dp(4), 0, dp(10)))
         self.header.add_widget(
             ToolIcon("menu", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: self.toggle_tree())
         )
         self.title = Label(
             text=mixed_markup("הספרייה"),
             markup=True,
-            color=(0.94, 0.95, 0.97, 1),
-            font_size=dp(24),
+            color=(0.96, 0.97, 0.98, 1),
+            font_size=dp(22),
             bold=True,
             halign="right",
             valign="middle",
@@ -3702,13 +3715,14 @@ class LibraryScreen(Screen):
         self.header.add_widget(self.title)
         self.header.add_widget(Widget())
         self.header.add_widget(
-            ToolIcon("folder", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().create_library_folder())
+            ToolIcon("folder_add", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().create_library_folder())
         )
         self.header.add_widget(
             ToolIcon("plus", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().library_new_menu())
         )
         root.add_widget(self.header)
-        shell = BoxLayout(orientation="horizontal", spacing=dp(8))
+        root.add_widget(self._hairline())
+        shell = BoxLayout(orientation="horizontal", spacing=dp(10), padding=(0, dp(12), 0, 0))
         self.tree_host = TreeHost(
             orientation="vertical",
             size_hint_x=None,
@@ -3716,7 +3730,7 @@ class LibraryScreen(Screen):
             padding=(dp(8), dp(8), dp(8), dp(8)),
         )
         with self.tree_host.canvas.before:
-            Color(0.12, 0.13, 0.15, 1)
+            Color(0.08, 0.09, 0.10, 1)
             self._tree_bg = Rectangle()
         self.tree_host.bind(
             pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_host.pos),
@@ -3728,7 +3742,7 @@ class LibraryScreen(Screen):
         self.tree_host.add_widget(self.tree_scatter)
         self.tree_host.opacity = 0
         self.tree_host.disabled = True
-        self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8), padding=(0, dp(4)))
+        self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(14), padding=(0, dp(6), 0, dp(8)))
         self.body.bind(minimum_height=self.body.setter("height"))
         scroller = ScrollView(do_scroll_x=False, bar_width=dp(3))
         scroller.add_widget(self.body)
@@ -3738,6 +3752,19 @@ class LibraryScreen(Screen):
         self.add_widget(root)
         self._grid_cols = 0
         self.bind(size=self._on_size)
+
+    def _hairline(self) -> Widget:
+        line = Widget(size_hint_y=None, height=dp(1))
+        with line.canvas:
+            Color(1, 1, 1, 0.10)
+            rect = Rectangle()
+
+        def _sync(*_a: Any) -> None:
+            rect.pos = (line.x, line.y)
+            rect.size = (line.width, max(dp(1), line.height))
+
+        line.bind(pos=_sync, size=_sync)
+        return line
 
     def toggle_tree(self, *_args: Any) -> None:
         self._tree_open = not bool(self._tree_open)
@@ -3792,7 +3819,7 @@ class LibraryScreen(Screen):
             self.body.add_widget(self._empty_folder_actions())
             return
         if current:
-            back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+            back_row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8), padding=(0, 0, 0, dp(4)))
             back = Button(
                 text=mixed_markup("חזרה"),
                 markup=True,
@@ -3800,16 +3827,13 @@ class LibraryScreen(Screen):
                 width=dp(84),
                 background_normal="",
                 background_down="",
-                background_color=(0.26, 0.28, 0.32, 1),
-                color=(0.82, 0.86, 0.94, 1),
+                background_color=(0.20, 0.22, 0.26, 1),
+                color=(0.86, 0.88, 0.92, 1),
             )
             back.bind(on_release=lambda *_a: app.library_go_back())
             back_row.add_widget(Widget())
             back_row.add_widget(back)
             self.body.add_widget(back_row)
-        self.body.add_widget(
-            Widget(size_hint_y=None, height=max(dp(12), float(self.height) * 0.33 - dp(56)))
-        )
         if child_folders:
             folder_grid = self._grid()
             for folder in child_folders:
@@ -3821,6 +3845,10 @@ class LibraryScreen(Screen):
                     )
                 )
             self.body.add_widget(folder_grid)
+        if child_folders and visible:
+            self.body.add_widget(Widget(size_hint_y=None, height=dp(6)))
+            self.body.add_widget(self._hairline())
+            self.body.add_widget(Widget(size_hint_y=None, height=dp(6)))
         if visible:
             color = str((app._folder_by_id(data, current) or {}).get("color") or "#2F80ED")
             note_grid = self._grid()
@@ -3920,8 +3948,6 @@ class RootLayout(FloatLayout):
         self.shape_bar.opacity = 0
         self.shape_bar.disabled = True
         self.chrome.add_widget(self.shape_bar)
-        self.chrome.add_widget(self._build_slider_bar())
-        self.chrome.add_widget(self._build_slider_editor())
         self.copy_chip = SelectionBar()
         self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
@@ -4370,6 +4396,65 @@ class RootLayout(FloatLayout):
         scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
         scroller.add_widget(row)
         host.add_widget(scroller)
+        glyphs = BoxLayout(
+            orientation="horizontal",
+            size_hint_x=None,
+            spacing=dp(2),
+            padding=(dp(4), 0),
+        )
+        glyphs.bind(minimum_width=glyphs.setter("width"))
+        self._slider_bar = glyphs
+        self._slider_open = None
+        self._slider_glyphs = {}
+        for kind, amount in (
+            ("width", float(app.ink_width)),
+            ("opacity", float(app.ink_opacity)),
+            ("dash", float(app.dash_gap)),
+        ):
+            glyph = SliderGlyph(
+                kind,
+                amount=amount,
+                trigger=lambda _g, name=kind: self.toggle_slider_editor(name),
+            )
+            self._slider_glyphs[kind] = glyph
+            glyphs.add_widget(glyph)
+        host.add_widget(glyphs)
+        slot = BoxLayout(
+            orientation="horizontal",
+            size_hint_x=None,
+            width=0,
+            padding=(dp(4), dp(4)),
+            spacing=dp(6),
+        )
+        self._slider_title_label = Label(
+            text="",
+            markup=True,
+            color=(1, 1, 1, 1),
+            font_size=dp(13) * layout_scale(),
+            size_hint_x=None,
+            width=dp(52),
+            halign="center",
+            valign="middle",
+        )
+        self._slider_control = Slider(min=0.0, max=1.0, value=0.5, cursor_size=(dp(22), dp(22)))
+        self._slider_control.bind(value=self._on_slider_editor)
+        self._slider_value_label = Label(
+            text="",
+            color=(1, 1, 1, 1),
+            font_size=dp(13) * layout_scale(),
+            size_hint_x=None,
+            width=dp(48),
+            halign="center",
+            valign="middle",
+        )
+        slot.add_widget(self._slider_title_label)
+        slot.add_widget(self._slider_control)
+        slot.add_widget(self._slider_value_label)
+        slot.opacity = 0
+        slot.disabled = True
+        self._slider_slot = slot
+        self._slider_editor = slot
+        host.add_widget(slot)
         self._toolbar_row = row
         self._toolbar_host = host
         return host
@@ -4475,84 +4560,6 @@ class RootLayout(FloatLayout):
         self.restore_btn = button
         return bar
 
-    def _build_slider_bar(self) -> BoxLayout:
-        app = App.get_running_app()
-        bar = BoxLayout(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=dp(36) * layout_scale(),
-            padding=(dp(10), dp(4)),
-            spacing=dp(12),
-        )
-        self._slider_bar = bar
-        self._slider_open: Optional[str] = None
-        self._slider_glyphs: Dict[str, SliderGlyph] = {}
-        with bar.canvas.before:
-            Color(*TOOLBAR_BG)
-            self._slider_bg = Rectangle()
-        bar.bind(
-            pos=lambda *_args: setattr(self._slider_bg, "pos", bar.pos),
-            size=lambda *_args: setattr(self._slider_bg, "size", bar.size),
-        )
-        for kind, amount in (
-            ("width", float(app.ink_width)),
-            ("opacity", float(app.ink_opacity)),
-            ("dash", float(app.dash_gap)),
-        ):
-            glyph = SliderGlyph(
-                kind,
-                amount=amount,
-                trigger=lambda _g, name=kind: self.toggle_slider_editor(name),
-            )
-            self._slider_glyphs[kind] = glyph
-            bar.add_widget(glyph)
-        bar.add_widget(Widget())
-        return bar
-
-    def _build_slider_editor(self) -> BoxLayout:
-        bar = BoxLayout(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=0,
-            padding=(dp(12), dp(8)),
-            spacing=dp(10),
-        )
-        with bar.canvas.before:
-            Color(*TOOLBAR_BG)
-            self._slider_editor_bg = Rectangle()
-        bar.bind(
-            pos=lambda *_args: setattr(self._slider_editor_bg, "pos", bar.pos),
-            size=lambda *_args: setattr(self._slider_editor_bg, "size", bar.size),
-        )
-        self._slider_title_label = Label(
-            text="",
-            markup=True,
-            color=(1, 1, 1, 1),
-            font_size=dp(14) * layout_scale(),
-            size_hint_x=None,
-            width=dp(88),
-            halign="center",
-            valign="middle",
-        )
-        self._slider_control = Slider(min=0.0, max=1.0, value=0.5, cursor_size=(dp(28), dp(28)))
-        self._slider_control.bind(value=self._on_slider_editor)
-        self._slider_value_label = Label(
-            text="",
-            color=(1, 1, 1, 1),
-            font_size=dp(16) * layout_scale(),
-            size_hint_x=None,
-            width=dp(64),
-            halign="center",
-            valign="middle",
-        )
-        bar.add_widget(self._slider_title_label)
-        bar.add_widget(self._slider_control)
-        bar.add_widget(self._slider_value_label)
-        bar.opacity = 0
-        bar.disabled = True
-        self._slider_editor = bar
-        return bar
-
     def toggle_slider_editor(self, kind: str, *_args: Any) -> None:
         if self._slider_open == kind:
             self._slider_open = None
@@ -4584,8 +4591,7 @@ class RootLayout(FloatLayout):
         if not getattr(self, "toolbar_visible", True):
             return dp(36) * scale
         extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
-        editor = dp(64) * scale if getattr(self, "_slider_open", None) else 0.0
-        return (dp(44) + dp(52) + dp(36)) * scale + extra + editor
+        return (dp(44) + dp(52)) * scale + extra
 
     def _apply_chrome_metrics(self) -> None:
         scale = layout_scale()
@@ -4597,13 +4603,12 @@ class RootLayout(FloatLayout):
         if hasattr(self, "shape_bar"):
             if self._shapes_open:
                 self.shape_bar.height = dp(SHAPE_BAR_DP) * scale
-        if hasattr(self, "_slider_bar"):
-            self._slider_bar.height = dp(36) * scale if self.toolbar_visible else 0
-        if hasattr(self, "_slider_editor"):
+        if hasattr(self, "_slider_slot"):
             open_slider = bool(self.toolbar_visible and getattr(self, "_slider_open", None))
-            self._slider_editor.height = dp(64) * scale if open_slider else 0
-            self._slider_editor.opacity = 1 if open_slider else 0
-            self._slider_editor.disabled = not open_slider
+            self._slider_slot.size_hint_x = 0.46 if open_slider else None
+            self._slider_slot.width = 0 if not open_slider else 0
+            self._slider_slot.opacity = 1 if open_slider else 0
+            self._slider_slot.disabled = not open_slider
         if hasattr(self, "restore_bar"):
             self.restore_bar.height = dp(36) * scale if not self.toolbar_visible else 0
             self.restore_bar.opacity = 1 if not self.toolbar_visible else 0
@@ -4612,13 +4617,13 @@ class RootLayout(FloatLayout):
             self.restore_btn.font_size = dp(12) * scale
             self.restore_btn.size = (dp(72) * scale, dp(28) * scale)
         if hasattr(self, "_slider_title_label"):
-            self._slider_title_label.font_size = dp(14) * scale
-            self._slider_title_label.width = dp(92) * scale
+            self._slider_title_label.font_size = dp(12) * scale
+            self._slider_title_label.width = dp(56) * scale
         for glyph in getattr(self, "_slider_glyphs", {}).values():
-            glyph.size = (dp(36) * scale, dp(36) * scale)
+            glyph.size = (dp(30) * scale, dp(30) * scale)
         if hasattr(self, "_slider_value_label"):
-            self._slider_value_label.font_size = dp(16) * scale
-            self._slider_value_label.width = dp(72) * scale
+            self._slider_value_label.font_size = dp(12) * scale
+            self._slider_value_label.width = dp(48) * scale
         if hasattr(self, "_header_bar") and not self.toolbar_visible:
             self._header_bar.height = 0
         if hasattr(self, "_toolbar_host") and not self.toolbar_visible:
@@ -4661,10 +4666,6 @@ class RootLayout(FloatLayout):
             self._toolbar_host.opacity = 0
             self._toolbar_host.disabled = True
             self._toolbar_host.height = 0
-        if hasattr(self, "_slider_bar"):
-            self._slider_bar.opacity = 0
-            self._slider_bar.disabled = True
-            self._slider_bar.height = 0
         self._apply_chrome_metrics()
         self._fit_workspace()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
@@ -4679,9 +4680,6 @@ class RootLayout(FloatLayout):
         if hasattr(self, "_toolbar_host"):
             self._toolbar_host.opacity = 1
             self._toolbar_host.disabled = False
-        if hasattr(self, "_slider_bar"):
-            self._slider_bar.opacity = 1
-            self._slider_bar.disabled = False
         self._apply_chrome_metrics()
         self._fit_workspace()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
@@ -4818,6 +4816,7 @@ class SamsungNotesCompanionApp(App):
         self._append_pdf_pending: bool = False
         self._share_files: List[str] = []
         self._share_uris: List[Any] = []
+        self._share_names: List[str] = []
         self._share_awaiting: bool = False
         self._share_cleanup_ev: Any = None
         self._extra_page_files: Dict[int, str] = {}
@@ -5594,6 +5593,7 @@ class SamsungNotesCompanionApp(App):
                     for item in self._share_uris
                     if item and str(item).startswith("content:")
                 ],
+                "names": [self._safe_share_name(item) for item in self._share_names if self._safe_share_name(item)],
                 "awaiting": bool(self._share_awaiting),
             }
             path = self._share_ledger_path()
@@ -5615,14 +5615,35 @@ class SamsungNotesCompanionApp(App):
             self._track_share_file(str(item), persist=False)
         for item in payload.get("uris") or []:
             self._track_share_uri(item, persist=False)
+        for item in payload.get("names") or []:
+            self._track_share_name(item, persist=False)
         if payload.get("awaiting"):
             self._share_awaiting = True
 
     def _restore_share_cleanup(self) -> None:
         self._load_share_ledger()
-        if self._share_files or self._share_uris:
+        if self._share_files or self._share_uris or self._share_names:
             self._share_awaiting = True
             self._schedule_share_cleanup()
+
+    def _safe_share_name(self, name: Any) -> str:
+        base = Path(str(name or "")).name.strip()
+        if not base or base != str(name).replace("\\", "/").split("/")[-1]:
+            return ""
+        if "/" in base or "\\" in base or ".." in base:
+            return ""
+        if not base.lower().endswith(".pdf") or len(base) < 8:
+            return ""
+        return base
+
+    def _track_share_name(self, name: str, persist: bool = True) -> None:
+        base = self._safe_share_name(name)
+        if not base:
+            return
+        if base not in self._share_names:
+            self._share_names.append(base)
+            if persist:
+                self._persist_share_ledger()
 
     def _track_share_file(self, path: str, persist: bool = True) -> None:
         if not path:
@@ -5727,12 +5748,91 @@ class SamsungNotesCompanionApp(App):
                 pass
         self._share_cleanup_ev = Clock.schedule_once(lambda *_a: self._purge_share_temps(), delay)
 
+    def _delete_named_share_downloads(self, names: Sequence[str]) -> Tuple[int, List[str]]:
+        leftover: List[str] = []
+        removed = 0
+        if not names or not is_android():
+            return 0, list(names)
+        try:
+            from jnius import autoclass
+
+            Env = autoclass("android.os.Environment")
+            File = autoclass("java.io.File")
+            MediaColumns = autoclass("android.provider.MediaStore$MediaColumns")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            resolver = activity.getContentResolver()
+            collections: List[Any] = []
+            try:
+                Downloads = autoclass("android.provider.MediaStore$Downloads")
+                collections.append(Downloads.EXTERNAL_CONTENT_URI)
+            except Exception:
+                pass
+            try:
+                FilesTable = autoclass("android.provider.MediaStore$Files")
+                collections.append(FilesTable.getContentUri("external"))
+            except Exception:
+                pass
+            downloads = None
+            try:
+                downloads = Env.getExternalStoragePublicDirectory(Env.DIRECTORY_DOWNLOADS)
+            except Exception:
+                pass
+            for name in names:
+                base = self._safe_share_name(name)
+                if not base:
+                    continue
+                existed = False
+                gone = True
+                if downloads is not None:
+                    try:
+                        target = File(downloads, base)
+                        if str(target.getName()) == base and bool(target.exists()) and bool(target.isFile()):
+                            existed = True
+                            gone = bool(target.delete()) or not bool(target.exists())
+                    except Exception:
+                        gone = False
+                for collection in collections:
+                    try:
+                        cursor = resolver.query(
+                            collection,
+                            [MediaColumns._ID],
+                            MediaColumns.DISPLAY_NAME + "=?",
+                            [base],
+                            None,
+                        )
+                        if cursor is None:
+                            continue
+                        while cursor.moveToNext():
+                            existed = True
+                            item_id = cursor.getLong(0)
+                            item = autoclass("android.content.ContentUris").withAppendedId(collection, item_id)
+                            resolver.delete(item, None, None)
+                        cursor.close()
+                    except Exception:
+                        pass
+                if downloads is not None:
+                    try:
+                        target = File(downloads, base)
+                        if str(target.getName()) == base and bool(target.exists()) and bool(target.isFile()):
+                            gone = False
+                    except Exception:
+                        pass
+                if existed and gone:
+                    removed += 1
+                elif not gone:
+                    leftover.append(base)
+        except Exception:
+            leftover = [self._safe_share_name(item) for item in names if self._safe_share_name(item)]
+        return removed, leftover
+
     def _purge_share_temps(self) -> None:
         self._load_share_ledger()
         paths = list(self._share_files)
         uris = list(self._share_uris)
+        names = list(self._share_names)
         leftover_files: List[str] = []
         leftover_uris: List[Any] = []
+        removed = 0
         for path in paths:
             try:
                 if not os.path.isfile(os.path.abspath(path)):
@@ -5742,6 +5842,8 @@ class SamsungNotesCompanionApp(App):
                 os.remove(path)
                 if os.path.isfile(os.path.abspath(path)):
                     leftover_files.append(os.path.abspath(path))
+                else:
+                    removed += 1
             except Exception:
                 leftover_files.append(os.path.abspath(path))
         if uris and is_android():
@@ -5756,18 +5858,22 @@ class SamsungNotesCompanionApp(App):
                         parsed = uri if not isinstance(uri, str) else Uri.parse(str(uri))
                         if not str(parsed).startswith("content:"):
                             continue
-                        resolver.delete(parsed, None, None)
+                        deleted = int(resolver.delete(parsed, None, None) or 0)
+                        if deleted > 0:
+                            removed += 1
                     except Exception:
                         leftover_uris.append(uri)
             except Exception:
                 leftover_uris = list(uris)
+        named_removed, leftover_names = self._delete_named_share_downloads(names)
+        removed += named_removed
         self._share_files = leftover_files
         self._share_uris = leftover_uris
-        self._share_awaiting = bool(leftover_files or leftover_uris)
-        try:
-            self._persist_share_ledger()
-        except Exception:
-            pass
+        self._share_names = leftover_names
+        self._share_awaiting = bool(leftover_files or leftover_uris or leftover_names)
+        self._persist_share_ledger()
+        if removed:
+            Clock.schedule_once(lambda *_a: self._notify("העותק הזמני נמחק מהמטמון"), 0)
 
     def _android_file_uri(self, activity: Any, path: str) -> Any:
         """Unused: p4a APK has no androidx FileProvider class. Share uses MediaStore."""
@@ -5856,6 +5962,7 @@ class SamsungNotesCompanionApp(App):
                         done = ContentValues()
                         done.put(MediaColumns.IS_PENDING, Integer.valueOf(0))
                         resolver.update(uri, done, None, None)
+                    self._track_share_name(display)
                     self._track_share_uri(uri)
                     return cast("android.net.Uri", uri)
                 except Exception as exc:
@@ -6035,6 +6142,7 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             activity.startActivity(chooser)
+        Clock.schedule_once(lambda *_a: self._notify("הקובץ נשלח לשיתוף"), 0)
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -6223,7 +6331,7 @@ class SamsungNotesCompanionApp(App):
 
     def on_resume(self) -> None:
         self._load_share_ledger()
-        if getattr(self, "_share_awaiting", False) or self._share_files or self._share_uris:
+        if getattr(self, "_share_awaiting", False) or self._share_files or self._share_uris or self._share_names:
             self._schedule_share_cleanup()
 
     def on_stop(self) -> None:
