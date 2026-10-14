@@ -183,7 +183,6 @@ SPEN_KEYCODES = {110, 139, 188, 189, 308, 309}
 
 SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
     (".pdf", "application/pdf", "PDF (*.pdf)"),
-    (".sdocx", "application/octet-stream", "Samsung Notes (*.sdocx)"),
     (".json", "application/json", "JSON (*.json)"),
     (".png", "image/png", "PNG image (*.png)"),
 )
@@ -273,12 +272,15 @@ def resolve_input_font() -> Optional[str]:
         (
             r"C:\Windows\Fonts\arial.ttf",
             r"C:\Windows\Fonts\calibri.ttf",
-            "/system/fonts/DroidSansFallback.ttf",
-            "/system/fonts/NotoSansCJK-Regular.ttc",
             "/system/fonts/SamsungOneUI-Regular.ttf",
             "/system/fonts/SamsungOneUI-400.ttf",
             "/system/fonts/SamsungOne-400.ttf",
             "/system/fonts/SamsungSans-Regular.ttf",
+            "/system/fonts/NotoSansHebrew-Regular.ttf",
+            "/system/fonts/DroidSansHebrew.ttf",
+            "/system/fonts/NotoSans-Regular.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/DroidSansFallback.ttf",
         )
     )
 
@@ -321,6 +323,14 @@ def _input_font_name() -> str:
     if _LATIN_FONT_READY:
         return "LatinFont"
     return "Roboto"
+
+
+def style_hebrew_input(field: TextInput) -> None:
+    field.font_name = _input_font_name()
+    try:
+        field.font_hinting = "normal"
+    except Exception:
+        pass
 
 
 def ui_text(text: str) -> str:
@@ -655,7 +665,7 @@ def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
         for widget in widgets:
             try:
                 if isinstance(widget, TextInput):
-                    widget.font_name = _input_font_name()
+                    style_hebrew_input(widget)
                     continue
                 if "filechooser" in type(widget).__module__:
                     continue
@@ -1071,6 +1081,7 @@ class ToolIcon(ButtonBehavior, Widget):
             size=self._redraw,
             selected=self._sync_bg,
             on_dark=self._redraw,
+            kind=self._redraw,
         )
         Clock.schedule_once(lambda _dt: self._redraw(), 0)
 
@@ -1200,10 +1211,33 @@ class ToolIcon(ButtonBehavior, Widget):
                 Line(circle=(bx, by, badge), width=1.15)
                 self._line([bx - badge * 0.5, by, bx + badge * 0.5, by], 1.3)
                 self._line([bx, by - badge * 0.5, bx, by + badge * 0.5], 1.3)
-            elif kind == "theme":
-                Line(circle=(cx, cy, min(w, h) * 0.30), width=1.25)
-                self._fill(ink, 0.85)
-                Ellipse(pos=(cx - min(w, h) * 0.18, cy - min(w, h) * 0.30), size=(min(w, h) * 0.36, min(w, h) * 0.60))
+            elif kind == "sun":
+                radius = min(w, h) * 0.18
+                Line(circle=(cx, cy, radius), width=1.35)
+                self._fill(ink, 0.88)
+                self._disk(cx, cy, radius * 0.72)
+                Color(*ink)
+                for index in range(8):
+                    angle = index * math.pi / 4.0
+                    inner = radius + dp(2.5)
+                    outer = min(w, h) * 0.42
+                    self._line(
+                        [
+                            cx + inner * math.cos(angle),
+                            cy + inner * math.sin(angle),
+                            cx + outer * math.cos(angle),
+                            cy + outer * math.sin(angle),
+                        ],
+                        1.35,
+                    )
+            elif kind == "moon":
+                radius = min(w, h) * 0.32
+                Line(circle=(cx - w * 0.04, cy, radius), width=1.3)
+                self._fill(ink, 0.9)
+                self._disk(cx - w * 0.04, cy, radius * 0.92)
+                cut = (0.12, 0.12, 0.14, 1) if self.on_dark else (0.985, 0.986, 0.99, 1)
+                self._fill(cut, 1.0)
+                self._disk(cx + w * 0.12, cy + h * 0.06, radius * 0.78)
             elif kind == "share":
                 r = min(w, h) * 0.11
                 nodes = (
@@ -3906,7 +3940,7 @@ class LibraryScreen(Screen):
             cursor_color=ui_color("text"),
             write_tab=False,
         )
-        self.search_field.font_name = _input_font_name()
+        style_hebrew_input(self.search_field)
         self.search_field.bind(text=self._on_search)
         self.tree_host.add_widget(self.search_field)
         nav_lbl = Label(
@@ -3936,13 +3970,13 @@ class LibraryScreen(Screen):
         )
         self._set_label = set_lbl
         self.tree_host.add_widget(set_lbl)
-        settings = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(88), spacing=dp(6))
-        theme_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        settings = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(108), spacing=dp(8))
+        theme_row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(6))
         theme_row.add_widget(Widget())
         self.theme_btn = ToolIcon(
-            "theme",
+            "moon" if is_light_theme() else "sun",
             on_dark=dark_icons,
-            size=(dp(36), dp(34)),
+            size=(dp(56), dp(48)),
             trigger=lambda *_a: App.get_running_app().toggle_library_theme(),
         )
         theme_row.add_widget(self.theme_btn)
@@ -3999,6 +4033,9 @@ class LibraryScreen(Screen):
         self.search_field.hint_text_color = ui_color("muted")
         self.search_field.cursor_color = ui_color("text")
         self.search_field.background_color = (1, 1, 1, 0.10) if dark else (0, 0, 0, 0.06)
+        style_hebrew_input(self.search_field)
+        self.theme_btn.kind = "moon" if is_light_theme() else "sun"
+        self.theme_btn.size = (dp(56), dp(48))
         for btn in (self.menu_btn, self.folder_add_btn, self.doc_add_btn, self.theme_btn):
             btn.on_dark = dark
             btn._redraw()
@@ -5587,7 +5624,8 @@ class SamsungNotesCompanionApp(App):
             (
                 ("העברה", lambda: self.place_library_document(doc_id), False),
                 ("העתקה", lambda: self.copy_library_document(doc_id), False),
-                ("שיתוף", lambda: self.share_library_document(doc_id), False),
+                ("שיתוף PDF", lambda: self.share_library_document(doc_id), False),
+                ("שיתוף מסמך חי", lambda: self.share_companion_document(doc_id), False),
                 ("מחיקה", lambda: self.confirm_delete_library_document(doc_id), True),
             ),
         )
@@ -5715,6 +5753,29 @@ class SamsungNotesCompanionApp(App):
     def share_library_document(self, doc_id: str) -> None:
         self._notify("מייצא PDF...")
         Clock.schedule_once(lambda _dt, item=doc_id: self._share_library_document_now(item), 0.05)
+
+    def share_companion_document(self, doc_id: str) -> None:
+        self._notify("מכין מסמך חי...")
+        Clock.schedule_once(lambda _dt, item=doc_id: self._share_companion_document_now(item), 0.05)
+
+    def _share_companion_document_now(self, doc_id: str) -> None:
+        data = self.library_data()
+        entry = next((item for item in data.get("documents") or [] if str(item.get("id")) == doc_id), None)
+        title = str((entry or {}).get("title") or self.document_title or "מסמך")
+        try:
+            packed = self.export_companion_pack_bytes(doc_id)
+        except Exception as exc:
+            self._notify(f"שיתוף נכשל: {_exception_reason(exc)}")
+            return
+        if not packed:
+            self._notify("לא ניתן ליצור מסמך חי")
+            return
+        cleaned = "".join(ch if ch.isalnum() or ch in " -_." else "_" for ch in title).strip() or "note"
+        path = self._share_cache_dir() / f"{cleaned}-{uuid.uuid4().hex[:8]}{COMPANION_PACK_EXT}"
+        path.write_bytes(packed)
+        self._track_share_file(str(path))
+        self._track_share_name(path.name)
+        self._android_share_pdfs([str(path)], title, mime="application/octet-stream")
 
     def _share_library_document_now(self, doc_id: str) -> None:
         previous = str(getattr(self, "_current_doc_id", "") or "")
@@ -5900,7 +5961,7 @@ class SamsungNotesCompanionApp(App):
             return ""
         if "/" in base or "\\" in base or ".." in base:
             return ""
-        if not base.lower().endswith(".pdf") or len(base) < 8:
+        if not base.lower().endswith((".pdf", ".snc")) or len(base) < 8:
             return ""
         return base
 
@@ -6183,7 +6244,13 @@ class SamsungNotesCompanionApp(App):
         Integer = autoclass("java.lang.Integer")
         MediaColumns = autoclass("android.provider.MediaStore$MediaColumns")
         resolver = activity.getContentResolver()
-        display = f"{self._file_stem()}-{uuid.uuid4().hex[:6]}.pdf"
+        suffix = Path(str(path)).suffix.lower() or ".pdf"
+        mime = str(getattr(self, "_share_mime", "") or "")
+        if suffix == ".snc":
+            mime = mime or "application/octet-stream"
+        else:
+            mime = mime or "application/pdf"
+        display = f"{self._file_stem()}-{uuid.uuid4().hex[:6]}{suffix}"
         sdk = _android_sdk_int()
         collections: List[Any] = []
         if sdk >= 29:
@@ -6210,7 +6277,7 @@ class SamsungNotesCompanionApp(App):
                 try:
                     values = ContentValues()
                     values.put(MediaColumns.DISPLAY_NAME, display)
-                    values.put(MediaColumns.MIME_TYPE, "application/pdf")
+                    values.put(MediaColumns.MIME_TYPE, mime)
                     if sdk >= 29:
                         try:
                             Env = autoclass("android.os.Environment")
@@ -6358,7 +6425,7 @@ class SamsungNotesCompanionApp(App):
         autoclass("android.media.MediaScannerConnection").scanFile(
             activity.getApplicationContext(),
             [path],
-            ["application/pdf"],
+            [str(getattr(app, "_share_mime", "") or "application/pdf")],
             listener,
         )
 
@@ -6368,9 +6435,10 @@ class SamsungNotesCompanionApp(App):
         Intent = autoclass("android.content.Intent")
         String = autoclass("java.lang.String")
         uri = cast("android.net.Uri", uris[0])
+        mime = str(getattr(self, "_share_mime", "") or "application/pdf")
         if len(uris) == 1:
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("application/pdf")
+            intent.setType(mime)
             self._put_share_stream(intent, uri)
         else:
             ArrayList = autoclass("java.util.ArrayList")
@@ -6378,7 +6446,7 @@ class SamsungNotesCompanionApp(App):
             for item in uris:
                 stream.add(cast("android.os.Parcelable", item))
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-            intent.setType("application/pdf")
+            intent.setType(mime)
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
         try:
             clip = autoclass("android.content.ClipData").newUri(
@@ -6412,11 +6480,12 @@ class SamsungNotesCompanionApp(App):
             activity.startActivity(chooser)
         Clock.schedule_once(lambda *_a: self._notify("הקובץ נשלח לשיתוף"), 0)
 
-    def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
+    def _android_share_pdfs(self, paths: Sequence[str], title: str, mime: str = "application/pdf") -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
         if not files:
-            self._notify("לא נמצא קובץ PDF")
+            self._notify("לא נמצא קובץ לשיתוף")
             return
+        self._share_mime = mime
         if not is_android():
             self._notify(f"PDF נשמר: {files[0]}")
             return
@@ -6487,7 +6556,7 @@ class SamsungNotesCompanionApp(App):
             size_hint_y=None,
             height=dp(40),
         )
-        field.font_name = _input_font_name()
+        style_hebrew_input(field)
         body, popup = self._card_popup(0.72, dp(188))
         popup.auto_dismiss = False
 
@@ -6517,7 +6586,7 @@ class SamsungNotesCompanionApp(App):
             height=dp(40),
             padding=(dp(10), dp(8)),
         )
-        field.font_name = _input_font_name()
+        style_hebrew_input(field)
         swatches = GridLayout(cols=6, spacing=dp(6), size_hint_y=None, height=dp(112))
         dots: List[ColorDot] = []
 
@@ -7341,6 +7410,8 @@ class SamsungNotesCompanionApp(App):
             self._notify(f"לא ניתן להעתיק את הקובץ: {exc}")
             return
         lower = display.lower()
+        if self._open_companion_file(path, display):
+            return
         if (
             self._bytes_look_like_pdf(path)
             or lower.endswith(".pdf")
@@ -7391,8 +7462,8 @@ class SamsungNotesCompanionApp(App):
                 return png.read()
         if extension == ".pdf":
             return self._export_pdf_bytes()
-        if extension == ".sdocx":
-            return self._export_sdocx_bytes()
+        if extension == COMPANION_PACK_EXT:
+            return self.export_companion_pack_bytes()
         text = json.dumps(self._document_payload(), indent=2)
         return text.encode("utf-8")
 
@@ -7988,6 +8059,7 @@ class SamsungNotesCompanionApp(App):
                 "*.webp",
                 "*.notes",
                 "*.json",
+                "*.snc",
                 "*.sdocx",
                 "*",
             ],
@@ -8012,8 +8084,23 @@ class SamsungNotesCompanionApp(App):
         popup.open()
         apply_hebrew_ui(popup, "פתיחת קובץ")
 
+    def _open_companion_file(self, path: str, display: str = "") -> bool:
+        lower = f"{display} {path}".lower()
+        if not (lower.endswith(".snc") or self.is_companion_pack(path)):
+            return False
+        try:
+            doc_id = self.import_companion_pack(path)
+            self.open_library_document(doc_id)
+            self._notify("המסמך החי נפתח")
+            return True
+        except Exception as exc:
+            self._notify(f"לא ניתן לפתוח מסמך חי: {exc}")
+            return True
+
     def _open_local_path(self, path: str) -> None:
         lower = path.lower()
+        if self._open_companion_file(path):
+            return
         if lower.endswith(".pdf") or self._bytes_look_like_pdf(path):
             if is_android():
                 try:
@@ -8049,6 +8136,7 @@ class SamsungNotesCompanionApp(App):
             size_hint_y=None,
             height=dp(40),
         )
+        style_hebrew_input(name_input)
         spinner = Spinner(
             text=SAVE_TYPES[0][2],
             values=[item[2] for item in SAVE_TYPES],
@@ -8099,7 +8187,7 @@ class SamsungNotesCompanionApp(App):
 
     def _write_local_path(self, path: str, extension: str) -> None:
         data = self._document_bytes(extension)
-        if extension in {".png", ".pdf", ".sdocx"}:
+        if extension in {".png", ".pdf", COMPANION_PACK_EXT}:
             with open(path, "wb") as handle:
                 handle.write(data)
         else:
