@@ -136,6 +136,18 @@ SHAPE_ORDER: Sequence[str] = (
 )
 CHROME_HEIGHT_DP = 136.0
 SHAPE_BAR_DP = 40.0
+
+
+def layout_scale() -> float:
+    """Scale chrome relative to the window, so phones keep usable tools."""
+    unit = float(dp(1) or 1.0)
+    width_dp = float(Window.width) / unit
+    return min(1.06, max(0.70, width_dp / 780.0))
+
+
+def tool_icon_size() -> Tuple[float, float]:
+    scale = layout_scale()
+    return (dp(42) * scale, dp(38) * scale)
 PASTE_HOLD_S = 1.0
 LIBRARY_ALL = "all"
 LIBRARY_UNFILED = "unfiled"
@@ -866,7 +878,7 @@ class ToolIcon(ButtonBehavior, Widget):
     def __init__(self, kind: str, **kwargs: Any) -> None:
         self.trigger = kwargs.pop("trigger", None)
         kwargs.setdefault("size_hint", (None, None))
-        kwargs.setdefault("size", (dp(48), dp(44)))
+        kwargs.setdefault("size", tool_icon_size())
         super().__init__(**kwargs)
         self.kind = kind
         with self.canvas.before:
@@ -909,6 +921,15 @@ class ToolIcon(ButtonBehavior, Widget):
         self._bg_rect.pos = self.pos
         self._bg_rect.size = self.size
 
+    def _line(self, points: Sequence[float], width: float = 1.35) -> None:
+        Line(points=list(points), width=width, cap="round", joint="round")
+
+    def _disk(self, cx: float, cy: float, radius: float) -> None:
+        Ellipse(pos=(cx - radius, cy - radius), size=(radius * 2.0, radius * 2.0))
+
+    def _fill(self, rgba: Sequence[float], alpha: float = 0.22) -> None:
+        Color(rgba[0], rgba[1], rgba[2], alpha)
+
     def _redraw(self, *_args: Any) -> None:
         self._sync_bg()
         self.canvas.clear()
@@ -921,95 +942,110 @@ class ToolIcon(ButtonBehavior, Widget):
             Color(*ink)
             kind = self.kind
             if kind == "pan":
-                Line(points=[cx - w * 0.35, cy, cx + w * 0.35, cy], width=1.4)
-                Line(points=[cx, cy - h * 0.35, cx, cy + h * 0.35], width=1.4)
-                Line(points=[cx - w * 0.35, cy, cx - w * 0.18, cy + h * 0.12], width=1.2)
-                Line(points=[cx - w * 0.35, cy, cx - w * 0.18, cy - h * 0.12], width=1.2)
-                Line(points=[cx + w * 0.35, cy, cx + w * 0.18, cy + h * 0.12], width=1.2)
-                Line(points=[cx + w * 0.35, cy, cx + w * 0.18, cy - h * 0.12], width=1.2)
+                self._line([cx - w * 0.38, cy, cx + w * 0.38, cy], 1.55)
+                self._line([cx, cy - h * 0.38, cx, cy + h * 0.38], 1.55)
+                self._line([cx - w * 0.38, cy, cx - w * 0.18, cy + h * 0.14], 1.3)
+                self._line([cx - w * 0.38, cy, cx - w * 0.18, cy - h * 0.14], 1.3)
+                self._line([cx + w * 0.38, cy, cx + w * 0.18, cy + h * 0.14], 1.3)
+                self._line([cx + w * 0.38, cy, cx + w * 0.18, cy - h * 0.14], 1.3)
+                self._line([cx, cy + h * 0.38, cx - w * 0.12, cy + h * 0.2], 1.3)
+                self._line([cx, cy + h * 0.38, cx + w * 0.12, cy + h * 0.2], 1.3)
             elif kind == "pen":
                 PushMatrix()
                 Translate(cx, cy)
                 Rotate(angle=-52, axis=(0, 0, 1))
                 Translate(-cx, -cy)
-                bw = max(dp(3.5), w * 0.16)
-                Line(rectangle=(cx - bw / 2.0, cy - h * 0.12, bw, h * 0.52), width=1.35)
-                Line(points=[cx - bw / 2.0, cy + h * 0.08, cx + bw / 2.0, cy + h * 0.08], width=1.2)
-                Line(
-                    points=[
-                        cx + bw / 2.0,
-                        cy + h * 0.28,
-                        cx + bw / 2.0 + w * 0.12,
-                        cy + h * 0.28,
-                        cx + bw / 2.0 + w * 0.12,
-                        cy - h * 0.02,
-                    ],
-                    width=1.15,
+                bw = max(dp(4.0), w * 0.18)
+                self._fill(ink, 0.28)
+                RoundedRectangle(pos=(cx - bw / 2.0, cy - h * 0.08), size=(bw, h * 0.48), radius=[dp(2)])
+                Color(*ink)
+                Line(rectangle=(cx - bw / 2.0, cy - h * 0.08, bw, h * 0.48), width=1.25)
+                self._line([cx - bw / 2.0, cy + h * 0.12, cx + bw / 2.0, cy + h * 0.12], 1.15)
+                self._line(
+                    [cx + bw / 2.0, cy + h * 0.3, cx + bw / 2.0 + w * 0.13, cy + h * 0.3, cx + bw / 2.0 + w * 0.13, cy + 0.0],
+                    1.15,
                 )
-                Line(
-                    points=[
-                        cx - bw / 2.0,
-                        cy - h * 0.12,
-                        cx,
-                        cy - h * 0.42,
-                        cx + bw / 2.0,
-                        cy - h * 0.12,
-                    ],
-                    width=1.35,
-                )
-                Line(points=[cx, cy - h * 0.12, cx, cy - h * 0.42], width=1.05)
+                self._fill(ink, 0.9)
+                Triangle(points=[cx - bw / 2.0, cy - h * 0.08, cx, cy - h * 0.44, cx + bw / 2.0, cy - h * 0.08])
+                Color(*ink)
+                self._line([cx - bw / 2.0, cy - h * 0.08, cx, cy - h * 0.44, cx + bw / 2.0, cy - h * 0.08], 1.2)
                 PopMatrix()
             elif kind == "dashed":
-                Line(points=[x, cy, x + w * 0.28, cy], width=1.4)
-                Line(points=[x + w * 0.42, cy, x + w * 0.62, cy], width=1.4)
-                Line(points=[x + w * 0.76, cy, x + w, cy], width=1.4)
+                self._line([x, cy, x + w * 0.22, cy], 1.7)
+                self._line([x + w * 0.38, cy, x + w * 0.6, cy], 1.7)
+                self._line([x + w * 0.76, cy, x + w, cy], 1.7)
+                self._disk(x + w * 0.11, cy, dp(1.6))
+                self._disk(x + w * 0.49, cy, dp(1.6))
+                self._disk(x + w * 0.88, cy, dp(1.6))
             elif kind == "eraser":
-                Line(rectangle=(x + w * 0.15, y + h * 0.25, w * 0.7, h * 0.5), width=1.3)
+                self._fill(ink, 0.2)
+                RoundedRectangle(pos=(x + w * 0.12, y + h * 0.22), size=(w * 0.76, h * 0.56), radius=[dp(5)])
+                Color(*ink)
+                Line(rounded_rectangle=(x + w * 0.12, y + h * 0.22, w * 0.76, h * 0.56, dp(5)), width=1.25)
+                self._line([x + w * 0.12, y + h * 0.48, x + w * 0.88, y + h * 0.48], 1.2)
+                self._fill(ink, 0.55)
+                RoundedRectangle(pos=(x + w * 0.12, y + h * 0.48), size=(w * 0.76, h * 0.3), radius=[dp(5), dp(5), 0, 0])
             elif kind == "hide":
-                Line(points=[cx - w * 0.28, cy + h * 0.12, cx, cy - h * 0.18, cx + w * 0.28, cy + h * 0.12], width=1.4)
+                self._line([cx - w * 0.32, cy + h * 0.16, cx, cy - h * 0.2, cx + w * 0.32, cy + h * 0.16], 1.5)
             elif kind == "restore":
-                Line(points=[cx - w * 0.28, cy - h * 0.12, cx, cy + h * 0.18, cx + w * 0.28, cy - h * 0.12], width=1.4)
+                self._line([cx - w * 0.32, cy - h * 0.16, cx, cy + h * 0.2, cx + w * 0.32, cy - h * 0.16], 1.5)
             elif kind == "menu":
-                Line(points=[x + w * 0.12, y + h * 0.72, x + w * 0.88, y + h * 0.72], width=1.4)
-                Line(points=[x + w * 0.12, cy, x + w * 0.88, cy], width=1.4)
-                Line(points=[x + w * 0.12, y + h * 0.28, x + w * 0.88, y + h * 0.28], width=1.4)
+                for yy in (y + h * 0.72, cy, y + h * 0.28):
+                    self._line([x + w * 0.12, yy, x + w * 0.88, yy], 1.7)
+                    self._disk(x + w * 0.12, yy, dp(1.5))
             elif kind == "plus":
-                Line(points=[cx - w * 0.28, cy, cx + w * 0.28, cy], width=1.5)
-                Line(points=[cx, cy - h * 0.28, cx, cy + h * 0.28], width=1.5)
+                self._fill(ink, 0.16)
+                Line(circle=(cx, cy, min(w, h) * 0.38), width=1.2)
+                Color(*ink)
+                self._line([cx - w * 0.22, cy, cx + w * 0.22, cy], 1.7)
+                self._line([cx, cy - h * 0.22, cx, cy + h * 0.22], 1.7)
             elif kind == "share":
-                r = min(w, h) * 0.09
+                r = min(w, h) * 0.11
                 nodes = (
                     (x + w * 0.78, y + h * 0.78),
                     (x + w * 0.22, cy),
                     (x + w * 0.78, y + h * 0.22),
                 )
-                Line(points=[nodes[0][0], nodes[0][1], nodes[1][0], nodes[1][1]], width=1.35)
-                Line(points=[nodes[1][0], nodes[1][1], nodes[2][0], nodes[2][1]], width=1.35)
+                self._line([nodes[0][0], nodes[0][1], nodes[1][0], nodes[1][1]], 1.45)
+                self._line([nodes[1][0], nodes[1][1], nodes[2][0], nodes[2][1]], 1.45)
                 for nx, ny in nodes:
-                    Ellipse(pos=(nx - r, ny - r), size=(r * 2.0, r * 2.0))
+                    self._fill(ink, 1.0)
+                    self._disk(nx, ny, r)
+                    Color(*ink)
+                    Line(circle=(nx, ny, r), width=1.05)
             elif kind == "home":
-                Line(
-                    points=[
-                        x + w * 0.12,
-                        cy,
-                        cx,
-                        y + h * 0.78,
-                        x + w * 0.88,
-                        cy,
-                    ],
-                    width=1.4,
-                )
-                Line(rectangle=(x + w * 0.22, y + h * 0.12, w * 0.56, h * 0.42), width=1.3)
+                self._fill(ink, 0.22)
+                Triangle(points=[x + w * 0.08, cy, cx, y + h * 0.86, x + w * 0.92, cy])
+                RoundedRectangle(pos=(x + w * 0.22, y + h * 0.1), size=(w * 0.56, h * 0.42), radius=[dp(2)])
+                Color(*ink)
+                self._line([x + w * 0.08, cy, cx, y + h * 0.86, x + w * 0.92, cy], 1.4)
+                Line(rectangle=(x + w * 0.22, y + h * 0.1, w * 0.56, h * 0.42), width=1.25)
+                Line(rectangle=(cx - w * 0.08, y + h * 0.1, w * 0.16, h * 0.22), width=1.15)
             elif kind == "folder":
-                Line(rectangle=(x + w * 0.12, y + h * 0.16, w * 0.76, h * 0.52), width=1.3)
-                Line(points=[x + w * 0.12, y + h * 0.68, x + w * 0.12, y + h * 0.78, x + w * 0.42, y + h * 0.78, x + w * 0.52, y + h * 0.68], width=1.3)
+                self._fill(ink, 0.22)
+                RoundedRectangle(pos=(x + w * 0.1, y + h * 0.14), size=(w * 0.8, h * 0.54), radius=[dp(3)])
+                Color(*ink)
+                self._line(
+                    [x + w * 0.1, y + h * 0.68, x + w * 0.1, y + h * 0.82, x + w * 0.4, y + h * 0.82, x + w * 0.5, y + h * 0.68],
+                    1.3,
+                )
+                Line(rectangle=(x + w * 0.1, y + h * 0.14, w * 0.8, h * 0.54), width=1.25)
             elif kind == "save":
-                Line(points=[cx, cy + h * 0.28, cx, cy - h * 0.1], width=1.5)
-                Line(points=[cx - w * 0.18, cy + h * 0.08, cx, cy - h * 0.12, cx + w * 0.18, cy + h * 0.08], width=1.3)
-                Line(points=[cx - w * 0.28, y + h * 0.08, cx + w * 0.28, y + h * 0.08], width=1.3)
+                self._fill(ink, 0.18)
+                RoundedRectangle(pos=(x + w * 0.18, y + h * 0.08), size=(w * 0.64, h * 0.28), radius=[dp(2)])
+                Color(*ink)
+                self._line([cx, cy + h * 0.34, cx, cy - h * 0.06], 1.7)
+                self._line([cx - w * 0.2, cy + h * 0.12, cx, cy - h * 0.14, cx + w * 0.2, cy + h * 0.12], 1.4)
+                self._line([cx - w * 0.3, y + h * 0.1, cx + w * 0.3, y + h * 0.1], 1.4)
             elif kind == "notes":
-                Line(rectangle=(x + w * 0.08, y + h * 0.1, w * 0.35, h * 0.8), width=1.2)
-                Line(rectangle=(x + w * 0.55, y + h * 0.1, w * 0.35, h * 0.8), width=1.2)
+                self._fill(ink, 0.16)
+                RoundedRectangle(pos=(x + w * 0.06, y + h * 0.08), size=(w * 0.38, h * 0.84), radius=[dp(2)])
+                RoundedRectangle(pos=(x + w * 0.56, y + h * 0.08), size=(w * 0.38, h * 0.84), radius=[dp(2)])
+                Color(*ink)
+                Line(rounded_rectangle=(x + w * 0.06, y + h * 0.08, w * 0.38, h * 0.84, dp(2)), width=1.2)
+                Line(rounded_rectangle=(x + w * 0.56, y + h * 0.08, w * 0.38, h * 0.84, dp(2)), width=1.2)
+                self._line([x + w * 0.12, y + h * 0.7, x + w * 0.36, y + h * 0.7], 1.05)
+                self._line([x + w * 0.12, y + h * 0.5, x + w * 0.36, y + h * 0.5], 1.05)
             elif kind == "line":
                 Line(points=[x + w * 0.08, y + h * 0.18, x + w * 0.92, y + h * 0.82], width=1.4)
             elif kind == "square":
@@ -1079,8 +1115,9 @@ class ToolIcon(ButtonBehavior, Widget):
                     width=1.2,
                 )
             elif kind == "text":
-                Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.82], width=1.4)
-                Line(points=[cx, y + h * 0.82, cx, y + h * 0.22], width=1.4)
+                self._line([x + w * 0.16, y + h * 0.84, x + w * 0.84, y + h * 0.84], 1.55)
+                self._line([cx, y + h * 0.84, cx, y + h * 0.22], 1.55)
+                self._line([x + w * 0.34, y + h * 0.22, x + w * 0.66, y + h * 0.22], 1.25)
                 tex = self._caption_texture("א", ink)
                 if tex is not None:
                     tw, th = float(tex.size[0]), float(tex.size[1])
@@ -1102,20 +1139,16 @@ class ToolIcon(ButtonBehavior, Widget):
                 star.extend(star[:2])
                 Line(points=star, width=1.2)
             elif kind == "image":
-                Line(rectangle=(x + w * 0.08, y + h * 0.18, w * 0.84, h * 0.64), width=1.3)
-                Line(circle=(x + w * 0.3, y + h * 0.62, min(w, h) * 0.08), width=1.2)
-                Line(
-                    points=[
-                        x + w * 0.12,
-                        y + h * 0.22,
-                        x + w * 0.42,
-                        y + h * 0.48,
-                        x + w * 0.62,
-                        y + h * 0.34,
-                        x + w * 0.88,
-                        y + h * 0.58,
-                    ],
-                    width=1.2,
+                self._fill(ink, 0.14)
+                RoundedRectangle(pos=(x + w * 0.08, y + h * 0.16), size=(w * 0.84, h * 0.68), radius=[dp(3)])
+                Color(*ink)
+                Line(rounded_rectangle=(x + w * 0.08, y + h * 0.16, w * 0.84, h * 0.68, dp(3)), width=1.25)
+                self._fill(ink, 0.9)
+                self._disk(x + w * 0.3, y + h * 0.62, min(w, h) * 0.08)
+                Color(*ink)
+                self._line(
+                    [x + w * 0.12, y + h * 0.22, x + w * 0.42, y + h * 0.5, x + w * 0.62, y + h * 0.34, x + w * 0.88, y + h * 0.6],
+                    1.25,
                 )
             elif kind == "fit":
                 mx, my = x + w * 0.38, y + h * 0.58
@@ -1141,14 +1174,19 @@ class ToolIcon(ButtonBehavior, Widget):
                         size=(tw * scale, th * scale),
                     )
             elif kind == "palette":
-                Line(circle=(cx, cy, min(w, h) * 0.34), width=1.3)
-                Line(circle=(cx, cy, min(w, h) * 0.16), width=1.2)
+                Line(circle=(cx, cy, min(w, h) * 0.36), width=1.3)
+                self._fill(ink, 0.85)
+                self._disk(cx - w * 0.14, cy + h * 0.1, min(w, h) * 0.08)
+                self._disk(cx + w * 0.12, cy + h * 0.12, min(w, h) * 0.07)
+                self._disk(cx, cy - h * 0.14, min(w, h) * 0.075)
+                Color(*ink)
+                Line(circle=(cx, cy, min(w, h) * 0.14), width=1.15)
             elif kind == "shapes":
-                Line(rectangle=(x + w * 0.08, y + h * 0.12, w * 0.42, h * 0.42), width=1.2)
-                Line(circle=(x + w * 0.72, y + h * 0.32, min(w, h) * 0.16), width=1.2)
-                Line(
-                    points=[cx, y + h * 0.92, x + w * 0.18, y + h * 0.52, x + w * 0.82, y + h * 0.52, cx, y + h * 0.92],
-                    width=1.2,
+                Line(rectangle=(x + w * 0.08, y + h * 0.1, w * 0.4, h * 0.4), width=1.2)
+                Line(circle=(x + w * 0.74, y + h * 0.3, min(w, h) * 0.16), width=1.2)
+                self._line(
+                    [cx, y + h * 0.92, x + w * 0.16, y + h * 0.52, x + w * 0.84, y + h * 0.52, cx, y + h * 0.92],
+                    1.25,
                 )
             elif kind == "lasso":
                 box_x, box_y, box_w, box_h = x + w * 0.04, y + h * 0.28, w * 0.62, h * 0.58
@@ -1182,20 +1220,30 @@ class ToolIcon(ButtonBehavior, Widget):
             elif kind == "redo":
                 self._horseshoe(cx, cy, min(w, h) * 0.34, False)
             elif kind == "copy":
-                Line(rectangle=(x + w * 0.08, y + h * 0.22, w * 0.58, h * 0.62), width=1.2)
-                Line(rectangle=(x + w * 0.32, y + h * 0.08, w * 0.58, h * 0.62), width=1.2)
+                self._fill(ink, 0.16)
+                RoundedRectangle(pos=(x + w * 0.3, y + h * 0.08), size=(w * 0.58, h * 0.62), radius=[dp(2)])
+                Color(*ink)
+                Line(rectangle=(x + w * 0.08, y + h * 0.24, w * 0.54, h * 0.6), width=1.2)
+                Line(rectangle=(x + w * 0.3, y + h * 0.08, w * 0.58, h * 0.62), width=1.25)
             elif kind == "cut":
-                Line(points=[x + w * 0.18, y + h * 0.18, x + w * 0.82, y + h * 0.82], width=1.3)
-                Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.18], width=1.3)
-                Line(circle=(x + w * 0.22, y + h * 0.22, min(w, h) * 0.12), width=1.15)
-                Line(circle=(x + w * 0.22, y + h * 0.78, min(w, h) * 0.12), width=1.15)
+                self._line([x + w * 0.18, y + h * 0.18, x + w * 0.82, y + h * 0.82], 1.35)
+                self._line([x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.18], 1.35)
+                Line(circle=(x + w * 0.22, y + h * 0.22, min(w, h) * 0.13), width=1.2)
+                Line(circle=(x + w * 0.22, y + h * 0.78, min(w, h) * 0.13), width=1.2)
             elif kind == "trash":
-                Line(rectangle=(x + w * 0.22, y + h * 0.12, w * 0.56, h * 0.58), width=1.2)
-                Line(points=[x + w * 0.16, y + h * 0.72, x + w * 0.84, y + h * 0.72], width=1.3)
-                Line(rectangle=(x + w * 0.38, y + h * 0.78, w * 0.24, h * 0.12), width=1.15)
+                self._fill(ink, 0.16)
+                RoundedRectangle(pos=(x + w * 0.22, y + h * 0.1), size=(w * 0.56, h * 0.58), radius=[dp(2)])
+                Color(*ink)
+                Line(rectangle=(x + w * 0.22, y + h * 0.1, w * 0.56, h * 0.58), width=1.2)
+                self._line([x + w * 0.16, y + h * 0.72, x + w * 0.84, y + h * 0.72], 1.4)
+                Line(rectangle=(x + w * 0.38, y + h * 0.78, w * 0.24, h * 0.14), width=1.15)
+                self._line([cx, y + h * 0.58, cx, y + h * 0.22], 1.05)
             elif kind == "paste":
+                self._fill(ink, 0.16)
+                RoundedRectangle(pos=(x + w * 0.18, y + h * 0.08), size=(w * 0.64, h * 0.72), radius=[dp(2)])
+                Color(*ink)
                 Line(rectangle=(x + w * 0.18, y + h * 0.08, w * 0.64, h * 0.72), width=1.2)
-                Line(rectangle=(x + w * 0.32, y + h * 0.68, w * 0.36, h * 0.22), width=1.2)
+                Line(rectangle=(x + w * 0.32, y + h * 0.68, w * 0.36, h * 0.24), width=1.2)
 
     def _horseshoe(self, cx: float, cy: float, radius: float, undo: bool) -> None:
         points: List[float] = []
@@ -3457,7 +3505,7 @@ class LibraryScreen(Screen):
         )
         self.header = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.header.add_widget(
-            ToolIcon("menu", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: self.toggle_tree())
+            ToolIcon("menu", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: self.toggle_tree())
         )
         self.title = Label(
             text=mixed_markup("הספרייה"),
@@ -3471,10 +3519,10 @@ class LibraryScreen(Screen):
         self.header.add_widget(self.title)
         self.header.add_widget(Widget())
         self.header.add_widget(
-            ToolIcon("folder", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().create_library_folder())
+            ToolIcon("folder", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().create_library_folder())
         )
         self.header.add_widget(
-            ToolIcon("plus", on_dark=True, size=(dp(42), dp(38)), trigger=lambda *_a: App.get_running_app().library_new_menu())
+            ToolIcon("plus", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().library_new_menu())
         )
         root.add_widget(self.header)
         shell = BoxLayout(orientation="horizontal", spacing=dp(8))
@@ -3510,23 +3558,33 @@ class LibraryScreen(Screen):
 
     def toggle_tree(self, *_args: Any) -> None:
         self._tree_open = not bool(self._tree_open)
-        self.tree_host.width = dp(268) if self._tree_open else 0
         self.tree_host.opacity = 1 if self._tree_open else 0
         self.tree_host.disabled = not self._tree_open
+        self._fit_tree_panel()
+
+    def _fit_tree_panel(self) -> None:
+        if not self._tree_open:
+            self.tree_host.width = 0
+            return
+        pad = dp(16)
+        needed = float(self.tree_chart.width or 0) + pad
+        cap = min(max(self.width * 0.48, dp(88)), dp(240))
+        self.tree_host.width = max(dp(72), min(cap, max(needed, dp(88))))
 
     def _on_size(self, *_args: Any) -> None:
-        cols = 4 if self.width >= dp(900) else 3
+        cols = 4 if self.width >= dp(900) else (2 if self.width < dp(520) else 3)
         if cols != self._grid_cols:
             self.refresh()
+        self._fit_tree_panel()
 
     def _grid(self) -> GridLayout:
-        cols = 4 if self.width >= dp(900) else 3
+        cols = 4 if self.width >= dp(900) else (2 if self.width < dp(520) else 3)
         grid = GridLayout(cols=cols, spacing=dp(8), size_hint_y=None, padding=(0, dp(2)))
         grid.bind(minimum_height=grid.setter("height"))
         return grid
 
     def refresh(self) -> None:
-        self._grid_cols = 4 if self.width >= dp(900) else 3
+        self._grid_cols = 4 if self.width >= dp(900) else (2 if self.width < dp(520) else 3)
         app = App.get_running_app()
         data = app.library_data()
         selected = str(getattr(app, "_library_folder", LIBRARY_ALL) or LIBRARY_ALL)
@@ -3577,6 +3635,7 @@ class LibraryScreen(Screen):
 
     def _fill_tree(self, app: Any, data: Dict[str, Any], current: str) -> None:
         self.tree_chart.set_tree(app._folder_tree_nodes(data), current)
+        Clock.schedule_once(lambda _dt: self._fit_tree_panel(), 0)
 
 
 class RootLayout(FloatLayout):
@@ -3602,7 +3661,7 @@ class RootLayout(FloatLayout):
         self.chrome = AbsorbLayout(
             orientation="vertical",
             size_hint=(1, None),
-            height=dp(CHROME_HEIGHT_DP),
+            height=self._chrome_height(),
             pos_hint={"x": 0, "top": 1},
             spacing=0,
         )
@@ -3904,7 +3963,7 @@ class RootLayout(FloatLayout):
         header = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(44),
+            height=dp(44) * layout_scale(),
             padding=(dp(8), 0, dp(12), 0),
             spacing=dp(4),
         )
@@ -3915,6 +3974,8 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._header_bg, "pos", header.pos),
             size=lambda *_args: setattr(self._header_bg, "size", header.size),
         )
+        tools = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(2))
+        tools.bind(minimum_width=tools.setter("width"))
         for key, kind, handler in (
             ("home", "home", app.show_library),
             ("open", "plus", app.open_pdf),
@@ -3923,25 +3984,29 @@ class RootLayout(FloatLayout):
             ("share", "share", app.share_current_document),
             ("toggle", "notes", self.toggle_notes),
         ):
-            button = ToolIcon(kind, on_dark=False, size=(dp(44), dp(36)), trigger=handler)
-            header.add_widget(button)
+            button = ToolIcon(kind, on_dark=False, size=tool_icon_size(), trigger=handler)
+            tools.add_widget(button)
             self.tool_buttons[key] = button
+        tools_scroll = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2), size_hint_x=0.48)
+        tools_scroll.add_widget(tools)
+        self._header_tools = tools
+        header.add_widget(tools_scroll)
         self.status_label = Label(
             text="",
             color=(0.35, 0.35, 0.38, 1),
-            font_size=dp(13),
+            font_size=dp(12) * layout_scale(),
             halign="right",
             valign="middle",
             markup=True,
+            size_hint_x=0.16,
         )
         self.title_button = Button(
             text=mixed_markup(f"> {app.document_title}"),
             color=(0.12, 0.12, 0.14, 1),
-            font_size=dp(16),
+            font_size=dp(15) * layout_scale(),
             bold=True,
             markup=True,
-            size_hint_x=None,
-            width=dp(220),
+            size_hint_x=0.36,
             background_normal="",
             background_down="",
             background_color=(1, 1, 1, 1),
@@ -3950,24 +4015,26 @@ class RootLayout(FloatLayout):
         self.title_button.bind(on_release=app.rename_document)
         header.add_widget(self.status_label)
         header.add_widget(self.title_button)
+        self._header_bar = header
         return header
 
     def _build_toolbar(self) -> BoxLayout:
         app = App.get_running_app()
-        toolbar = BoxLayout(
+        host = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(52),
-            padding=(dp(6), dp(4)),
-            spacing=dp(4),
+            height=dp(52) * layout_scale(),
+            padding=(dp(4), dp(3)),
         )
-        with toolbar.canvas.before:
+        with host.canvas.before:
             Color(*TOOLBAR_BG)
             self._toolbar_bg = Rectangle()
-        toolbar.bind(
-            pos=lambda *_args: setattr(self._toolbar_bg, "pos", toolbar.pos),
-            size=lambda *_args: setattr(self._toolbar_bg, "size", toolbar.size),
+        host.bind(
+            pos=lambda *_args: setattr(self._toolbar_bg, "pos", host.pos),
+            size=lambda *_args: setattr(self._toolbar_bg, "size", host.size),
         )
+        row = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(3), padding=(dp(2), 0))
+        row.bind(minimum_width=row.setter("width"))
         actions: Sequence[Tuple[str, str, Any]] = (
             ("pan", "pan", app.clear_tool),
             ("fit", "fit", app.reset_view),
@@ -3981,29 +4048,33 @@ class RootLayout(FloatLayout):
             ("shapes", "shapes", app.toggle_shape_menu),
         )
         for key, kind, handler in actions:
-            button = ToolIcon(kind, on_dark=True, size=(dp(48), dp(44)), trigger=handler)
-            toolbar.add_widget(button)
+            button = ToolIcon(kind, on_dark=True, size=tool_icon_size(), trigger=handler)
+            row.add_widget(button)
             self.tool_buttons[key] = button
         for key, rgba in INK_COLORS:
             dot = ColorDot(rgba, trigger=lambda _dot, name=key: app.set_ink_color(name))
-            toolbar.add_widget(dot)
+            row.add_widget(dot)
             self.color_dots[key] = dot
-        palette_btn = ToolIcon("palette", on_dark=True, trigger=app.open_color_picker)
-        toolbar.add_widget(palette_btn)
+        palette_btn = ToolIcon("palette", on_dark=True, size=tool_icon_size(), trigger=app.open_color_picker)
+        row.add_widget(palette_btn)
         self.tool_buttons["palette"] = palette_btn
-        hide_btn = ToolIcon("hide", on_dark=True, trigger=self.hide_toolbar)
-        toolbar.add_widget(Widget())
-        toolbar.add_widget(hide_btn)
+        hide_btn = ToolIcon("hide", on_dark=True, size=tool_icon_size(), trigger=self.hide_toolbar)
+        row.add_widget(hide_btn)
         self.tool_buttons["hide"] = hide_btn
-        return toolbar
+        scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
+        scroller.add_widget(row)
+        host.add_widget(scroller)
+        self._toolbar_row = row
+        self._toolbar_host = host
+        return host
 
     def _build_shape_bar(self) -> BoxLayout:
         app = App.get_running_app()
         bar = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(40),
-            padding=(dp(8), dp(4)),
+            height=dp(SHAPE_BAR_DP) * layout_scale(),
+            padding=(dp(6), dp(3)),
             spacing=dp(2),
         )
         with bar.canvas.before:
@@ -4013,22 +4084,27 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._shape_bg, "pos", bar.pos),
             size=lambda *_args: setattr(self._shape_bg, "size", bar.size),
         )
+        row = BoxLayout(orientation="horizontal", size_hint_x=None, spacing=dp(2))
+        row.bind(minimum_width=row.setter("width"))
         for kind in SHAPE_ORDER:
             button = ToolIcon(
                 kind,
                 on_dark=True,
-                size=(dp(36), dp(36)),
+                size=tool_icon_size(),
                 trigger=lambda _btn, name=kind: app.select_shape(name),
             )
-            bar.add_widget(button)
+            row.add_widget(button)
             self.tool_buttons[kind] = button
-        bar.add_widget(Widget())
+        scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
+        scroller.add_widget(row)
+        bar.add_widget(scroller)
+        self._shape_row = row
         return bar
 
     def _make_slider(
         self, kind: str, minimum: float, maximum: float, value: float, on_change: Any
     ) -> BoxLayout:
-        cluster = BoxLayout(orientation="horizontal", size_hint_x=None, width=dp(138), spacing=dp(2))
+        cluster = BoxLayout(orientation="horizontal", size_hint_x=1, spacing=dp(2))
         glyph = SliderGlyph(kind, amount=value)
         slider = Slider(min=minimum, max=maximum, value=value, size_hint_x=1)
         slider.bind(value=lambda _slider, amount, g=glyph, cb=on_change: (setattr(g, "amount", amount), cb(amount)))
@@ -4041,10 +4117,11 @@ class RootLayout(FloatLayout):
         bar = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(40),
+            height=dp(40) * layout_scale(),
             padding=(dp(8), dp(4)),
             spacing=dp(8),
         )
+        self._slider_bar = bar
         with bar.canvas.before:
             Color(*TOOLBAR_BG)
             self._slider_bg = Rectangle()
@@ -4059,12 +4136,37 @@ class RootLayout(FloatLayout):
         return bar
 
     def _chrome_height(self) -> float:
-        extra = dp(SHAPE_BAR_DP) if self._shapes_open else 0.0
-        return dp(CHROME_HEIGHT_DP) + extra
+        scale = layout_scale()
+        extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
+        return (dp(44) + dp(52) + dp(40)) * scale + extra
+
+    def _apply_chrome_metrics(self) -> None:
+        scale = layout_scale()
+        icon = tool_icon_size()
+        if hasattr(self, "_header_bar"):
+            self._header_bar.height = dp(44) * scale
+        if hasattr(self, "_toolbar_host"):
+            self._toolbar_host.height = dp(52) * scale
+        if hasattr(self, "shape_bar"):
+            if self._shapes_open:
+                self.shape_bar.height = dp(SHAPE_BAR_DP) * scale
+        if hasattr(self, "_slider_bar"):
+            self._slider_bar.height = dp(40) * scale
+        for button in self.tool_buttons.values():
+            if isinstance(button, ToolIcon):
+                button.size = icon
+        for dot in self.color_dots.values():
+            dot.size = (dp(30) * scale, dp(30) * scale)
+        if hasattr(self, "title_button"):
+            self.title_button.font_size = dp(15) * scale
+        if hasattr(self, "status_label"):
+            self.status_label.font_size = dp(12) * scale
+        if self.toolbar_visible:
+            self.chrome.height = self._chrome_height()
 
     def set_shapes_open(self, open_menu: bool) -> None:
         self._shapes_open = bool(open_menu)
-        self.shape_bar.height = dp(SHAPE_BAR_DP) if self._shapes_open else 0
+        self.shape_bar.height = dp(SHAPE_BAR_DP) * layout_scale() if self._shapes_open else 0
         self.shape_bar.opacity = 1 if self._shapes_open else 0
         self.shape_bar.disabled = not self._shapes_open
         if self.toolbar_visible:
@@ -4124,6 +4226,7 @@ class RootLayout(FloatLayout):
             dot.selected = drawing and rgb == tuple(rgba[:3])
 
     def apply_orientation(self, *_args: Any) -> None:
+        self._apply_chrome_metrics()
         self._fit_workspace()
 
     def dock_notes(self) -> None:
@@ -4131,7 +4234,9 @@ class RootLayout(FloatLayout):
         work_w, work_h = float(self.workspace.width), float(self.workspace.height)
         notes_w = 0.0
         if self.notes_expanded:
-            notes_w = min(dp(360), max(dp(170), work_w * 0.30))
+            phone = (float(Window.width) / float(dp(1) or 1.0)) < 520
+            ratio = 0.22 if phone else 0.30
+            notes_w = min(dp(360), max(dp(92) if phone else dp(170), work_w * ratio))
             self.notes_canvas.opacity = 1
             self.notes_canvas.disabled = False
         else:
@@ -5125,8 +5230,13 @@ class SamsungNotesCompanionApp(App):
                 continue
         intent.putExtra("android.intent.extra.STREAM", uri)
 
+    def _share_content_uri(self, activity: Any, path: str, title: str) -> Any:
+        try:
+            return self._android_file_uri(activity, path)
+        except Exception:
+            return self._android_mediastore_pdf_uri(activity, path, title)
+
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
-        from android.runnable import run_on_ui_thread
         from jnius import autoclass, cast
 
         Intent = autoclass("android.content.Intent")
@@ -5134,7 +5244,7 @@ class SamsungNotesCompanionApp(App):
         ClipData = autoclass("android.content.ClipData")
         if len(uris) == 1:
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("*/*")
+            intent.setType("application/pdf")
             self._put_share_stream(intent, uris[0])
         else:
             ArrayList = autoclass("java.util.ArrayList")
@@ -5142,28 +5252,27 @@ class SamsungNotesCompanionApp(App):
             for uri in uris:
                 stream.add(cast("android.os.Parcelable", uri))
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-            intent.setType("*/*")
+            intent.setType("application/pdf")
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
-        clip = ClipData.newRawUri(String("file"), uris[0])
+        clip = ClipData.newRawUri(String("pdf"), uris[0])
         for uri in uris[1:]:
             clip.addItem(ClipData.Item(uri))
         intent.setClipData(clip)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        self._share_keep = [list(uris), intent, clip, chooser]
-
-        @run_on_ui_thread
-        def _open() -> None:
-            try:
-                activity.startActivity(chooser)
-            except Exception:
-                try:
-                    activity.startActivity(intent)
-                except Exception:
-                    Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל"), 0)
-
-        _open()
+        self._share_keep = [list(uris), intent, clip, chooser, activity]
+        try:
+            Builder = autoclass("androidx.core.app.ShareCompat$IntentBuilder")
+            builder = Builder(activity)
+            builder.setType("application/pdf")
+            for uri in uris:
+                builder.addStream(uri)
+            builder.startChooser()
+            return
+        except Exception:
+            pass
+        activity.startActivity(chooser)
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -5173,23 +5282,29 @@ class SamsungNotesCompanionApp(App):
         if not is_android():
             self._notify(f"PDF נשמר: {files[0]}")
             return
+        from android.runnable import run_on_ui_thread
         from jnius import autoclass
 
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
         activity = PythonActivity.mActivity
+        cached_files = []
         try:
-            uris = []
-            for path in files:
-                cached = self._copy_share_into_cache(activity, path)
-                try:
-                    uris.append(self._android_file_uri(activity, cached))
-                except Exception:
-                    uris.append(self._android_mediastore_pdf_uri(activity, cached, title))
-            if not uris:
-                raise RuntimeError("no uri")
-            self._launch_share_intent(activity, uris, title)
+            cached_files = [self._copy_share_into_cache(activity, path) for path in files]
         except Exception:
             self._notify("שיתוף נכשל")
+            return
+
+        @run_on_ui_thread
+        def _share() -> None:
+            try:
+                uris = [self._share_content_uri(activity, path, title) for path in cached_files]
+                if not uris:
+                    raise RuntimeError("no uri")
+                self._launch_share_intent(activity, uris, title)
+            except Exception:
+                Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל"), 0)
+
+        _share()
 
     def create_library_folder(self, *_args: Any) -> None:
         self._folder_editor(None, parent_id=self._library_parent_id())
