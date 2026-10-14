@@ -54,6 +54,8 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import FadeTransition, Screen, ScreenManager
+from kivy.graphics.transformation import Matrix
+from kivy.uix.scatter import Scatter
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
 from kivy.uix.spinner import Spinner
@@ -3172,6 +3174,44 @@ class NoteGlyph(Widget):
         self._ring.circle = (x + w - dp(11), y + h - dp(11), dp(8))
 
 
+class TreeScatter(Scatter):
+    """Pinch-zoom and pan for the folder flowchart."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("do_rotation", False)
+        kwargs.setdefault("do_translation", True)
+        kwargs.setdefault("do_scale", True)
+        kwargs.setdefault("auto_bring_to_front", False)
+        super().__init__(**kwargs)
+        self.scale_min = 0.45
+        self.scale_max = 3.2
+
+    def reset_view(self) -> None:
+        self.transform = Matrix()
+        self.scale = 1.0
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        start = touch.ud.get("_tree_xy")
+        scale0 = float(touch.ud.get("_tree_scale") or self.scale)
+        handled = super().on_touch_up(touch)
+        if start is None or not self.collide_point(*start):
+            return handled
+        if abs(self.scale - scale0) > 0.04:
+            return handled
+        if math.hypot(touch.x - start[0], touch.y - start[1]) > dp(16):
+            return handled
+        chart = self.children[0] if self.children else None
+        if chart is not None and hasattr(chart, "select_at"):
+            lx, ly = self.to_local(*touch.pos)
+            chart.select_at(lx, ly)
+        return handled
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        touch.ud["_tree_xy"] = (touch.x, touch.y)
+        touch.ud["_tree_scale"] = self.scale
+        return super().on_touch_down(touch)
+
+
 class FolderFlowChart(Widget):
     """Compact top-down flowchart of nested folders."""
 
@@ -3189,17 +3229,29 @@ class FolderFlowChart(Widget):
         Clock.schedule_once(self._redraw, 0)
 
     def _metrics(self) -> Tuple[float, float, float, float]:
-        return dp(76), dp(26), dp(10), dp(18)
+        return dp(52), dp(24), dp(8), dp(16)
 
     def set_tree(self, root: Dict[str, Any], selected: str) -> None:
         self._root = root or {"id": "", "name": "הספרייה", "color": "#9AA0A8", "children": []}
         self._selected = str(selected or "")
         self._measure(self._root)
-        pad = dp(8)
-        self.width = max(dp(120), float(self._root.get("_sw") or 0) + pad * 2)
-        self.height = max(dp(48), float(self._root.get("_sh") or 0) + pad * 2)
-        self._place(self._root, self.x + pad, self.y + self.height - pad)
+        self._layout_centered()
+        parent = self.parent
+        if isinstance(parent, TreeScatter):
+            parent.reset_view()
         self._redraw()
+
+    def _layout_centered(self) -> None:
+        pad = dp(8)
+        content_w = float(self._root.get("_sw") or 0)
+        content_h = float(self._root.get("_sh") or 0)
+        host_w = self.parent.width if self.parent is not None else dp(200)
+        host_h = self.parent.height if self.parent is not None else dp(200)
+        self.width = max(host_w, content_w + pad * 2)
+        self.height = max(host_h, content_h + pad * 2)
+        left = self.x + (self.width - content_w) / 2.0
+        top = self.y + (self.height + content_h) / 2.0
+        self._place(self._root, left, top)
 
     def _measure(self, node: Dict[str, Any]) -> None:
         kids = list(node.get("children") or [])
@@ -3216,7 +3268,7 @@ class FolderFlowChart(Widget):
     def _place(self, node: Dict[str, Any], left: float, top: float) -> None:
         kids = list(node.get("children") or [])
         nw, nh, gx, gy = self._metrics()
-        node["_x"] = left
+        node["_x"] = left + (float(node["_sw"]) - nw) / 2.0
         node["_y"] = top - nh
         node["_nw"] = nw
         node["_nh"] = nh
@@ -3231,8 +3283,7 @@ class FolderFlowChart(Widget):
         self._drawing = True
         try:
             if self._root:
-                pad = dp(8)
-                self._place(self._root, self.x + pad, self.y + self.height - pad)
+                self._layout_centered()
             self.canvas.clear()
             self._hits = []
             with self.canvas:
@@ -3242,7 +3293,7 @@ class FolderFlowChart(Widget):
 
     def _caption_texture(self, title: str, width: float, height: float) -> Optional[Any]:
         kwargs: Dict[str, Any] = {
-            "text": ui_text(_short_label(title, 10)),
+            "text": ui_text(_short_label(title, 8)),
             "font_size": int(dp(11)),
             "color": (1, 1, 1, 1),
             "halign": "center",
@@ -3272,15 +3323,15 @@ class FolderFlowChart(Widget):
         kids = list(node.get("children") or [])
         x = float(node.get("_x") or self.x)
         y = float(node.get("_y") or self.y)
-        nw = float(node.get("_nw") or dp(76))
-        nh = float(node.get("_nh") or dp(26))
+        nw = float(node.get("_nw") or dp(52))
+        nh = float(node.get("_nh") or dp(24))
         fid = str(node.get("id") or "")
         selected = fid == self._selected
         rgba = _folder_rgba(str(node.get("color") or "#9AA0A8"))
         px, py = x + nw / 2.0, y
         for child in kids:
-            cx = float(child.get("_x") or 0) + float(child.get("_nw") or dp(76)) / 2.0
-            cy = float(child.get("_y") or 0) + float(child.get("_nh") or dp(26))
+            cx = float(child.get("_x") or 0) + float(child.get("_nw") or dp(52)) / 2.0
+            cy = float(child.get("_y") or 0) + float(child.get("_nh") or dp(24))
             Color(0.45, 0.48, 0.54, 0.9)
             Line(points=[px, py, px, (py + cy) / 2.0, cx, (py + cy) / 2.0, cx, cy], width=1.0)
         if selected:
@@ -3301,15 +3352,16 @@ class FolderFlowChart(Widget):
         for child in kids:
             self._draw_node(child)
 
-    def on_touch_down(self, touch: MotionEvent) -> bool:
-        if not self.collide_point(*touch.pos):
-            return super().on_touch_down(touch)
+    def select_at(self, x: float, y: float) -> bool:
         app = App.get_running_app()
-        for fid, x, y, nw, nh in reversed(self._hits):
-            if x <= touch.x <= x + nw and y <= touch.y <= y + nh:
+        for fid, nx, ny, nw, nh in reversed(self._hits):
+            if nx <= x <= nx + nw and ny <= y <= ny + nh:
                 app.select_library_folder(fid or LIBRARY_ALL)
                 return True
-        return super().on_touch_down(touch)
+        return False
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        return False
 
 
 class FolderTile(_HoldButton):
@@ -3437,15 +3489,9 @@ class LibraryScreen(Screen):
             size=lambda *_a: setattr(self._tree_bg, "size", self.tree_host.size),
         )
         self.tree_chart = FolderFlowChart()
-        tree_scroll = ScrollView(
-            do_scroll_x=True,
-            do_scroll_y=True,
-            bar_width=dp(3),
-            bar_pos_y="left",
-            size_hint=(1, 1),
-        )
-        tree_scroll.add_widget(self.tree_chart)
-        self.tree_host.add_widget(tree_scroll)
+        self.tree_scatter = TreeScatter(size_hint=(1, 1))
+        self.tree_scatter.add_widget(self.tree_chart)
+        self.tree_host.add_widget(self.tree_scatter)
         self.tree_host.opacity = 0
         self.tree_host.disabled = True
         self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8), padding=(0, dp(4)))
@@ -4918,10 +4964,9 @@ class SamsungNotesCompanionApp(App):
         from jnius import autoclass, cast
 
         File = autoclass("java.io.File")
-        java_file = File(str(path)).getCanonicalFile()
+        java_file = File(str(path))
         if not java_file.exists():
             raise RuntimeError("share file missing")
-        context = activity.getApplicationContext()
         package = str(activity.getPackageName())
         authorities = (package + ".fileprovider",)
         providers = (
@@ -4930,18 +4975,19 @@ class SamsungNotesCompanionApp(App):
             "android.support.v4.content.FileProvider",
         )
         last_error: Optional[Exception] = None
-        for cls_name in providers:
-            try:
-                provider = autoclass(cls_name)
-            except Exception as exc:
-                last_error = exc
-                continue
-            for authority in authorities:
+        for context in (activity, activity.getApplicationContext()):
+            for cls_name in providers:
                 try:
-                    uri = provider.getUriForFile(context, authority, java_file)
-                    return cast("android.net.Uri", uri)
+                    provider = autoclass(cls_name)
                 except Exception as exc:
                     last_error = exc
+                    continue
+                for authority in authorities:
+                    try:
+                        uri = provider.getUriForFile(context, authority, java_file)
+                        return cast("android.net.Uri", uri)
+                    except Exception as exc:
+                        last_error = exc
         if last_error is not None:
             raise last_error
         raise RuntimeError("FileProvider unavailable")
@@ -4983,30 +5029,34 @@ class SamsungNotesCompanionApp(App):
         FilesTable = autoclass("android.provider.MediaStore$Files")
         resolver = activity.getContentResolver()
         display = f"note-{uuid.uuid4().hex[:8]}.pdf"
-        collections = [FilesTable.getContentUri("external")]
+        collections: List[Any] = []
         sdk = int(Build.VERSION.SDK_INT)
         if sdk >= 29:
             try:
-                collections.insert(0, FilesTable.getContentUri("external_primary"))
+                collections.append(FilesTable.getContentUri("external_primary"))
             except Exception:
                 pass
+        collections.append(FilesTable.getContentUri("external"))
         last_error: Optional[Exception] = None
         for collection in collections:
-            try:
-                values = ContentValues()
-                values.put("_display_name", display)
-                values.put("mime_type", "application/pdf")
-                uri = resolver.insert(collection, values)
-                if uri is None:
-                    continue
-                source = autoclass("java.io.FileInputStream")(str(path))
-                dest = resolver.openOutputStream(uri)
-                autoclass("android.os.FileUtils").copy(source, dest)
-                source.close()
-                dest.close()
-                return cast("android.net.Uri", uri)
-            except Exception as exc:
-                last_error = exc
+            for rel in ("Documents/", "Download/", None):
+                try:
+                    values = ContentValues()
+                    values.put("_display_name", display)
+                    values.put("mime_type", "application/pdf")
+                    if rel:
+                        values.put("relative_path", rel)
+                    uri = resolver.insert(collection, values)
+                    if uri is None:
+                        continue
+                    source = autoclass("java.io.FileInputStream")(str(path))
+                    dest = resolver.openOutputStream(uri)
+                    autoclass("android.os.FileUtils").copy(source, dest)
+                    source.close()
+                    dest.close()
+                    return cast("android.net.Uri", uri)
+                except Exception as exc:
+                    last_error = exc
         if last_error is not None:
             raise last_error
         raise RuntimeError("MediaStore insert failed")
@@ -5093,13 +5143,12 @@ class SamsungNotesCompanionApp(App):
             try:
                 activity.startActivity(chooser)
             except Exception:
-                Clock.schedule_once(lambda *_a: self._fallback_share_save(), 0)
+                try:
+                    activity.startActivity(intent)
+                except Exception:
+                    Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל"), 0)
 
         _open()
-
-    def _fallback_share_save(self) -> None:
-        self._notify("בחרי לאן לשמור את הקובץ")
-        self._start_android_save(".pdf", "application/pdf")
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -5125,7 +5174,7 @@ class SamsungNotesCompanionApp(App):
                 raise RuntimeError("no uri")
             self._launch_share_intent(activity, uris, title)
         except Exception:
-            self._fallback_share_save()
+            self._notify("שיתוף נכשל")
 
     def create_library_folder(self, *_args: Any) -> None:
         self._folder_editor(None, parent_id=self._library_parent_id())
