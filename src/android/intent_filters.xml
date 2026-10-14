@@ -1,0 +1,28 @@
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:mimeType="application/vnd.samsungnotes.companion" />
+    <data android:mimeType="application/zip" />
+    <data android:mimeType="application/x-zip-compressed" />
+    <data android:mimeType="application/octet-stream" />
+</intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.snc" />
+    <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.snc" />
+    <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\..*\\.snc" />
+    <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\..*\\.snc" />
+</intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="application/vnd.samsungnotes.companion" />
+    <data android:mimeType="application/zip" />
+    <data android:mimeType="application/x-zip-compressed" />
+    <data android:mimeType="application/octet-stream" />
+</intent-filter>

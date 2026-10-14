@@ -13,7 +13,7 @@ package.domain = org.samsungnotes
 source.dir = .
 
 # (list) Source files to include (leave empty to include all the files)
-source.include_exts = py,png,jpg,jpeg,atlas,kv,pdf
+source.include_exts = py,png,jpg,jpeg,atlas,kv,pdf,xml
 
 # (list) Source files to exclude (leave empty to not exclude anything)
 source.exclude_exts = spec
@@ -72,6 +72,10 @@ android.allow_backup = True
 
 # Needed so the system document picker (My Files / Drive) can return a URI.
 android.enable_androidx = True
+
+# Open shared .snc companion packs from other apps / file managers.
+android.manifest.intent_filters = src/android/intent_filters.xml
+android.activity_launch_mode = singleTask
 
 # Modern loading screen shown while Python starts.
 presplash.filename = assets/presplash.png

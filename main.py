@@ -188,6 +188,7 @@ SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
 )
 COMPANION_PACK_KIND = "snc-pack-1"
 COMPANION_PACK_EXT = ".snc"
+COMPANION_MIME = "application/vnd.samsungnotes.companion"
 
 
 def is_android() -> bool:
@@ -3672,14 +3673,16 @@ class FolderFlowChart(Widget):
     def content_width(self) -> float:
         return float(self._root.get("_sw") or 0) + dp(16)
 
+    def content_height(self) -> float:
+        return float(self._root.get("_sh") or 0) + dp(16)
+
     def _layout_centered(self) -> None:
         pad = dp(8)
         content_w = float(self._root.get("_sw") or 0)
         content_h = float(self._root.get("_sh") or 0)
         host_w = self.parent.width if self.parent is not None else content_w + pad * 2
-        host_h = self.parent.height if self.parent is not None else content_h + pad * 2
         self.width = max(host_w, content_w + pad * 2)
-        self.height = max(host_h, content_h + pad * 2)
+        self.height = content_h + pad * 2
         left = self.x + (self.width - content_w) / 2.0
         top = self.y + self.height - pad
         self._place(self._root, left, top)
@@ -3912,11 +3915,13 @@ class LibraryScreen(Screen):
         self.header.add_widget(self.doc_add_btn)
         root.add_widget(self.header)
         root.add_widget(self._hairline())
-        shell = BoxLayout(orientation="horizontal", spacing=dp(10), padding=(0, dp(12), 0, 0))
+        shell = FloatLayout()
+        self._library_shell = shell
         self.tree_host = TreeHost(
             orientation="vertical",
-            size_hint_x=None,
+            size_hint=(None, None),
             width=0,
+            height=0,
             padding=(dp(10), dp(10), dp(10), dp(10)),
             spacing=dp(8),
         )
@@ -3939,6 +3944,7 @@ class LibraryScreen(Screen):
             hint_text_color=ui_color("muted"),
             cursor_color=ui_color("text"),
             write_tab=False,
+            halign="right",
         )
         style_hebrew_input(self.search_field)
         self.search_field.bind(text=self._on_search)
@@ -3955,7 +3961,7 @@ class LibraryScreen(Screen):
         self._nav_label = nav_lbl
         self.tree_host.add_widget(nav_lbl)
         self.tree_chart = FolderFlowChart()
-        self.tree_scatter = TreeScatter(size_hint=(1, 1))
+        self.tree_scatter = TreeScatter(size_hint=(1, None), height=dp(80))
         self.tree_scatter.add_widget(self.tree_chart)
         self.tree_host.add_widget(self.tree_scatter)
         self.tree_host.add_widget(self._hairline())
@@ -3970,7 +3976,7 @@ class LibraryScreen(Screen):
         )
         self._set_label = set_lbl
         self.tree_host.add_widget(set_lbl)
-        settings = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(108), spacing=dp(8))
+        settings = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(60), spacing=dp(8))
         theme_row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(6))
         theme_row.add_widget(Widget())
         self.theme_btn = ToolIcon(
@@ -3981,23 +3987,19 @@ class LibraryScreen(Screen):
         )
         theme_row.add_widget(self.theme_btn)
         settings.add_widget(theme_row)
-        self.sort_btn = ChoiceButton(
-            "מיון: עדכני",
-            on_press=lambda: App.get_running_app().toggle_library_sort(),
-            height=dp(36),
-        )
-        settings.add_widget(self.sort_btn)
         self._settings_box = settings
         self.tree_host.add_widget(settings)
         self.tree_host.opacity = 0
         self.tree_host.disabled = True
         self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(14), padding=(0, dp(6), 0, dp(8)))
         self.body.bind(minimum_height=self.body.setter("height"))
-        scroller = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        scroller = ScrollView(do_scroll_x=False, bar_width=dp(3), size_hint=(1, 1))
         scroller.add_widget(self.body)
-        shell.add_widget(self.tree_host)
+        self._library_scroller = scroller
         shell.add_widget(scroller)
+        shell.add_widget(self.tree_host)
         root.add_widget(shell)
+        shell.bind(pos=self._place_library_shell, size=self._place_library_shell)
         self.add_widget(root)
         self._grid_cols = 0
         self.bind(size=self._on_size)
@@ -4039,10 +4041,6 @@ class LibraryScreen(Screen):
         for btn in (self.menu_btn, self.folder_add_btn, self.doc_add_btn, self.theme_btn):
             btn.on_dark = dark
             btn._redraw()
-        app = App.get_running_app()
-        sort_key = str(getattr(app, "doc_sort", "recent") or "recent")
-        self.sort_btn.text = mixed_markup("מיון: עדכני" if sort_key != "name" else "מיון: שם")
-        self.sort_btn._paint()
         for color in getattr(self, "_hair_colors", []):
             color.rgba = ui_color("hair")
         self.refresh()
@@ -4052,10 +4050,28 @@ class LibraryScreen(Screen):
         self.tree_host.opacity = 1 if self._tree_open else 0
         self.tree_host.disabled = not self._tree_open
         self._fit_tree_panel()
+        app = App.get_running_app()
+        if is_android() and hasattr(app, "_sync_library_search_edit"):
+            app._sync_library_search_edit()
+
+    def _place_library_shell(self, *_args: Any) -> None:
+        shell = getattr(self, "_library_shell", None)
+        scroller = getattr(self, "_library_scroller", None)
+        if shell is None or scroller is None:
+            return
+        scroller.pos = shell.pos
+        scroller.size = shell.size
+        self._fit_tree_panel()
 
     def _fit_tree_panel(self) -> None:
+        shell = getattr(self, "_library_shell", None)
         if not self._tree_open:
             self.tree_host.width = 0
+            self.tree_host.height = 0
+            if is_android():
+                app = App.get_running_app()
+                if hasattr(app, "_hide_rtl_edit"):
+                    app._hide_rtl_edit("search")
             return
         needed = max(dp(210), float(self.tree_chart.content_width()) + dp(28))
         try:
@@ -4065,6 +4081,32 @@ class LibraryScreen(Screen):
             pass
         cap = max(dp(210), min(float(self.width) * 0.46, max(1.0, float(self.width) - dp(8))))
         self.tree_host.width = min(cap, max(dp(210), needed))
+        chart_h = max(dp(72), float(self.tree_chart.content_height()) + dp(12))
+        self.tree_scatter.size_hint_y = None
+        self.tree_scatter.height = chart_h
+        try:
+            self.tree_chart._layout_centered()
+        except Exception:
+            pass
+        pad = dp(20)
+        spacing = dp(8) * 4
+        host_h = (
+            pad
+            + self.search_field.height
+            + self._nav_label.height
+            + self.tree_scatter.height
+            + dp(1)
+            + self._set_label.height
+            + self._settings_box.height
+            + spacing
+        )
+        if shell is not None:
+            host_h = min(host_h, max(dp(120), float(shell.height)))
+            self.tree_host.x = shell.x
+            self.tree_host.height = host_h
+            self.tree_host.y = shell.top - host_h
+        else:
+            self.tree_host.height = host_h
         self._tree_bg.pos = self.tree_host.pos
         self._tree_bg.size = self.tree_host.size
 
@@ -5346,16 +5388,27 @@ class SamsungNotesCompanionApp(App):
         self.library_screen.refresh()
 
     def library_new_menu(self, *_args: Any) -> None:
-        body, popup = self._card_popup(0.70, dp(188))
+        body, popup = self._card_popup(0.70, dp(236))
         body.add_widget(Label(text=mixed_markup("מסמך חדש"), markup=True, color=ui_color("text"), size_hint_y=None, height=dp(28)))
         body.add_widget(ChoiceButton("מסמך חדש", on_press=lambda: (popup.dismiss(), self.new_library_document()), primary=True))
         body.add_widget(ChoiceButton("ייבוא PDF", on_press=lambda: (popup.dismiss(), self.import_library_pdf())))
+        body.add_widget(ChoiceButton("ייבוא מסמך חי", on_press=lambda: (popup.dismiss(), self.import_live_document())))
         popup.open()
         apply_hebrew_ui(popup, "מסמך חדש")
 
     def import_library_pdf(self, *_args: Any) -> None:
         self._current_doc_id = None
         self.open_pdf()
+
+    def import_live_document(self, *_args: Any) -> None:
+        if is_android():
+            try:
+                self._start_android_open()
+                return
+            except Exception as exc:
+                self._notify(f"לא ניתן לבחור קובץ: {exc}")
+                return
+        self._desktop_open_dialog()
 
     def new_library_document(self, *_args: Any) -> None:
         self._autosave_library_doc()
@@ -6585,6 +6638,7 @@ class SamsungNotesCompanionApp(App):
             size_hint_y=None,
             height=dp(40),
             padding=(dp(10), dp(8)),
+            halign="right",
         )
         style_hebrew_input(field)
         swatches = GridLayout(cols=6, spacing=dp(6), size_hint_y=None, height=dp(112))
@@ -6606,7 +6660,8 @@ class SamsungNotesCompanionApp(App):
         popup.auto_dismiss = False
 
         def _save() -> None:
-            name = field.text.strip() or "תיקייה"
+            typed = self._rtl_edit_value("folder") if is_android() else field.text
+            name = str(typed or "").strip() or "תיקייה"
             data = self.library_data()
             folders = data.setdefault("folders", [])
             if folder is None:
@@ -6634,9 +6689,27 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(field)
         body.add_widget(swatches)
         body.add_widget(buttons)
+        popup.bind(
+            on_dismiss=lambda *_a: (
+                self._hide_rtl_edit("folder"),
+                self._sync_library_search_edit(),
+            )
+        )
         popup.open()
         apply_hebrew_ui(popup, "תיקייה")
-        focus_system_keyboard(field)
+        if is_android():
+            field.opacity = 0
+            Clock.schedule_once(
+                lambda *_a: self._show_rtl_edit(
+                    "folder",
+                    field,
+                    "שם התיקייה",
+                    str((folder or {}).get("name") or ""),
+                ),
+                0.25,
+            )
+        else:
+            focus_system_keyboard(field)
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
@@ -6822,9 +6895,207 @@ class SamsungNotesCompanionApp(App):
             from android import activity
 
             activity.bind(on_activity_result=self._on_activity_result)
+            activity.bind(on_new_intent=self._on_new_intent)
         except Exception:
             pass
+        self._rtl_edits: Dict[str, Any] = {}
+        Clock.schedule_once(lambda _dt: self._consume_launch_intent(), 1.0)
+        Clock.schedule_interval(lambda _dt: self._layout_rtl_edits(), 0.2)
         self._attach_spen_listeners()
+
+    def _on_new_intent(self, intent: Any, *_args: Any) -> None:
+        Clock.schedule_once(lambda _dt, item=intent: self._handle_incoming_intent(item), 0.2)
+
+    def _consume_launch_intent(self) -> None:
+        try:
+            from jnius import autoclass
+
+            intent = autoclass("org.kivy.android.PythonActivity").mActivity.getIntent()
+            self._handle_incoming_intent(intent)
+        except Exception:
+            pass
+
+    def _handle_incoming_intent(self, intent: Any) -> None:
+        if intent is None:
+            return
+        try:
+            from jnius import autoclass
+
+            Intent = autoclass("android.content.Intent")
+            action = str(intent.getAction() or "")
+            if action in ("", Intent.ACTION_MAIN):
+                return
+            uri = intent.getData()
+            if action in (Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE) or uri is None:
+                try:
+                    extra = intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                    if extra is not None:
+                        uri = extra
+                except Exception:
+                    pass
+                if uri is None:
+                    try:
+                        clip = intent.getClipData()
+                        if clip is not None and int(clip.getItemCount()) > 0:
+                            uri = clip.getItemAt(0).getUri()
+                    except Exception:
+                        pass
+            marker = f"{action}:{uri}"
+            if not uri or marker == getattr(self, "_handled_intent", ""):
+                return
+            self._handled_intent = marker
+            self._open_android_uri(uri)
+        except Exception:
+            pass
+
+    def _android_content_view(self) -> Any:
+        from jnius import autoclass
+
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        return activity.findViewById(autoclass("android.R$id").content)
+
+    def _configure_rtl_edit(self, edit: Any, hint: str, initial: str) -> None:
+        from jnius import autoclass
+
+        View = autoclass("android.view.View")
+        Gravity = autoclass("android.view.Gravity")
+        InputType = autoclass("android.text.InputType")
+        String = autoclass("java.lang.String")
+        ColorCls = autoclass("android.graphics.Color")
+        edit.setSingleLine(True)
+        edit.setHint(String(hint or ""))
+        edit.setText(String(str(initial or "")))
+        edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+        try:
+            edit.setLayoutDirection(View.LAYOUT_DIRECTION_RTL)
+            edit.setTextDirection(View.TEXT_DIRECTION_RTL)
+            edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
+        except Exception:
+            pass
+        edit.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT)
+        dark = not is_light_theme()
+        edit.setTextColor(ColorCls.parseColor("#FFF2F3F5" if dark else "#FF22242A"))
+        edit.setHintTextColor(ColorCls.parseColor("#FF9AA0A8"))
+        edit.setBackgroundColor(ColorCls.parseColor("#33222222" if dark else "#14FFFFFF"))
+        try:
+            edit.setSelection(edit.getText().length())
+        except Exception:
+            pass
+
+    def _show_rtl_edit(self, role: str, widget: Any, hint: str, initial: str) -> None:
+        if not is_android() or widget is None:
+            return
+        self._hide_rtl_edit(role)
+        try:
+            from android.runnable import run_on_ui_thread
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            EditText = autoclass("android.widget.EditText")
+            FrameLayout = autoclass("android.widget.FrameLayout$LayoutParams")
+            edit = EditText(activity)
+            self._configure_rtl_edit(edit, hint, initial)
+            params = FrameLayout(int(max(1, widget.width)), int(max(1, widget.height)))
+            host = self._android_content_view()
+            self._rtl_edits[role] = {"view": edit, "widget": widget, "parent": host, "params": params}
+
+            @run_on_ui_thread
+            def _add() -> None:
+                try:
+                    host.addView(edit, params)
+                    self._layout_rtl_edits()
+                except Exception:
+                    pass
+
+            _add()
+        except Exception:
+            self._rtl_edits.pop(role, None)
+
+    def _layout_rtl_edits(self) -> None:
+        if not is_android():
+            return
+        try:
+            from jnius import autoclass
+
+            Gravity = autoclass("android.view.Gravity")
+        except Exception:
+            return
+        for item in list(getattr(self, "_rtl_edits", {}).values()):
+            widget = item.get("widget")
+            view = item.get("view")
+            params = item.get("params")
+            if widget is None or view is None or params is None:
+                continue
+            if widget.width < 2 or widget.height < 2 or widget.parent is None:
+                continue
+            wx, wy = widget.to_window(*widget.pos)
+            params.width = int(max(1, widget.width))
+            params.height = int(max(1, widget.height))
+            params.leftMargin = int(wx)
+            params.topMargin = int(max(0, Window.height - wy - widget.height))
+            params.gravity = Gravity.TOP | Gravity.LEFT
+            try:
+                view.setLayoutParams(params)
+            except Exception:
+                pass
+
+    def _rtl_edit_value(self, role: str) -> str:
+        item = getattr(self, "_rtl_edits", {}).get(role) or {}
+        view = item.get("view")
+        if view is None:
+            return ""
+        try:
+            return str(view.getText().toString() or "")
+        except Exception:
+            return ""
+
+    def _hide_rtl_edit(self, role: str) -> None:
+        item = getattr(self, "_rtl_edits", {}).pop(role, None)
+        if not item:
+            return
+        view = item.get("view")
+        parent = item.get("parent")
+        if view is None:
+            return
+        try:
+            from android.runnable import run_on_ui_thread
+
+            @run_on_ui_thread
+            def _remove() -> None:
+                try:
+                    if parent is not None:
+                        parent.removeView(view)
+                except Exception:
+                    pass
+
+            _remove()
+        except Exception:
+            pass
+
+    def _sync_library_search_edit(self) -> None:
+        screen = getattr(self, "library_screen", None)
+        if not is_android() or screen is None or not getattr(screen, "_tree_open", False):
+            Clock.unschedule(self._poll_search_edit)
+            self._hide_rtl_edit("search")
+            return
+        field = screen.search_field
+        field.opacity = 0
+        Clock.unschedule(self._poll_search_edit)
+        Clock.schedule_interval(self._poll_search_edit, 0.25)
+        if "search" in getattr(self, "_rtl_edits", {}):
+            self._layout_rtl_edits()
+            return
+        self._show_rtl_edit("search", field, "חיפוש תיקיות ומסמכים", field.text)
+
+    def _poll_search_edit(self, _dt: float) -> bool:
+        screen = getattr(self, "library_screen", None)
+        if not is_android() or screen is None or not getattr(screen, "_tree_open", False):
+            self._hide_rtl_edit("search")
+            return False
+        value = self._rtl_edit_value("search")
+        if value != getattr(screen, "_query", ""):
+            screen._on_search(screen.search_field, value)
+        return True
 
     def _update_spen_from_motion(self, event: Any) -> None:
         action_down = 0
@@ -7404,8 +7675,11 @@ class SamsungNotesCompanionApp(App):
 
     def _open_android_uri(self, uri: Any) -> None:
         display = self._uri_display_name(uri)
+        suffix = Path(str(display or "")).suffix.lower()
+        if suffix not in {".snc", ".pdf", ".json", ".zip", ".png", ".jpg", ".jpeg", ".webp", ".sdocx", ".notes"}:
+            suffix = ".bin"
         try:
-            path = self._copy_uri_to_temp(uri, ".bin")
+            path = self._copy_uri_to_temp(uri, suffix)
         except Exception as exc:
             self._notify(f"לא ניתן להעתיק את הקובץ: {exc}")
             return
@@ -7886,10 +8160,7 @@ class SamsungNotesCompanionApp(App):
     def is_companion_pack(self, path: str) -> bool:
         try:
             with zipfile.ZipFile(path, "r") as archive:
-                if "companion.json" not in archive.namelist():
-                    return False
-                payload = json.loads(archive.read("companion.json").decode("utf-8"))
-            return str(payload.get("pack_kind") or "") == COMPANION_PACK_KIND
+                return "companion.json" in archive.namelist()
         except Exception:
             return False
 
@@ -8663,11 +8934,18 @@ class SamsungNotesCompanionApp(App):
             edit = EditText(activity)
             edit.setText(String(str(initial or "")))
             edit.setHint(String(title or "שם"))
+            try:
+                View = autoclass("android.view.View")
+                edit.setLayoutDirection(View.LAYOUT_DIRECTION_RTL)
+                edit.setTextDirection(View.TEXT_DIRECTION_RTL)
+                edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
+            except Exception:
+                pass
             if multiline:
                 edit.setSingleLine(False)
                 edit.setMinLines(4)
                 edit.setMaxLines(8)
-                edit.setGravity(Gravity.TOP | Gravity.START)
+                edit.setGravity(Gravity.TOP | Gravity.RIGHT)
                 edit.setInputType(
                     InputType.TYPE_CLASS_TEXT
                     | InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -8676,6 +8954,7 @@ class SamsungNotesCompanionApp(App):
                 )
             else:
                 edit.setSingleLine(True)
+                edit.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT)
                 edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
             edit.setTextColor(ColorCls.parseColor("#FF111111"))
             edit.setHintTextColor(ColorCls.parseColor("#FF777777"))
