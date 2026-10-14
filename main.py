@@ -3299,12 +3299,15 @@ class FolderFlowChart(Widget):
             parent.reset_view()
         self._redraw()
 
+    def content_width(self) -> float:
+        return float(self._root.get("_sw") or 0) + dp(16)
+
     def _layout_centered(self) -> None:
         pad = dp(8)
         content_w = float(self._root.get("_sw") or 0)
         content_h = float(self._root.get("_sh") or 0)
-        host_w = self.parent.width if self.parent is not None else dp(200)
-        host_h = self.parent.height if self.parent is not None else dp(200)
+        host_w = self.parent.width if self.parent is not None else content_w + pad * 2
+        host_h = self.parent.height if self.parent is not None else content_h + pad * 2
         self.width = max(host_w, content_w + pad * 2)
         self.height = max(host_h, content_h + pad * 2)
         left = self.x + (self.width - content_w) / 2.0
@@ -3566,10 +3569,9 @@ class LibraryScreen(Screen):
         if not self._tree_open:
             self.tree_host.width = 0
             return
-        pad = dp(16)
-        needed = float(self.tree_chart.width or 0) + pad
-        cap = min(max(self.width * 0.48, dp(88)), dp(240))
-        self.tree_host.width = max(dp(72), min(cap, max(needed, dp(88))))
+        needed = max(dp(96), float(self.tree_chart.content_width()) + dp(16))
+        cap = max(dp(96), min(self.width * 0.9, self.width - dp(48)))
+        self.tree_host.width = min(cap, needed)
 
     def _on_size(self, *_args: Any) -> None:
         cols = 4 if self.width >= dp(900) else (2 if self.width < dp(520) else 3)
@@ -3615,6 +3617,9 @@ class LibraryScreen(Screen):
             back_row.add_widget(Widget())
             back_row.add_widget(back)
             self.body.add_widget(back_row)
+        self.body.add_widget(
+            Widget(size_hint_y=None, height=max(dp(12), float(self.height) * 0.33 - dp(56)))
+        )
         if child_folders:
             folder_grid = self._grid()
             for folder in child_folders:
@@ -3678,8 +3683,7 @@ class RootLayout(FloatLayout):
             "restore",
             on_dark=True,
             size_hint=(None, None),
-            size=(dp(48), dp(32)),
-            pos_hint={"center_x": 0.5, "top": 1},
+            size=(dp(88), dp(44)),
             trigger=self.show_toolbar,
         )
         self.restore_btn.opacity = 0
@@ -3715,6 +3719,9 @@ class RootLayout(FloatLayout):
         work_h = max(1.0, float(self.height) - chrome_h)
         self.workspace.size = (float(self.width), work_h)
         self.workspace.pos = (float(self.x), float(self.y))
+        self.restore_btn.size = (dp(96) * layout_scale(), dp(44) * layout_scale())
+        self.restore_btn.center_x = self.center_x
+        self.restore_btn.top = self.top - dp(10)
         self.dock_notes()
         self.sync_floating_tools()
 
@@ -4185,6 +4192,14 @@ class RootLayout(FloatLayout):
         self.chrome.height = 0
         self.restore_btn.opacity = 1
         self.restore_btn.disabled = False
+        self.restore_btn.size = (dp(96) * layout_scale(), dp(44) * layout_scale())
+        self.restore_btn.center_x = self.center_x
+        self.restore_btn.top = self.top - dp(10)
+        try:
+            self.remove_widget(self.restore_btn)
+            self.add_widget(self.restore_btn)
+        except Exception:
+            pass
         self._fit_workspace()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
@@ -5144,38 +5159,51 @@ class SamsungNotesCompanionApp(App):
         from jnius import autoclass, cast
 
         ContentValues = autoclass("android.content.ContentValues")
+        Integer = autoclass("java.lang.Integer")
         Build = autoclass("android.os.Build")
-        FilesTable = autoclass("android.provider.MediaStore$Files")
         resolver = activity.getContentResolver()
         display = f"note-{uuid.uuid4().hex[:8]}.pdf"
-        collections: List[Any] = []
         sdk = int(Build.VERSION.SDK_INT)
+        collections: List[Tuple[Any, Optional[str]]] = []
         if sdk >= 29:
             try:
-                collections.append(FilesTable.getContentUri("external_primary"))
+                Downloads = autoclass("android.provider.MediaStore$Downloads")
+                collections.append((Downloads.EXTERNAL_CONTENT_URI, "Download/"))
             except Exception:
                 pass
-        collections.append(FilesTable.getContentUri("external"))
+            try:
+                FilesTable = autoclass("android.provider.MediaStore$Files")
+                collections.append((FilesTable.getContentUri("external_primary"), "Download/"))
+                collections.append((FilesTable.getContentUri("external_primary"), "Documents/"))
+            except Exception:
+                pass
+        FilesTable = autoclass("android.provider.MediaStore$Files")
+        collections.append((FilesTable.getContentUri("external"), "Download/"))
         last_error: Optional[Exception] = None
-        for collection in collections:
-            for rel in ("Documents/", "Download/", None):
-                try:
-                    values = ContentValues()
-                    values.put("_display_name", display)
-                    values.put("mime_type", "application/pdf")
-                    if rel:
-                        values.put("relative_path", rel)
-                    uri = resolver.insert(collection, values)
-                    if uri is None:
-                        continue
-                    source = autoclass("java.io.FileInputStream")(str(path))
-                    dest = resolver.openOutputStream(uri)
-                    autoclass("android.os.FileUtils").copy(source, dest)
-                    source.close()
-                    dest.close()
-                    return cast("android.net.Uri", uri)
-                except Exception as exc:
-                    last_error = exc
+        for collection, rel in collections:
+            try:
+                values = ContentValues()
+                values.put("_display_name", display)
+                values.put("mime_type", "application/pdf")
+                if rel:
+                    values.put("relative_path", rel)
+                if sdk >= 29:
+                    values.put("is_pending", Integer.valueOf(1))
+                uri = resolver.insert(collection, values)
+                if uri is None:
+                    continue
+                source = autoclass("java.io.FileInputStream")(str(path))
+                dest = resolver.openOutputStream(uri)
+                autoclass("android.os.FileUtils").copy(source, dest)
+                source.close()
+                dest.close()
+                if sdk >= 29:
+                    done = ContentValues()
+                    done.put("is_pending", Integer.valueOf(0))
+                    resolver.update(uri, done, None, None)
+                return cast("android.net.Uri", uri)
+            except Exception as exc:
+                last_error = exc
         if last_error is not None:
             raise last_error
         raise RuntimeError("MediaStore insert failed")
@@ -5232,9 +5260,9 @@ class SamsungNotesCompanionApp(App):
 
     def _share_content_uri(self, activity: Any, path: str, title: str) -> Any:
         try:
-            return self._android_file_uri(activity, path)
-        except Exception:
             return self._android_mediastore_pdf_uri(activity, path, title)
+        except Exception:
+            return self._android_file_uri(activity, path)
 
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from jnius import autoclass, cast
@@ -5244,7 +5272,7 @@ class SamsungNotesCompanionApp(App):
         ClipData = autoclass("android.content.ClipData")
         if len(uris) == 1:
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("application/pdf")
+            intent.setType("*/*")
             self._put_share_stream(intent, uris[0])
         else:
             ArrayList = autoclass("java.util.ArrayList")
@@ -5252,7 +5280,7 @@ class SamsungNotesCompanionApp(App):
             for uri in uris:
                 stream.add(cast("android.os.Parcelable", uri))
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-            intent.setType("application/pdf")
+            intent.setType("*/*")
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
         clip = ClipData.newRawUri(String("pdf"), uris[0])
         for uri in uris[1:]:
@@ -5261,17 +5289,8 @@ class SamsungNotesCompanionApp(App):
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         self._share_keep = [list(uris), intent, clip, chooser, activity]
-        try:
-            Builder = autoclass("androidx.core.app.ShareCompat$IntentBuilder")
-            builder = Builder(activity)
-            builder.setType("application/pdf")
-            for uri in uris:
-                builder.addStream(uri)
-            builder.startChooser()
-            return
-        except Exception:
-            pass
         activity.startActivity(chooser)
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
