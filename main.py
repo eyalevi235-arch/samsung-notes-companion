@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.core.text import LabelBase
+from kivy.core.text import Label as CoreLabel, LabelBase
 from kivy.core.window import Window
 from kivy.graphics.texture import Texture
 from kivy.graphics import (
@@ -3181,7 +3181,12 @@ class FolderFlowChart(Widget):
         self._root: Dict[str, Any] = {"id": "", "name": "הספרייה", "color": "#9AA0A8", "children": []}
         self._selected = ""
         self._hits: List[Tuple[str, float, float, float, float]] = []
-        self.bind(pos=lambda *_a: self._redraw())
+        self._drawing = False
+        self.bind(pos=self._on_geom, size=self._on_geom)
+
+    def _on_geom(self, *_args: Any) -> None:
+        Clock.unschedule(self._redraw)
+        Clock.schedule_once(self._redraw, 0)
 
     def _metrics(self) -> Tuple[float, float, float, float]:
         return dp(76), dp(26), dp(10), dp(18)
@@ -3221,14 +3226,36 @@ class FolderFlowChart(Widget):
             cursor += float(child["_sw"]) + gx
 
     def _redraw(self, *_args: Any) -> None:
-        if self._root:
-            pad = dp(8)
-            self._place(self._root, self.x + pad, self.y + self.height - pad)
-        self.canvas.clear()
-        self.clear_widgets()
-        self._hits = []
-        with self.canvas:
-            self._draw_node(self._root)
+        if self._drawing:
+            return
+        self._drawing = True
+        try:
+            if self._root:
+                pad = dp(8)
+                self._place(self._root, self.x + pad, self.y + self.height - pad)
+            self.canvas.clear()
+            self._hits = []
+            with self.canvas:
+                self._draw_node(self._root)
+        finally:
+            self._drawing = False
+
+    def _caption_texture(self, title: str, width: float, height: float) -> Optional[Any]:
+        label = CoreLabel(
+            text=mixed_markup(_short_label(title, 10)),
+            markup=True,
+            font_size=dp(11),
+            color=(1, 1, 1, 1),
+            halign="center",
+            valign="middle",
+            text_size=(width - dp(4), height),
+            shorten=True,
+            shorten_from="right",
+        )
+        if _HEBREW_FONT_READY:
+            label.font_name = "HebrewFont"
+        label.refresh()
+        return label.texture
 
     def _draw_node(self, node: Dict[str, Any]) -> None:
         kids = list(node.get("children") or [])
@@ -3250,20 +3277,16 @@ class FolderFlowChart(Widget):
         else:
             Color(*rgba)
         RoundedRectangle(pos=(x, y), size=(nw, nh), radius=[dp(5)])
+        texture = self._caption_texture(str(node.get("name") or "תיקייה"), nw, nh)
+        if texture is not None:
+            Color(1, 1, 1, 1)
+            tw, th = texture.size
+            Rectangle(
+                texture=texture,
+                pos=(x + (nw - tw) / 2.0, y + (nh - th) / 2.0),
+                size=(tw, th),
+            )
         self._hits.append((fid, x, y, nw, nh))
-        caption = Label(
-            text=mixed_markup(_short_label(str(node.get("name") or "תיקייה"), 10)),
-            markup=True,
-            color=(1, 1, 1, 1),
-            font_size=dp(11),
-            halign="center",
-            valign="middle",
-            size_hint=(None, None),
-            size=(nw, nh),
-            pos=(x, y),
-        )
-        caption.bind(size=lambda inst, _v: setattr(inst, "text_size", inst.size))
-        self.add_widget(caption)
         for child in kids:
             self._draw_node(child)
 
@@ -4881,10 +4904,13 @@ class SamsungNotesCompanionApp(App):
         raise RuntimeError("cannot copy share file")
 
     def _android_file_uri(self, activity: Any, path: str) -> Any:
-        from jnius import autoclass
+        from jnius import autoclass, cast
 
         File = autoclass("java.io.File")
-        java_file = File(str(path))
+        java_file = File(str(path)).getCanonicalFile()
+        if not java_file.exists():
+            raise RuntimeError("share file missing")
+        context = activity.getApplicationContext()
         package = str(activity.getPackageName())
         authorities = (package + ".fileprovider",)
         providers = (
@@ -4901,7 +4927,8 @@ class SamsungNotesCompanionApp(App):
                 continue
             for authority in authorities:
                 try:
-                    return provider.getUriForFile(activity, authority, java_file)
+                    uri = provider.getUriForFile(context, authority, java_file)
+                    return cast("android.net.Uri", uri)
                 except Exception as exc:
                     last_error = exc
         if last_error is not None:
@@ -4938,35 +4965,49 @@ class SamsungNotesCompanionApp(App):
         stream.close()
 
     def _android_mediastore_pdf_uri(self, activity: Any, path: str, title: str) -> Any:
-        from jnius import autoclass
+        from jnius import autoclass, cast
 
         ContentValues = autoclass("android.content.ContentValues")
         Build = autoclass("android.os.Build")
         String = autoclass("java.lang.String")
+        FilesTable = autoclass("android.provider.MediaStore$Files")
         resolver = activity.getContentResolver()
-        values = ContentValues()
-        display = "".join(ch if ch.isalnum() or ch in " ._-" else "_" for ch in (title or "note"))[:40] or "note"
-        values.put("_display_name", String(f"{display}.pdf"))
-        values.put("mime_type", String("application/pdf"))
+        display = f"note-{uuid.uuid4().hex[:8]}.pdf"
         sdk = int(Build.VERSION.SDK_INT)
-        uri = None
+        collections = []
         if sdk >= 29:
             try:
-                Downloads = autoclass("android.provider.MediaStore$Downloads")
-                values.put("relative_path", String("Download"))
-                uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
+                collections.append(autoclass("android.provider.MediaStore$Downloads").EXTERNAL_CONTENT_URI)
             except Exception:
-                uri = None
-        if uri is None:
-            FilesTable = autoclass("android.provider.MediaStore$Files")
-            uri = resolver.insert(FilesTable.getContentUri("external"), values)
-        if uri is None:
-            raise RuntimeError("MediaStore insert failed")
-        stream = resolver.openOutputStream(uri)
-        if stream is None:
-            raise RuntimeError("MediaStore stream failed")
-        self._copy_file_to_stream(path, stream)
-        return uri
+                pass
+            collections.append(FilesTable.getContentUri("external_primary"))
+        collections.append(FilesTable.getContentUri("external"))
+        last_error: Optional[Exception] = None
+        for collection in collections:
+            stream = None
+            try:
+                values = ContentValues()
+                values.put("_display_name", String(display))
+                values.put("mime_type", String("application/pdf"))
+                uri = resolver.insert(collection, values)
+                if uri is None:
+                    continue
+                stream = resolver.openOutputStream(uri)
+                if stream is None:
+                    continue
+                self._copy_file_to_stream(path, stream)
+                stream = None
+                return cast("android.net.Uri", uri)
+            except Exception as exc:
+                last_error = exc
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("MediaStore insert failed")
 
     def _copy_file_to_stream(self, src: str, stream: Any) -> None:
         from jnius import autoclass
@@ -4989,26 +5030,36 @@ class SamsungNotesCompanionApp(App):
                 if count <= 0:
                     break
                 stream.write(buf, 0, count)
-        source.close()
-        stream.flush()
-        stream.close()
+        try:
+            source.close()
+        except Exception:
+            pass
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
 
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from android.runnable import run_on_ui_thread
-        from jnius import autoclass
+        from jnius import autoclass, cast
 
         Intent = autoclass("android.content.Intent")
         String = autoclass("java.lang.String")
         ClipData = autoclass("android.content.ClipData")
-        if len(uris) == 1:
+        parcels = [cast("android.os.Parcelable", uri) for uri in uris]
+        if len(parcels) == 1:
             intent = Intent(Intent.ACTION_SEND)
             intent.setType("application/pdf")
-            intent.putExtra(Intent.EXTRA_STREAM, uris[0])
+            intent.putExtra(Intent.EXTRA_STREAM, parcels[0])
         else:
             ArrayList = autoclass("java.util.ArrayList")
             stream = ArrayList()
-            for uri in uris:
-                stream.add(uri)
+            for parcel in parcels:
+                stream.add(parcel)
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
             intent.setType("application/pdf")
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
@@ -5016,11 +5067,13 @@ class SamsungNotesCompanionApp(App):
         for uri in uris[1:]:
             clip.addItem(ClipData.Item(uri))
         intent.setClipData(clip)
-        intent.putExtra(Intent.EXTRA_SUBJECT, String(title or "PDF"))
+        try:
+            intent.putExtra(Intent.EXTRA_SUBJECT, String("PDF"))
+        except Exception:
+            pass
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        chooser = Intent.createChooser(intent, String("שיתוף"))
+        chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try:
             pm = activity.getPackageManager()
             matches = pm.queryIntentActivities(intent, 0)
@@ -5051,29 +5104,23 @@ class SamsungNotesCompanionApp(App):
         if not is_android():
             self._notify(f"PDF נשמר: {files[0]}")
             return
-        from android.runnable import run_on_ui_thread
         from jnius import autoclass
 
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
         activity = PythonActivity.mActivity
-
-        @run_on_ui_thread
-        def _share() -> None:
+        try:
             uris = []
-            try:
-                for path in files:
-                    cached = self._copy_share_into_cache(activity, path)
-                    try:
-                        uris.append(self._android_file_uri(activity, cached))
-                    except Exception:
-                        uris.append(self._android_mediastore_pdf_uri(activity, cached, title))
-                if not uris:
-                    raise RuntimeError("no uri")
-                self._launch_share_intent(activity, uris, title)
-            except Exception:
-                Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל: אין גישה לקובץ"), 0)
-
-        _share()
+            for path in files:
+                cached = self._copy_share_into_cache(activity, path)
+                try:
+                    uris.append(self._android_file_uri(activity, cached))
+                except Exception:
+                    uris.append(self._android_mediastore_pdf_uri(activity, cached, title))
+            if not uris:
+                raise RuntimeError("no uri")
+            self._launch_share_intent(activity, uris, title)
+        except Exception:
+            self._notify("שיתוף נכשל: אין גישה לקובץ")
 
     def create_library_folder(self, *_args: Any) -> None:
         self._folder_editor(None, parent_id=self._library_parent_id())
