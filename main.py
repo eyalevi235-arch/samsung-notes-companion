@@ -4050,9 +4050,6 @@ class LibraryScreen(Screen):
         self.tree_host.opacity = 1 if self._tree_open else 0
         self.tree_host.disabled = not self._tree_open
         self._fit_tree_panel()
-        app = App.get_running_app()
-        if is_android() and hasattr(app, "_sync_library_search_edit"):
-            app._sync_library_search_edit()
 
     def _place_library_shell(self, *_args: Any) -> None:
         shell = getattr(self, "_library_shell", None)
@@ -4068,10 +4065,6 @@ class LibraryScreen(Screen):
         if not self._tree_open:
             self.tree_host.width = 0
             self.tree_host.height = 0
-            if is_android():
-                app = App.get_running_app()
-                if hasattr(app, "_hide_rtl_edit"):
-                    app._hide_rtl_edit("search")
             return
         needed = max(dp(210), float(self.tree_chart.content_width()) + dp(28))
         try:
@@ -5800,8 +5793,28 @@ class SamsungNotesCompanionApp(App):
 
     def share_current_document(self, *_args: Any) -> None:
         self._autosave_library_doc()
+        self._action_sheet(
+            "שיתוף",
+            (
+                ("שיתוף PDF", self._share_current_pdf, False),
+                ("שיתוף מסמך חי", self._share_current_live, False),
+                ("שיתוף PNG", self._share_current_png, False),
+            ),
+        )
+
+    def _share_current_pdf(self, *_args: Any) -> None:
+        self._autosave_library_doc()
         self._notify("מייצא PDF...")
         Clock.schedule_once(lambda _dt: self._share_active_document(), 0.05)
+
+    def _share_current_live(self, *_args: Any) -> None:
+        self._autosave_library_doc()
+        self.share_companion_document(str(getattr(self, "_current_doc_id", "") or ""))
+
+    def _share_current_png(self, *_args: Any) -> None:
+        self._autosave_library_doc()
+        self._notify("מייצא PNG...")
+        Clock.schedule_once(lambda _dt: self._share_active_png(), 0.05)
 
     def share_library_document(self, doc_id: str) -> None:
         self._notify("מייצא PDF...")
@@ -5879,6 +5892,12 @@ class SamsungNotesCompanionApp(App):
             return
         self._android_share_pdfs([path], self.document_title)
 
+    def _share_active_png(self) -> None:
+        path = self._write_share_png()
+        if not path:
+            return
+        self._android_share_pdfs([path], self.document_title, mime="image/png")
+
     def _share_cache_dir(self) -> Path:
         candidates: List[Path] = []
         if is_android():
@@ -5910,6 +5929,19 @@ class SamsungNotesCompanionApp(App):
             return None
         path = self._share_cache_dir() / f"note-{uuid.uuid4().hex[:10]}.pdf"
         path.write_bytes(pdf_bytes)
+        self._track_share_file(str(path))
+        return str(path)
+
+    def _write_share_png(self) -> Optional[str]:
+        try:
+            path = self._share_cache_dir() / f"note-{uuid.uuid4().hex[:10]}.png"
+            self.root_layout.workspace.export_to_png(str(path))
+        except Exception as exc:
+            self._notify(f"ייצוא נכשל: {exc}")
+            return None
+        if not path.is_file() or path.stat().st_size < 8:
+            self._notify("ייצוא נכשל")
+            return None
         self._track_share_file(str(path))
         return str(path)
 
@@ -6301,6 +6333,8 @@ class SamsungNotesCompanionApp(App):
         mime = str(getattr(self, "_share_mime", "") or "")
         if suffix == ".snc":
             mime = mime or "application/octet-stream"
+        elif suffix == ".png":
+            mime = mime or "image/png"
         else:
             mime = mime or "application/pdf"
         display = f"{self._file_stem()}-{uuid.uuid4().hex[:6]}{suffix}"
@@ -6660,8 +6694,7 @@ class SamsungNotesCompanionApp(App):
         popup.auto_dismiss = False
 
         def _save() -> None:
-            typed = self._rtl_edit_value("folder") if is_android() else field.text
-            name = str(typed or "").strip() or "תיקייה"
+            name = str(field.text or "").strip() or "תיקייה"
             data = self.library_data()
             folders = data.setdefault("folders", [])
             if folder is None:
@@ -6689,27 +6722,9 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(field)
         body.add_widget(swatches)
         body.add_widget(buttons)
-        popup.bind(
-            on_dismiss=lambda *_a: (
-                self._hide_rtl_edit("folder"),
-                self._sync_library_search_edit(),
-            )
-        )
         popup.open()
         apply_hebrew_ui(popup, "תיקייה")
-        if is_android():
-            field.opacity = 0
-            Clock.schedule_once(
-                lambda *_a: self._show_rtl_edit(
-                    "folder",
-                    field,
-                    "שם התיקייה",
-                    str((folder or {}).get("name") or ""),
-                ),
-                0.25,
-            )
-        else:
-            focus_system_keyboard(field)
+        focus_system_keyboard(field)
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
@@ -6898,9 +6913,7 @@ class SamsungNotesCompanionApp(App):
             activity.bind(on_new_intent=self._on_new_intent)
         except Exception:
             pass
-        self._rtl_edits: Dict[str, Any] = {}
         Clock.schedule_once(lambda _dt: self._consume_launch_intent(), 1.0)
-        Clock.schedule_interval(lambda _dt: self._layout_rtl_edits(), 0.2)
         self._attach_spen_listeners()
 
     def _on_new_intent(self, intent: Any, *_args: Any) -> None:
@@ -6947,155 +6960,6 @@ class SamsungNotesCompanionApp(App):
             self._open_android_uri(uri)
         except Exception:
             pass
-
-    def _android_content_view(self) -> Any:
-        from jnius import autoclass
-
-        activity = autoclass("org.kivy.android.PythonActivity").mActivity
-        return activity.findViewById(autoclass("android.R$id").content)
-
-    def _configure_rtl_edit(self, edit: Any, hint: str, initial: str) -> None:
-        from jnius import autoclass
-
-        View = autoclass("android.view.View")
-        Gravity = autoclass("android.view.Gravity")
-        InputType = autoclass("android.text.InputType")
-        String = autoclass("java.lang.String")
-        ColorCls = autoclass("android.graphics.Color")
-        edit.setSingleLine(True)
-        edit.setHint(String(hint or ""))
-        edit.setText(String(str(initial or "")))
-        edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
-        try:
-            edit.setLayoutDirection(View.LAYOUT_DIRECTION_RTL)
-            edit.setTextDirection(View.TEXT_DIRECTION_RTL)
-            edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
-        except Exception:
-            pass
-        edit.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT)
-        dark = not is_light_theme()
-        edit.setTextColor(ColorCls.parseColor("#FFF2F3F5" if dark else "#FF22242A"))
-        edit.setHintTextColor(ColorCls.parseColor("#FF9AA0A8"))
-        edit.setBackgroundColor(ColorCls.parseColor("#33222222" if dark else "#14FFFFFF"))
-        try:
-            edit.setSelection(edit.getText().length())
-        except Exception:
-            pass
-
-    def _show_rtl_edit(self, role: str, widget: Any, hint: str, initial: str) -> None:
-        if not is_android() or widget is None:
-            return
-        self._hide_rtl_edit(role)
-        try:
-            from android.runnable import run_on_ui_thread
-            from jnius import autoclass
-
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            EditText = autoclass("android.widget.EditText")
-            FrameLayout = autoclass("android.widget.FrameLayout$LayoutParams")
-            edit = EditText(activity)
-            self._configure_rtl_edit(edit, hint, initial)
-            params = FrameLayout(int(max(1, widget.width)), int(max(1, widget.height)))
-            host = self._android_content_view()
-            self._rtl_edits[role] = {"view": edit, "widget": widget, "parent": host, "params": params}
-
-            @run_on_ui_thread
-            def _add() -> None:
-                try:
-                    host.addView(edit, params)
-                    self._layout_rtl_edits()
-                except Exception:
-                    pass
-
-            _add()
-        except Exception:
-            self._rtl_edits.pop(role, None)
-
-    def _layout_rtl_edits(self) -> None:
-        if not is_android():
-            return
-        try:
-            from jnius import autoclass
-
-            Gravity = autoclass("android.view.Gravity")
-        except Exception:
-            return
-        for item in list(getattr(self, "_rtl_edits", {}).values()):
-            widget = item.get("widget")
-            view = item.get("view")
-            params = item.get("params")
-            if widget is None or view is None or params is None:
-                continue
-            if widget.width < 2 or widget.height < 2 or widget.parent is None:
-                continue
-            wx, wy = widget.to_window(*widget.pos)
-            params.width = int(max(1, widget.width))
-            params.height = int(max(1, widget.height))
-            params.leftMargin = int(wx)
-            params.topMargin = int(max(0, Window.height - wy - widget.height))
-            params.gravity = Gravity.TOP | Gravity.LEFT
-            try:
-                view.setLayoutParams(params)
-            except Exception:
-                pass
-
-    def _rtl_edit_value(self, role: str) -> str:
-        item = getattr(self, "_rtl_edits", {}).get(role) or {}
-        view = item.get("view")
-        if view is None:
-            return ""
-        try:
-            return str(view.getText().toString() or "")
-        except Exception:
-            return ""
-
-    def _hide_rtl_edit(self, role: str) -> None:
-        item = getattr(self, "_rtl_edits", {}).pop(role, None)
-        if not item:
-            return
-        view = item.get("view")
-        parent = item.get("parent")
-        if view is None:
-            return
-        try:
-            from android.runnable import run_on_ui_thread
-
-            @run_on_ui_thread
-            def _remove() -> None:
-                try:
-                    if parent is not None:
-                        parent.removeView(view)
-                except Exception:
-                    pass
-
-            _remove()
-        except Exception:
-            pass
-
-    def _sync_library_search_edit(self) -> None:
-        screen = getattr(self, "library_screen", None)
-        if not is_android() or screen is None or not getattr(screen, "_tree_open", False):
-            Clock.unschedule(self._poll_search_edit)
-            self._hide_rtl_edit("search")
-            return
-        field = screen.search_field
-        field.opacity = 0
-        Clock.unschedule(self._poll_search_edit)
-        Clock.schedule_interval(self._poll_search_edit, 0.25)
-        if "search" in getattr(self, "_rtl_edits", {}):
-            self._layout_rtl_edits()
-            return
-        self._show_rtl_edit("search", field, "חיפוש תיקיות ומסמכים", field.text)
-
-    def _poll_search_edit(self, _dt: float) -> bool:
-        screen = getattr(self, "library_screen", None)
-        if not is_android() or screen is None or not getattr(screen, "_tree_open", False):
-            self._hide_rtl_edit("search")
-            return False
-        value = self._rtl_edit_value("search")
-        if value != getattr(screen, "_query", ""):
-            screen._on_search(screen.search_field, value)
-        return True
 
     def _update_spen_from_motion(self, event: Any) -> None:
         action_down = 0
