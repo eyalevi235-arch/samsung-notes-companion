@@ -183,6 +183,21 @@ def is_android() -> bool:
     return platform == "android"
 
 
+def _android_sdk_int() -> int:
+    if not is_android():
+        return 0
+    try:
+        from jnius import autoclass
+
+        try:
+            return int(autoclass("android.os.Build$VERSION").SDK_INT)
+        except Exception:
+            version = autoclass("android.os.Build").VERSION
+            return int(getattr(version, "SDK_INT", 0) or 0)
+    except Exception:
+        return 0
+
+
 def _is_hover_touch(touch: MotionEvent) -> bool:
     try:
         pressure = float(getattr(touch, "pressure", 1.0) or 0.0)
@@ -1810,8 +1825,7 @@ class SPenAnnotationCanvas(Widget):
             return
         self._page_textures[index] = texture
         app = App.get_running_app()
-        if int(app.page_count) != total:
-            app.page_count = total
+        app.page_count = max(int(app.page_count or 1), int(total), index + 1)
         rect = self._image_rects.get(index)
         if rect is not None:
             rect.texture = texture
@@ -3338,7 +3352,7 @@ class FolderFlowChart(Widget):
         Clock.schedule_once(self._redraw, 0)
 
     def _metrics(self) -> Tuple[float, float, float, float]:
-        return dp(52), dp(24), dp(8), dp(16)
+        return dp(64), dp(26), dp(8), dp(16)
 
     def set_tree(
         self,
@@ -3413,13 +3427,16 @@ class FolderFlowChart(Widget):
 
     def _caption_texture(self, title: str, width: float, height: float) -> Optional[Any]:
         kwargs: Dict[str, Any] = {
-            "text": ui_text(_short_label(title, 8)),
+            "text": mixed_markup(_short_label(title, 14)),
+            "markup": True,
             "font_size": int(dp(11)),
             "color": (1, 1, 1, 1),
             "halign": "center",
             "valign": "middle",
         }
-        if _HEBREW_FONT_READY:
+        if _LATIN_FONT_READY:
+            kwargs["font_name"] = "LatinFont"
+        elif _HEBREW_FONT_READY:
             kwargs["font_name"] = "HebrewFont"
         label = CoreLabel(**kwargs)
         label.refresh()
@@ -3667,7 +3684,10 @@ class LibraryScreen(Screen):
         else:
             folder = app._folder_by_id(data, current)
             self.title.text = mixed_markup(_short_label(str((folder or {}).get("name") or "תיקייה"), 16))
-            parent_id = str((folder or {}).get("parent_id") or "") or LIBRARY_ALL
+        if not child_folders and not visible:
+            self.body.add_widget(self._empty_folder_actions())
+            return
+        if current:
             back_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
             back = Button(
                 text=mixed_markup("חזרה"),
@@ -3703,6 +3723,56 @@ class LibraryScreen(Screen):
             for doc in visible:
                 note_grid.add_widget(NoteTile(doc, color, checked=str(doc.get("id")) in picked))
             self.body.add_widget(note_grid)
+
+    def _empty_folder_actions(self) -> BoxLayout:
+        app = App.get_running_app()
+        block_h = dp(176)
+        pad = max(dp(36), (float(self.height) - dp(56) - block_h) / 2.0)
+        wrap = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(16))
+        wrap.bind(minimum_height=wrap.setter("height"))
+        wrap.add_widget(Widget(size_hint_y=None, height=pad))
+        actions = BoxLayout(
+            orientation="vertical",
+            size_hint=(None, None),
+            size=(dp(280), block_h),
+            spacing=dp(16),
+            pos_hint={"center_x": 0.5},
+        )
+        folder_btn = Button(
+            text=mixed_markup("תיקייה חדשה"),
+            markup=True,
+            font_size=dp(20),
+            size_hint_y=None,
+            height=dp(72),
+            background_normal="",
+            background_down="",
+            background_color=(0.22, 0.32, 0.48, 1),
+            color=(1, 1, 1, 1),
+        )
+        doc_btn = Button(
+            text=mixed_markup("מסמך חדש"),
+            markup=True,
+            font_size=dp(20),
+            size_hint_y=None,
+            height=dp(72),
+            background_normal="",
+            background_down="",
+            background_color=(0.18, 0.42, 0.36, 1),
+            color=(1, 1, 1, 1),
+        )
+        folder_btn.bind(on_release=lambda *_a: app.create_library_folder())
+        doc_btn.bind(on_release=lambda *_a: app.library_new_menu())
+        apply_hebrew_ui(folder_btn)
+        apply_hebrew_ui(doc_btn)
+        actions.add_widget(folder_btn)
+        actions.add_widget(doc_btn)
+        row = BoxLayout(size_hint_y=None, height=block_h)
+        row.add_widget(Widget())
+        row.add_widget(actions)
+        row.add_widget(Widget())
+        wrap.add_widget(row)
+        wrap.add_widget(Widget(size_hint_y=None, height=pad))
+        return wrap
 
     def _fill_tree(self, app: Any, data: Dict[str, Any], current: str) -> None:
         self.tree_chart.set_tree(app._folder_tree_nodes(data), current)
@@ -4174,6 +4244,7 @@ class RootLayout(FloatLayout):
                 "get": lambda: float(app.ink_width),
                 "set": app.set_ink_width,
                 "fmt": lambda value: f"{value:.1f}",
+                "title": "גודל",
             },
             "opacity": {
                 "lo": 0.15,
@@ -4182,6 +4253,7 @@ class RootLayout(FloatLayout):
                 "get": lambda: float(app.ink_opacity),
                 "set": app.set_ink_opacity,
                 "fmt": lambda value: f"{int(round(value * 100))}%",
+                "title": "שקיפות",
             },
             "dash": {
                 "lo": 4.0,
@@ -4190,6 +4262,7 @@ class RootLayout(FloatLayout):
                 "get": lambda: float(app.dash_gap),
                 "set": app.set_dash_gap,
                 "fmt": lambda value: f"{value:.0f}",
+                "title": "קיווקו",
             },
         }
 
@@ -4198,11 +4271,11 @@ class RootLayout(FloatLayout):
             orientation="horizontal",
             size_hint_y=None,
             height=0,
-            padding=(dp(8), dp(4)),
-            spacing=dp(8),
+            padding=(dp(6), dp(4)),
+            spacing=dp(6),
         )
         with bar.canvas.before:
-            Color(0.12, 0.12, 0.14, 0.97)
+            Color(0.12, 0.12, 0.14, 0.0)
             self._restore_bg = Rectangle()
         bar.bind(
             pos=lambda *_args: setattr(self._restore_bg, "pos", bar.pos),
@@ -4211,15 +4284,19 @@ class RootLayout(FloatLayout):
         button = Button(
             text=mixed_markup("כלים"),
             markup=True,
-            font_size=dp(16) * layout_scale(),
+            font_size=dp(12) * layout_scale(),
+            size_hint=(None, None),
+            size=(dp(72), dp(28)),
             background_normal="",
             background_down="",
-            background_color=(0.22, 0.24, 0.28, 1),
+            background_color=(0.22, 0.24, 0.28, 0.92),
             color=(1, 1, 1, 1),
         )
         button.bind(on_release=self.show_toolbar)
         apply_hebrew_ui(button)
+        bar.add_widget(Widget())
         bar.add_widget(button)
+        bar.add_widget(Widget())
         bar.opacity = 0
         bar.disabled = True
         self.restore_btn = button
@@ -4274,6 +4351,16 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._slider_editor_bg, "pos", bar.pos),
             size=lambda *_args: setattr(self._slider_editor_bg, "size", bar.size),
         )
+        self._slider_title_label = Label(
+            text="",
+            markup=True,
+            color=(1, 1, 1, 1),
+            font_size=dp(14) * layout_scale(),
+            size_hint_x=None,
+            width=dp(88),
+            halign="center",
+            valign="middle",
+        )
         self._slider_control = Slider(min=0.0, max=1.0, value=0.5, cursor_size=(dp(28), dp(28)))
         self._slider_control.bind(value=self._on_slider_editor)
         self._slider_value_label = Label(
@@ -4285,6 +4372,7 @@ class RootLayout(FloatLayout):
             halign="center",
             valign="middle",
         )
+        bar.add_widget(self._slider_title_label)
         bar.add_widget(self._slider_control)
         bar.add_widget(self._slider_value_label)
         bar.opacity = 0
@@ -4298,6 +4386,7 @@ class RootLayout(FloatLayout):
         else:
             self._slider_open = kind
             spec = self._slider_specs()[kind]
+            self._slider_title_label.text = mixed_markup(str(spec.get("title") or ""))
             self._slider_control.value = _slider_to_t(
                 spec["get"](), spec["lo"], spec["hi"], spec["log"]
             )
@@ -4320,7 +4409,7 @@ class RootLayout(FloatLayout):
     def _chrome_height(self) -> float:
         scale = layout_scale()
         if not getattr(self, "toolbar_visible", True):
-            return dp(52) * scale
+            return dp(36) * scale
         extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
         editor = dp(64) * scale if getattr(self, "_slider_open", None) else 0.0
         return (dp(44) + dp(52) + dp(36)) * scale + extra + editor
@@ -4343,11 +4432,15 @@ class RootLayout(FloatLayout):
             self._slider_editor.opacity = 1 if open_slider else 0
             self._slider_editor.disabled = not open_slider
         if hasattr(self, "restore_bar"):
-            self.restore_bar.height = dp(52) * scale if not self.toolbar_visible else 0
+            self.restore_bar.height = dp(36) * scale if not self.toolbar_visible else 0
             self.restore_bar.opacity = 1 if not self.toolbar_visible else 0
             self.restore_bar.disabled = bool(self.toolbar_visible)
         if hasattr(self, "restore_btn"):
-            self.restore_btn.font_size = dp(16) * scale
+            self.restore_btn.font_size = dp(12) * scale
+            self.restore_btn.size = (dp(72) * scale, dp(28) * scale)
+        if hasattr(self, "_slider_title_label"):
+            self._slider_title_label.font_size = dp(14) * scale
+            self._slider_title_label.width = dp(92) * scale
         for glyph in getattr(self, "_slider_glyphs", {}).values():
             glyph.size = (dp(36) * scale, dp(36) * scale)
         if hasattr(self, "_slider_value_label"):
@@ -5368,10 +5461,9 @@ class SamsungNotesCompanionApp(App):
 
         ContentValues = autoclass("android.content.ContentValues")
         Integer = autoclass("java.lang.Integer")
-        Build = autoclass("android.os.Build")
         resolver = activity.getContentResolver()
         display = f"note-{uuid.uuid4().hex[:8]}.pdf"
-        sdk = int(Build.VERSION.SDK_INT)
+        sdk = _android_sdk_int()
         collections: List[Tuple[Any, Optional[str]]] = []
         if sdk >= 29:
             try:
@@ -6301,10 +6393,13 @@ class SamsungNotesCompanionApp(App):
         if count <= 0:
             return
         keep = list(range(max(0, first - 1), min(count, last + 2)))
+        keep.extend(int(index) for index in getattr(canvas, "_locked_pages", set()))
         canvas.evict_page_textures(keep)
         textures = canvas._page_textures
         missing: List[int] = []
         for index in keep:
+            if index >= count:
+                continue
             while len(textures) <= index:
                 textures.append(None)
             if textures[index] is None:
@@ -6342,7 +6437,7 @@ class SamsungNotesCompanionApp(App):
                 self._preview_opened_msg = True
                 self._notify(f"PDF נפתח לכתיבה: {self.document_title}")
             else:
-                self.root_layout.set_page_status(0, self._pdf_page_count)
+                self.root_layout.set_page_status(0, int(self.page_count or self._pdf_page_count or 1))
             return
         path = None
         try:
@@ -6352,7 +6447,9 @@ class SamsungNotesCompanionApp(App):
             finally:
                 page.close()
             if path:
-                self.root_layout.pdf_canvas.set_page_image_at(index, path, self._pdf_page_count)
+                self.root_layout.pdf_canvas.set_page_image_at(
+                    index, path, max(int(self.page_count or 1), int(self._pdf_page_count or 1))
+                )
                 if index == 0:
                     self.root_layout.sync_notes_page_size()
             self.root_layout.set_status(f"טוען {index + 1}/{self._pdf_page_count}")
@@ -6488,6 +6585,7 @@ class SamsungNotesCompanionApp(App):
             "pdf_path": self.pdf_path,
             "pdf_page_index": self._pdf_page_index,
             "pdf_page_count": self._pdf_page_count,
+            "page_count": int(self.page_count or 1),
             "view_scale": float(self.view_scale),
             "pdf_pages": {
                 str(index): strokes
@@ -6797,7 +6895,7 @@ class SamsungNotesCompanionApp(App):
         self.pdf_path = payload.get("pdf_path")
         self._pdf_page_index = int(payload.get("pdf_page_index") or 0)
         self._pdf_page_count = int(payload.get("pdf_page_count") or 1)
-        self.page_count = max(1, self._pdf_page_count)
+        self.page_count = max(1, int(payload.get("page_count") or 0), self._pdf_page_count)
         self._page_strokes = {
             int(key): value for key, value in (payload.get("pdf_pages") or {}).items()
         }
@@ -7208,6 +7306,7 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.pdf_canvas.redraw_all()
         self.root_layout.notes_canvas.redraw_all()
         self.root_layout.set_page_status(0, total)
+        self._autosave_library_doc()
         return start
 
     def _append_android_uri(self, uri: Any) -> None:
