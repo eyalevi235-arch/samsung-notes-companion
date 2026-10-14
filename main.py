@@ -394,6 +394,29 @@ def _safe_ui_message(message: Any) -> str:
     return (cleaned or raw.strip())[:160]
 
 
+def _exception_reason(exc: Any) -> str:
+    parts: List[str] = []
+    for attr in ("innermessage", "classname"):
+        try:
+            value = getattr(exc, attr, None)
+            if value:
+                parts.append(str(value))
+        except Exception:
+            pass
+    try:
+        got = exc.getMessage()
+        if got:
+            parts.append(str(got))
+    except Exception:
+        pass
+    if not parts:
+        parts.append(str(exc or type(exc).__name__))
+    text = " — ".join(part.strip() for part in parts if str(part).strip())
+    if "Ljava/" in text or "(L" in text:
+        return f"שגיאת Android ({type(exc).__name__})"
+    return (text or type(exc).__name__)[:160]
+
+
 def _java_chars(value: Any) -> str:
     if value is None:
         return ""
@@ -1333,6 +1356,65 @@ class ToolIcon(ButtonBehavior, Widget):
             texture = None
         self._caption_cache = (key, texture)
         return texture
+
+
+class PageScrollRail(Widget):
+    """Visible right-edge scroller for jumping through the notebook."""
+
+    value = NumericProperty(1.0)
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("size_hint", (None, None))
+        kwargs.setdefault("width", dp(22))
+        super().__init__(**kwargs)
+        self.opacity = 0.88
+        with self.canvas:
+            self._track_c = Color(0.16, 0.17, 0.20, 0.88)
+            self._track = RoundedRectangle(radius=[dp(8)])
+            self._thumb_c = Color(0.86, 0.88, 0.92, 0.96)
+            self._thumb = RoundedRectangle(radius=[dp(7)])
+        self.bind(pos=self._redraw, size=self._redraw, value=self._redraw)
+        Clock.schedule_once(lambda _dt: self._redraw(), 0)
+
+    def _thumb_h(self) -> float:
+        return max(dp(36), min(dp(72), float(self.height) * 0.18))
+
+    def _redraw(self, *_args: Any) -> None:
+        self._track.pos = self.pos
+        self._track.size = self.size
+        pad = dp(3)
+        thumb_h = self._thumb_h()
+        travel = max(1.0, float(self.height) - thumb_h - pad * 2)
+        y = self.y + pad + float(self.value) * travel
+        self._thumb.pos = (self.x + pad, y)
+        self._thumb.size = (max(dp(12), float(self.width) - pad * 2), thumb_h)
+
+    def _value_from_y(self, y: float) -> float:
+        thumb_h = self._thumb_h()
+        pad = dp(3)
+        travel = max(1.0, float(self.height) - thumb_h - pad * 2)
+        return max(0.0, min(1.0, (y - thumb_h / 2.0 - self.y - pad) / travel))
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0 or not self.collide_point(*touch.pos):
+            return False
+        if _is_hover_touch(touch):
+            return True
+        touch.grab(self)
+        self.value = self._value_from_y(touch.y)
+        return True
+
+    def on_touch_move(self, touch: MotionEvent) -> bool:
+        if touch.grab_current is not self:
+            return False
+        self.value = self._value_from_y(touch.y)
+        return True
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            return True
+        return False
 
 
 class AbsorbLayout(BoxLayout):
@@ -3842,25 +3924,15 @@ class RootLayout(FloatLayout):
         self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
         self.text_overlay = self._build_text_overlay()
-        self.page_scroll = Slider(
-            orientation="vertical",
-            min=0.0,
-            max=1.0,
-            value=1.0,
-            size_hint=(None, None),
-            width=dp(14),
-            height=dp(160),
-            opacity=0.38,
-            cursor_size=(dp(14), dp(22)),
-        )
+        self.page_scroll = PageScrollRail(size=(dp(22), dp(220)))
         self._scroll_syncing = False
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
-        self.add_widget(self.page_scroll)
         self.add_widget(self.chrome)
         self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
+        self.add_widget(self.page_scroll)
         self.hide_copy_chip()
         self.hide_paste_chip()
         self.hide_text_overlay()
@@ -4152,10 +4224,10 @@ class RootLayout(FloatLayout):
         bar = getattr(self, "page_scroll", None)
         if bar is None:
             return
-        height = min(dp(220), max(dp(96), float(self.workspace.height) * 0.42))
-        bar.size = (dp(14), height)
-        bar.right = float(self.pdf_canvas.right) - dp(2)
-        bar.center_y = float(self.pdf_canvas.center_y)
+        height = max(dp(140), float(self.workspace.height) * 0.62)
+        bar.size = (dp(22), height)
+        bar.right = float(self.right) - dp(6)
+        bar.center_y = float(self.workspace.center_y or self.center_y)
         self._sync_page_scroll()
 
     def _sync_page_scroll(self, *_args: Any) -> None:
@@ -4164,12 +4236,10 @@ class RootLayout(FloatLayout):
             return
         min_y, max_y = self._page_scroll_range()
         span = max_y - min_y
-        if span < 8.0:
-            bar.opacity = 0
-            bar.disabled = True
-            return
-        bar.opacity = 0.38
+        bar.opacity = 0.88
         bar.disabled = False
+        if span < 1.0:
+            return
         app = App.get_running_app()
         t = (float(app.view_pan_y) - min_y) / span
         value = max(0.0, min(1.0, 1.0 - t))
@@ -4179,7 +4249,7 @@ class RootLayout(FloatLayout):
         bar.value = value
         self._scroll_syncing = False
 
-    def _on_page_scroll(self, _bar: Slider, value: float) -> None:
+    def _on_page_scroll(self, _bar: Any, value: float) -> None:
         if getattr(self, "_scroll_syncing", False):
             return
         min_y, max_y = self._page_scroll_range()
@@ -4739,6 +4809,7 @@ class SamsungNotesCompanionApp(App):
         self._notes_strokes: Dict[int, List[StrokeRecord]] = {}
         self._pending_save: Optional[Tuple[str, str]] = None
         self._append_pdf_pending: bool = False
+        self._extra_page_files: Dict[int, str] = {}
         self._stylus_listener: Any = None
         self._history_role: str = "pdf"
         self._clipboard: List[StrokeRecord] = []
@@ -4979,6 +5050,7 @@ class SamsungNotesCompanionApp(App):
         self._pdf_page_index = 0
         self._pdf_page_count = pages
         self.page_count = pages
+        self._extra_page_files = {}
         self.document_title = title
         self.tool_mode = "none"
         self.root_layout.pdf_canvas.set_blank_notebook(pages, self.page_width, self.page_height)
@@ -5699,7 +5771,11 @@ class SamsungNotesCompanionApp(App):
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         self._share_keep = [list(uris), intent, clip, chooser, activity]
-        activity.startActivity(chooser)
+        try:
+            activity.startActivity(chooser)
+        except Exception:
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(chooser)
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -5717,21 +5793,31 @@ class SamsungNotesCompanionApp(App):
         cached_files = []
         try:
             cached_files = [self._copy_share_into_cache(activity, path) for path in files]
-        except Exception:
-            self._notify("שיתוף נכשל")
+        except Exception as exc:
+            self._notify(f"שיתוף נכשל בהעתקה: {_exception_reason(exc)}")
             return
 
         @run_on_ui_thread
         def _share() -> None:
             try:
-                uris = [self._share_content_uri(activity, path, title) for path in cached_files]
+                uris = []
+                for path in cached_files:
+                    try:
+                        uris.append(self._android_file_uri(activity, path))
+                    except Exception as file_exc:
+                        try:
+                            uris.append(self._android_mediastore_pdf_uri(activity, path, title))
+                        except Exception as store_exc:
+                            raise RuntimeError(
+                                f"FileProvider: {_exception_reason(file_exc)}; MediaStore: {_exception_reason(store_exc)}"
+                            ) from store_exc
                 if not uris:
-                    raise RuntimeError("no uri")
+                    raise RuntimeError("לא נוצר קישור לקובץ")
                 self._launch_share_intent(activity, uris, title)
             except Exception as exc:
                 Clock.schedule_once(
                     lambda *_a, err=exc: self._notify(
-                        f"שיתוף נכשל: {_safe_ui_message(err)}"
+                        f"שיתוף נכשל: {_exception_reason(err)}"
                     ),
                     0,
                 )
@@ -6460,15 +6546,24 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             pass
         self._pdf_page_count = count
-        self.page_count = count
+        extra_total = 0
+        if self._extra_page_files:
+            extra_total = max(int(index) for index in self._extra_page_files) + 1
+        total = max(count, int(self.page_count or 1), extra_total)
+        self.page_count = total
         self._preview_pfd = pfd
         self._preview_renderer = renderer
-        self.root_layout.pdf_canvas.set_blank_notebook(count, self.page_width, self.page_height)
-        self.root_layout.notes_canvas.set_blank_notebook(count)
+        self.root_layout.pdf_canvas.set_blank_notebook(total, self.page_width, self.page_height)
+        self.root_layout.notes_canvas.set_blank_notebook(total)
+        pdf = self.root_layout.pdf_canvas
+        for index, path in list(self._extra_page_files.items()):
+            if path and os.path.isfile(path):
+                pdf.set_page_image_at(int(index), path, total)
+                pdf._locked_pages.add(int(index))
         self.root_layout.sync_notes_page_size()
         self.root_layout.pdf_canvas.load_strokes(self._pages_to_stacked(self._page_strokes))
         self.root_layout.notes_canvas.load_strokes(self._pages_to_stacked(self._notes_strokes))
-        self.root_layout.set_status(f"טוען 1/{count}")
+        self.root_layout.set_status(f"טוען 1/{total}")
         self.request_visible_pages()
 
     def request_visible_pages(self) -> None:
@@ -6673,6 +6768,7 @@ class SamsungNotesCompanionApp(App):
             "pdf_page_index": self._pdf_page_index,
             "pdf_page_count": self._pdf_page_count,
             "page_count": int(self.page_count or 1),
+            "extra_pages": {str(index): path for index, path in self._extra_page_files.items()},
             "view_scale": float(self.view_scale),
             "pdf_pages": {
                 str(index): strokes
@@ -6863,6 +6959,13 @@ class SamsungNotesCompanionApp(App):
 
     def _render_all_export_backgrounds(self, count: int) -> List[Optional[Any]]:
         pages: List[Optional[Any]] = [None] * count
+        extras = getattr(self, "_extra_page_files", {}) or {}
+        for index, path in extras.items():
+            if 0 <= int(index) < count and path and os.path.isfile(str(path)):
+                try:
+                    pages[int(index)] = _image_rgb_on_white(str(path))
+                except Exception:
+                    pass
         if self.pdf_path and is_android():
             try:
                 from jnius import autoclass
@@ -6903,7 +7006,7 @@ class SamsungNotesCompanionApp(App):
 
         self._stash_current_page_strokes()
         pages: List[Tuple[bytes, int, int]] = []
-        count = max(1, int(self._pdf_page_count) or 1)
+        count = max(1, int(self.page_count or self._pdf_page_count or 1))
         backgrounds = self._render_all_export_backgrounds(count)
         page_w = max(1.0, float(self.page_width))
         page_h = max(1.0, float(self.page_height))
@@ -6953,7 +7056,7 @@ class SamsungNotesCompanionApp(App):
         payload = self._document_payload()
         pdf_bytes = self._export_pdf_bytes()
         buffer = io.BytesIO()
-        page_ids = [str(uuid.uuid4()) for _ in range(max(1, self._pdf_page_count or 1))]
+        page_ids = [str(uuid.uuid4()) for _ in range(max(1, int(self.page_count or self._pdf_page_count or 1)))]
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("companion.json", json.dumps(payload, indent=2))
             archive.writestr("Document.pdf", pdf_bytes)
@@ -6983,6 +7086,12 @@ class SamsungNotesCompanionApp(App):
         self._pdf_page_index = int(payload.get("pdf_page_index") or 0)
         self._pdf_page_count = int(payload.get("pdf_page_count") or 1)
         self.page_count = max(1, int(payload.get("page_count") or 0), self._pdf_page_count)
+        extra = payload.get("extra_pages") or {}
+        self._extra_page_files = {
+            int(key): str(path)
+            for key, path in extra.items()
+            if str(path) and os.path.isfile(str(path))
+        }
         self._page_strokes = {
             int(key): value for key, value in (payload.get("pdf_pages") or {}).items()
         }
@@ -7398,6 +7507,17 @@ class SamsungNotesCompanionApp(App):
                 return
         self._desktop_append_pdf_dialog()
 
+    def _extra_pages_dir(self) -> Path:
+        doc_id = str(getattr(self, "_current_doc_id", "") or "session")
+        folder = Path(str(self.user_data_dir)) / "extra_pages" / doc_id
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _keep_extra_page(self, index: int, image_path: str) -> None:
+        dest = self._extra_pages_dir() / f"{int(index):04d}.jpg"
+        shutil.copy2(image_path, dest)
+        self._extra_page_files[int(index)] = str(dest)
+
     def _extend_notebook(self, extra: int) -> int:
         extra = max(0, int(extra))
         start = max(0, int(self.page_count))
@@ -7453,6 +7573,7 @@ class SamsungNotesCompanionApp(App):
                                 start + index, image_path, int(self.page_count)
                             )
                             pdf._locked_pages.add(start + index)
+                            self._keep_extra_page(start + index, image_path)
                     finally:
                         page.close()
                         if image_path:
