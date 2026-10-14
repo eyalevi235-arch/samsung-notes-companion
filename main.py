@@ -187,6 +187,8 @@ SAVE_TYPES: Sequence[Tuple[str, str, str]] = (
     (".json", "application/json", "JSON (*.json)"),
     (".png", "image/png", "PNG image (*.png)"),
 )
+COMPANION_PACK_KIND = "snc-pack-1"
+COMPANION_PACK_EXT = ".snc"
 
 
 def is_android() -> bool:
@@ -7701,6 +7703,173 @@ class SamsungNotesCompanionApp(App):
                     with open(preview, "rb") as handle:
                         archive.writestr(f"media/{page_id}.png", handle.read())
         return buffer.getvalue()
+
+    def _payload_stroke_groups(self, payload: Dict[str, Any]) -> List[List[StrokeRecord]]:
+        groups: List[List[StrokeRecord]] = []
+        for key in ("pdf_canvas", "notes_canvas"):
+            items = payload.get(key) or []
+            if isinstance(items, list):
+                groups.append(items)
+        for key in ("pdf_pages", "notes_pages"):
+            pages = payload.get(key) or {}
+            if isinstance(pages, dict):
+                for strokes in pages.values():
+                    if isinstance(strokes, list):
+                        groups.append(strokes)
+        return groups
+
+    def _collect_payload_images(self, payload: Dict[str, Any]) -> List[str]:
+        found: List[str] = []
+        for group in self._payload_stroke_groups(payload):
+            for record in group:
+                if not isinstance(record, dict) or record.get("kind") != "image":
+                    continue
+                path = str(record.get("path") or "")
+                if path and os.path.isfile(path) and path not in found:
+                    found.append(path)
+        extras = payload.get("extra_pages") or {}
+        if isinstance(extras, dict):
+            for path in extras.values():
+                text = str(path or "")
+                if text and os.path.isfile(text) and text not in found:
+                    found.append(text)
+        pdf_path = str(payload.get("pdf_path") or "")
+        if pdf_path and os.path.isfile(pdf_path) and pdf_path not in found:
+            found.append(pdf_path)
+        return found
+
+    def _rewrite_payload_image_paths(self, payload: Dict[str, Any], mapping: Dict[str, str]) -> None:
+        for group in self._payload_stroke_groups(payload):
+            for record in group:
+                if not isinstance(record, dict) or record.get("kind") != "image":
+                    continue
+                old = str(record.get("path") or "")
+                if old in mapping:
+                    record["path"] = mapping[old]
+        extras = payload.get("extra_pages") or {}
+        if isinstance(extras, dict):
+            payload["extra_pages"] = {
+                str(key): mapping.get(str(path), str(path)) for key, path in extras.items()
+            }
+        pdf_path = str(payload.get("pdf_path") or "")
+        if pdf_path in mapping:
+            payload["pdf_path"] = mapping[pdf_path]
+
+    def _build_companion_pack(self, payload: Dict[str, Any], title: str) -> bytes:
+        pack = copy.deepcopy(payload)
+        mapping: Dict[str, str] = {}
+        files: List[Tuple[str, str]] = []
+        pdf_path = str(pack.get("pdf_path") or "")
+        if pdf_path and os.path.isfile(pdf_path):
+            mapping[pdf_path] = "source.pdf"
+            files.append((pdf_path, "source.pdf"))
+        extras = pack.get("extra_pages") or {}
+        if isinstance(extras, dict):
+            for key, path in extras.items():
+                text = str(path or "")
+                if not text or not os.path.isfile(text):
+                    continue
+                rel = f"extras/{int(key):04d}{Path(text).suffix.lower() or '.jpg'}"
+                mapping[text] = rel
+                files.append((text, rel))
+        stamp_index = 0
+        for path in self._collect_payload_images(pack):
+            if path in mapping:
+                continue
+            stamp_index += 1
+            rel = f"stamps/{stamp_index:03d}_{Path(path).name}"
+            mapping[path] = rel
+            files.append((path, rel))
+        self._rewrite_payload_image_paths(pack, mapping)
+        pack["pack_kind"] = COMPANION_PACK_KIND
+        pack["pack_title"] = title
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("companion.json", json.dumps(pack, ensure_ascii=False, indent=2))
+            for src, rel in files:
+                archive.write(src, rel)
+        return buffer.getvalue()
+
+    def export_companion_pack_bytes(self, doc_id: Optional[str] = None) -> bytes:
+        """Build a portable .snc pack. Not wired to share/open UI yet."""
+        current = str(getattr(self, "_current_doc_id", "") or "")
+        target = str(doc_id or current or "")
+        if target and target == current:
+            self._autosave_library_doc()
+            return self._build_companion_pack(self._document_payload(), self.document_title)
+        if not target:
+            return self._build_companion_pack(self._document_payload(), self.document_title)
+        data = self.library_data()
+        entry = next((item for item in data.get("documents") or [] if str(item.get("id")) == target), None)
+        if entry is None:
+            raise RuntimeError("document missing")
+        payload_path = Path(str(entry.get("payload") or ""))
+        if not payload_path.is_file():
+            raise RuntimeError("document payload missing")
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        pdf_copy = str(entry.get("pdf") or "")
+        if pdf_copy and os.path.isfile(pdf_copy):
+            payload["pdf_path"] = pdf_copy
+        return self._build_companion_pack(payload, str(entry.get("title") or payload.get("document_title") or "מסמך"))
+
+    def is_companion_pack(self, path: str) -> bool:
+        try:
+            with zipfile.ZipFile(path, "r") as archive:
+                if "companion.json" not in archive.namelist():
+                    return False
+                payload = json.loads(archive.read("companion.json").decode("utf-8"))
+            return str(payload.get("pack_kind") or "") == COMPANION_PACK_KIND
+        except Exception:
+            return False
+
+    def import_companion_pack(self, path: str) -> str:
+        """Install a portable pack into the library. Does not open the editor."""
+        if not self.is_companion_pack(path):
+            raise RuntimeError("not a companion pack")
+        new_id = uuid.uuid4().hex
+        docs_dir = self.library_dir() / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        extras_dir = Path(str(self.user_data_dir)) / "extra_pages" / new_id
+        stamps_dir = self._stamps_dir()
+        dest_payload = docs_dir / f"{new_id}.json"
+        dest_pdf = docs_dir / f"{new_id}.pdf"
+        mapping: Dict[str, str] = {}
+        with zipfile.ZipFile(path, "r") as archive:
+            payload = json.loads(archive.read("companion.json").decode("utf-8"))
+            names = set(archive.namelist())
+            if "source.pdf" in names:
+                dest_pdf.write_bytes(archive.read("source.pdf"))
+                mapping["source.pdf"] = str(dest_pdf)
+            extras_dir.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                if name.startswith("extras/") and not name.endswith("/"):
+                    target = extras_dir / Path(name).name
+                    target.write_bytes(archive.read(name))
+                    mapping[name] = str(target)
+                elif name.startswith("stamps/") and not name.endswith("/"):
+                    target = stamps_dir / Path(name).name
+                    target.write_bytes(archive.read(name))
+                    mapping[name] = str(target)
+        self._rewrite_payload_image_paths(payload, mapping)
+        payload.pop("pack_kind", None)
+        title = str(payload.get("pack_title") or payload.get("document_title") or "מסמך")
+        payload["document_title"] = title
+        dest_payload.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        data = self.library_data()
+        data.setdefault("documents", []).append(
+            {
+                "id": new_id,
+                "title": title,
+                "folder_id": self._library_parent_id(),
+                "updated": time.time(),
+                "pages": int(payload.get("page_count") or 1),
+                "payload": str(dest_payload),
+                "pdf": str(dest_pdf) if dest_pdf.is_file() else "",
+            }
+        )
+        self._save_library_data(data)
+        self.library_screen.refresh()
+        return new_id
 
     def _load_notes_file(self, path: str) -> None:
         if path.lower().endswith(".sdocx"):
