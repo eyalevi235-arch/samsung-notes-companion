@@ -391,7 +391,7 @@ def _safe_ui_message(message: Any) -> str:
             return prefix[:80]
         return "שיתוף נכשל"
     cleaned = _plain_user_text(raw)
-    return (cleaned or raw.strip())[:160]
+    return (cleaned or raw.strip())[:280]
 
 
 def _exception_reason(exc: Any) -> str:
@@ -414,7 +414,7 @@ def _exception_reason(exc: Any) -> str:
     text = " — ".join(part.strip() for part in parts if str(part).strip())
     if "Ljava/" in text or "(L" in text:
         return f"שגיאת Android ({type(exc).__name__})"
-    return (text or type(exc).__name__)[:160]
+    return (text or type(exc).__name__)[:280]
 
 
 def _java_chars(value: Any) -> str:
@@ -1364,15 +1364,16 @@ class PageScrollRail(Widget):
     value = NumericProperty(1.0)
 
     def __init__(self, **kwargs: Any) -> None:
-        kwargs.setdefault("size_hint", (None, None))
-        kwargs.setdefault("width", dp(22))
+        kwargs.setdefault("size_hint", (None, 0.64))
+        kwargs.setdefault("width", dp(32))
+        kwargs.setdefault("pos_hint", {"right": 1.0, "center_y": 0.44})
         super().__init__(**kwargs)
-        self.opacity = 0.88
+        self.opacity = 1.0
         with self.canvas:
-            self._track_c = Color(0.16, 0.17, 0.20, 0.88)
-            self._track = RoundedRectangle(radius=[dp(8)])
-            self._thumb_c = Color(0.86, 0.88, 0.92, 0.96)
-            self._thumb = RoundedRectangle(radius=[dp(7)])
+            self._track_c = Color(0.08, 0.10, 0.14, 0.94)
+            self._track = RoundedRectangle(radius=[dp(9)])
+            self._thumb_c = Color(0.32, 0.58, 0.98, 1.0)
+            self._thumb = RoundedRectangle(radius=[dp(8)])
         self.bind(pos=self._redraw, size=self._redraw, value=self._redraw)
         Clock.schedule_once(lambda _dt: self._redraw(), 0)
 
@@ -3924,7 +3925,7 @@ class RootLayout(FloatLayout):
         self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
         self.text_overlay = self._build_text_overlay()
-        self.page_scroll = PageScrollRail(size=(dp(22), dp(220)))
+        self.page_scroll = PageScrollRail(width=dp(32))
         self._scroll_syncing = False
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
@@ -4224,10 +4225,14 @@ class RootLayout(FloatLayout):
         bar = getattr(self, "page_scroll", None)
         if bar is None:
             return
-        height = max(dp(140), float(self.workspace.height) * 0.62)
-        bar.size = (dp(22), height)
-        bar.right = float(self.right) - dp(6)
-        bar.center_y = float(self.workspace.center_y or self.center_y)
+        bar.width = dp(32)
+        bar.size_hint_y = 0.64
+        bar.pos_hint = {"right": 1.0, "center_y": 0.44}
+        bar.opacity = 1.0
+        bar.disabled = False
+        if bar.parent is self:
+            self.remove_widget(bar)
+            self.add_widget(bar)
         self._sync_page_scroll()
 
     def _sync_page_scroll(self, *_args: Any) -> None:
@@ -4236,7 +4241,7 @@ class RootLayout(FloatLayout):
             return
         min_y, max_y = self._page_scroll_range()
         span = max_y - min_y
-        bar.opacity = 0.88
+        bar.opacity = 1.0
         bar.disabled = False
         if span < 1.0:
             return
@@ -4724,9 +4729,10 @@ class RootLayout(FloatLayout):
         else:
             self.notes_canvas.opacity = 0
             self.notes_canvas.disabled = True
+        rail = dp(36)
         self.notes_canvas.size = (notes_w, max(1.0, work_h))
         self.notes_canvas.pos = (work_x, work_y)
-        self.pdf_canvas.size = (max(1.0, work_w - notes_w), max(1.0, work_h))
+        self.pdf_canvas.size = (max(1.0, work_w - notes_w - rail), max(1.0, work_h))
         self.pdf_canvas.pos = (work_x + notes_w, work_y)
         self.sync_notes_page_size()
 
@@ -5576,7 +5582,6 @@ class SamsungNotesCompanionApp(App):
         providers = (
             "org.kivy.android.GenericFileProvider",
             "androidx.core.content.FileProvider",
-            "android.support.v4.content.FileProvider",
         )
         last_error: Optional[Exception] = None
         for context in (activity, activity.getApplicationContext()):
@@ -5802,15 +5807,20 @@ class SamsungNotesCompanionApp(App):
             try:
                 uris = []
                 for path in cached_files:
+                    store_exc: Optional[Exception] = None
+                    file_exc: Optional[Exception] = None
+                    try:
+                        uris.append(self._android_mediastore_pdf_uri(activity, path, title))
+                        continue
+                    except Exception as exc:
+                        store_exc = exc
                     try:
                         uris.append(self._android_file_uri(activity, path))
-                    except Exception as file_exc:
-                        try:
-                            uris.append(self._android_mediastore_pdf_uri(activity, path, title))
-                        except Exception as store_exc:
-                            raise RuntimeError(
-                                f"FileProvider: {_exception_reason(file_exc)}; MediaStore: {_exception_reason(store_exc)}"
-                            ) from store_exc
+                    except Exception as exc:
+                        file_exc = exc
+                        raise RuntimeError(
+                            f"MediaStore: {_exception_reason(store_exc)} | FileProvider: {_exception_reason(file_exc)}"
+                        ) from exc
                 if not uris:
                     raise RuntimeError("לא נוצר קישור לקובץ")
                 self._launch_share_intent(activity, uris, title)
@@ -7026,23 +7036,22 @@ class SamsungNotesCompanionApp(App):
                 page_w,
                 page_h,
             )
-            export_notes_h = background.size[1]
-            export_notes_w = max(1, int(round(notes_w * export_notes_h / max(page_h, 1.0))))
-            notes = Image.new("RGB", (export_notes_w, export_notes_h), (255, 255, 255))
-            self._draw_notes_grid_pil(notes)
-            self._stroke_on_image(
-                notes,
-                self._notes_strokes.get(index, []),
-                notes_w,
-                page_h,
-            )
-            combined = Image.new(
-                "RGB",
-                (notes.size[0] + background.size[0], background.size[1]),
-                (255, 255, 255),
-            )
-            combined.paste(notes, (0, 0))
-            combined.paste(background, (notes.size[0], 0))
+            note_strokes = self._notes_strokes.get(index, [])
+            if note_strokes:
+                export_notes_h = background.size[1]
+                export_notes_w = max(1, int(round(notes_w * export_notes_h / max(page_h, 1.0))))
+                notes = Image.new("RGB", (export_notes_w, export_notes_h), (255, 255, 255))
+                self._draw_notes_grid_pil(notes)
+                self._stroke_on_image(notes, note_strokes, notes_w, page_h)
+                combined = Image.new(
+                    "RGB",
+                    (notes.size[0] + background.size[0], background.size[1]),
+                    (255, 255, 255),
+                )
+                combined.paste(notes, (0, 0))
+                combined.paste(background, (notes.size[0], 0))
+            else:
+                combined = background
             buffer = io.BytesIO()
             combined.save(buffer, format="JPEG", quality=90, optimize=False, progressive=False)
             pages.append((buffer.getvalue(), combined.size[0], combined.size[1]))
@@ -7567,7 +7576,7 @@ class SamsungNotesCompanionApp(App):
                     page = renderer.openPage(int(index))
                     image_path = None
                     try:
-                        image_path = self._render_opened_page(page, for_export=False)
+                        image_path = self._render_opened_page(page, for_export=True)
                         if image_path:
                             pdf.set_page_image_at(
                                 start + index, image_path, int(self.page_count)
