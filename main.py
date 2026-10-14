@@ -3241,21 +3241,32 @@ class FolderFlowChart(Widget):
             self._drawing = False
 
     def _caption_texture(self, title: str, width: float, height: float) -> Optional[Any]:
-        label = CoreLabel(
-            text=mixed_markup(_short_label(title, 10)),
-            markup=True,
-            font_size=dp(11),
-            color=(1, 1, 1, 1),
-            halign="center",
-            valign="middle",
-            text_size=(width - dp(4), height),
-            shorten=True,
-            shorten_from="right",
-        )
+        kwargs: Dict[str, Any] = {
+            "text": ui_text(_short_label(title, 10)),
+            "font_size": int(dp(11)),
+            "color": (1, 1, 1, 1),
+            "halign": "center",
+            "valign": "middle",
+        }
         if _HEBREW_FONT_READY:
-            label.font_name = "HebrewFont"
+            kwargs["font_name"] = "HebrewFont"
+        label = CoreLabel(**kwargs)
         label.refresh()
-        return label.texture
+        texture = label.texture
+        if texture is None:
+            return None
+        tw, th = texture.size
+        if tw > width or th > height:
+            scale = min(width / max(tw, 1), height / max(th, 1))
+            label = CoreLabel(
+                **{
+                    **kwargs,
+                    "font_size": max(8, int(int(dp(11)) * scale)),
+                }
+            )
+            label.refresh()
+            texture = label.texture
+        return texture
 
     def _draw_node(self, node: Dict[str, Any]) -> None:
         kids = list(node.get("children") or [])
@@ -4969,42 +4980,33 @@ class SamsungNotesCompanionApp(App):
 
         ContentValues = autoclass("android.content.ContentValues")
         Build = autoclass("android.os.Build")
-        String = autoclass("java.lang.String")
         FilesTable = autoclass("android.provider.MediaStore$Files")
         resolver = activity.getContentResolver()
         display = f"note-{uuid.uuid4().hex[:8]}.pdf"
+        collections = [FilesTable.getContentUri("external")]
         sdk = int(Build.VERSION.SDK_INT)
-        collections = []
         if sdk >= 29:
             try:
-                collections.append(autoclass("android.provider.MediaStore$Downloads").EXTERNAL_CONTENT_URI)
+                collections.insert(0, FilesTable.getContentUri("external_primary"))
             except Exception:
                 pass
-            collections.append(FilesTable.getContentUri("external_primary"))
-        collections.append(FilesTable.getContentUri("external"))
         last_error: Optional[Exception] = None
         for collection in collections:
-            stream = None
             try:
                 values = ContentValues()
-                values.put("_display_name", String(display))
-                values.put("mime_type", String("application/pdf"))
+                values.put("_display_name", display)
+                values.put("mime_type", "application/pdf")
                 uri = resolver.insert(collection, values)
                 if uri is None:
                     continue
-                stream = resolver.openOutputStream(uri)
-                if stream is None:
-                    continue
-                self._copy_file_to_stream(path, stream)
-                stream = None
+                source = autoclass("java.io.FileInputStream")(str(path))
+                dest = resolver.openOutputStream(uri)
+                autoclass("android.os.FileUtils").copy(source, dest)
+                source.close()
+                dest.close()
                 return cast("android.net.Uri", uri)
             except Exception as exc:
                 last_error = exc
-                if stream is not None:
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
         if last_error is not None:
             raise last_error
         raise RuntimeError("MediaStore insert failed")
@@ -5043,6 +5045,22 @@ class SamsungNotesCompanionApp(App):
         except Exception:
             pass
 
+    def _put_share_stream(self, intent: Any, uri: Any) -> None:
+        from jnius import autoclass, cast
+
+        Intent = autoclass("android.content.Intent")
+        for payload in (
+            cast("android.os.Parcelable", uri),
+            cast("android.net.Uri", uri),
+            uri,
+        ):
+            try:
+                intent.putExtra(Intent.EXTRA_STREAM, payload)
+                return
+            except Exception:
+                continue
+        intent.putExtra("android.intent.extra.STREAM", uri)
+
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from android.runnable import run_on_ui_thread
         from jnius import autoclass, cast
@@ -5050,51 +5068,38 @@ class SamsungNotesCompanionApp(App):
         Intent = autoclass("android.content.Intent")
         String = autoclass("java.lang.String")
         ClipData = autoclass("android.content.ClipData")
-        parcels = [cast("android.os.Parcelable", uri) for uri in uris]
-        if len(parcels) == 1:
+        if len(uris) == 1:
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("application/pdf")
-            intent.putExtra(Intent.EXTRA_STREAM, parcels[0])
+            intent.setType("*/*")
+            self._put_share_stream(intent, uris[0])
         else:
             ArrayList = autoclass("java.util.ArrayList")
             stream = ArrayList()
-            for parcel in parcels:
-                stream.add(parcel)
+            for uri in uris:
+                stream.add(cast("android.os.Parcelable", uri))
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-            intent.setType("application/pdf")
+            intent.setType("*/*")
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
-        clip = ClipData.newRawUri(String("pdf"), uris[0])
+        clip = ClipData.newRawUri(String("file"), uris[0])
         for uri in uris[1:]:
             clip.addItem(ClipData.Item(uri))
         intent.setClipData(clip)
-        try:
-            intent.putExtra(Intent.EXTRA_SUBJECT, String("PDF"))
-        except Exception:
-            pass
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        try:
-            pm = activity.getPackageManager()
-            matches = pm.queryIntentActivities(intent, 0)
-            count = int(matches.size()) if hasattr(matches, "size") else len(list(matches))
-            for index in range(count):
-                item = matches.get(index) if hasattr(matches, "get") else matches[index]
-                package_name = item.activityInfo.packageName
-                for uri in uris:
-                    activity.grantUriPermission(
-                        package_name,
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                    )
-        except Exception:
-            pass
 
         @run_on_ui_thread
         def _open() -> None:
-            activity.startActivity(chooser)
+            try:
+                activity.startActivity(chooser)
+            except Exception:
+                Clock.schedule_once(lambda *_a: self._fallback_share_save(), 0)
 
         _open()
+
+    def _fallback_share_save(self) -> None:
+        self._notify("בחרי לאן לשמור את הקובץ")
+        self._start_android_save(".pdf", "application/pdf")
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -5120,7 +5125,7 @@ class SamsungNotesCompanionApp(App):
                 raise RuntimeError("no uri")
             self._launch_share_intent(activity, uris, title)
         except Exception:
-            self._notify("שיתוף נכשל: אין גישה לקובץ")
+            self._fallback_share_save()
 
     def create_library_folder(self, *_args: Any) -> None:
         self._folder_editor(None, parent_id=self._library_parent_id())
