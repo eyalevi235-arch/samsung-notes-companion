@@ -4845,6 +4845,7 @@ class SamsungNotesCompanionApp(App):
             self._setup_android()
         Clock.schedule_interval(lambda _dt: self._autosave_library_doc(), 20.0)
         Clock.schedule_once(lambda _dt: self.library_screen.refresh(), 0.25)
+        Clock.schedule_once(lambda _dt: self._restore_share_cleanup(), 0.8)
         return self._sm
 
     def _file_stem(self) -> str:
@@ -5579,21 +5580,77 @@ class SamsungNotesCompanionApp(App):
             raise last_error
         raise RuntimeError("cannot copy share file")
 
-    def _track_share_file(self, path: str) -> None:
+    def _share_ledger_path(self) -> Path:
+        folder = Path(str(self.user_data_dir))
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / "share_cleanup.json"
+
+    def _persist_share_ledger(self) -> None:
+        try:
+            payload = {
+                "files": [os.path.abspath(item) for item in self._share_files if item],
+                "uris": [
+                    str(item)
+                    for item in self._share_uris
+                    if item and str(item).startswith("content:")
+                ],
+                "awaiting": bool(self._share_awaiting),
+            }
+            path = self._share_ledger_path()
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def _load_share_ledger(self) -> None:
+        path = self._share_ledger_path()
+        if not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        for item in payload.get("files") or []:
+            self._track_share_file(str(item), persist=False)
+        for item in payload.get("uris") or []:
+            self._track_share_uri(item, persist=False)
+        if payload.get("awaiting"):
+            self._share_awaiting = True
+
+    def _restore_share_cleanup(self) -> None:
+        self._load_share_ledger()
+        if self._share_files or self._share_uris:
+            self._share_awaiting = True
+            self._schedule_share_cleanup()
+
+    def _track_share_file(self, path: str, persist: bool = True) -> None:
         if not path:
             return
         resolved = os.path.abspath(path)
         if resolved not in self._share_files:
             self._share_files.append(resolved)
+            if persist:
+                try:
+                    self._persist_share_ledger()
+                except Exception:
+                    pass
 
-    def _track_share_uri(self, uri: Any) -> None:
+    def _track_share_uri(self, uri: Any, persist: bool = True) -> None:
         if uri is None:
             return
         key = str(uri)
+        if not key.startswith("content:"):
+            return
         for seen in self._share_uris:
             if str(seen) == key:
                 return
         self._share_uris.append(uri)
+        if persist:
+            try:
+                self._persist_share_ledger()
+            except Exception:
+                pass
 
     def _share_protected_paths(self) -> List[str]:
         protected: List[str] = []
@@ -5671,32 +5728,44 @@ class SamsungNotesCompanionApp(App):
         self._share_cleanup_ev = Clock.schedule_once(lambda *_a: self._purge_share_temps(), delay)
 
     def _purge_share_temps(self) -> None:
+        self._load_share_ledger()
         paths = list(self._share_files)
         uris = list(self._share_uris)
-        self._share_awaiting = False
-        self._share_files = []
-        self._share_uris = []
+        leftover_files: List[str] = []
+        leftover_uris: List[Any] = []
         for path in paths:
             try:
+                if not os.path.isfile(os.path.abspath(path)):
+                    continue
                 if not self._is_owned_share_temp(path, paths):
                     continue
                 os.remove(path)
+                if os.path.isfile(os.path.abspath(path)):
+                    leftover_files.append(os.path.abspath(path))
             except Exception:
-                pass
-        if not uris or not is_android():
-            return
-        try:
-            from jnius import autoclass
+                leftover_files.append(os.path.abspath(path))
+        if uris and is_android():
+            try:
+                from jnius import autoclass
 
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            resolver = activity.getContentResolver()
-            for uri in uris:
-                try:
-                    if not str(uri).startswith("content:"):
-                        continue
-                    resolver.delete(uri, None, None)
-                except Exception:
-                    pass
+                Uri = autoclass("android.net.Uri")
+                activity = autoclass("org.kivy.android.PythonActivity").mActivity
+                resolver = activity.getContentResolver()
+                for uri in uris:
+                    try:
+                        parsed = uri if not isinstance(uri, str) else Uri.parse(str(uri))
+                        if not str(parsed).startswith("content:"):
+                            continue
+                        resolver.delete(parsed, None, None)
+                    except Exception:
+                        leftover_uris.append(uri)
+            except Exception:
+                leftover_uris = list(uris)
+        self._share_files = leftover_files
+        self._share_uris = leftover_uris
+        self._share_awaiting = bool(leftover_files or leftover_uris)
+        try:
+            self._persist_share_ledger()
         except Exception:
             pass
 
@@ -5960,6 +6029,7 @@ class SamsungNotesCompanionApp(App):
                 self._track_share_uri(item)
         self._share_keep = [list(uris), intent, clip, chooser, activity]
         self._share_awaiting = True
+        self._persist_share_ledger()
         try:
             activity.startActivityForResult(chooser, SHARE_REQUEST)
         except Exception:
@@ -6145,14 +6215,23 @@ class SamsungNotesCompanionApp(App):
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
+        try:
+            self._persist_share_ledger()
+        except Exception:
+            pass
         return True
 
     def on_resume(self) -> None:
-        if getattr(self, "_share_awaiting", False):
+        self._load_share_ledger()
+        if getattr(self, "_share_awaiting", False) or self._share_files or self._share_uris:
             self._schedule_share_cleanup()
 
     def on_stop(self) -> None:
         self._autosave_library_doc()
+        try:
+            self._persist_share_ledger()
+        except Exception:
+            pass
 
     def clamp_view(self, canvas: Optional[SPenAnnotationCanvas] = None, *_args: Any) -> None:
         root = getattr(self, "root_layout", None)
