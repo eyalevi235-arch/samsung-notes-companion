@@ -89,6 +89,7 @@ PDF_PREVIEW_MAX_SIDE = 900.0
 MAX_GPU_PAGES = 5
 PAGE_GAP = 28.0
 APPEND_REQUEST = 4104
+SHARE_REQUEST = 4105
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
 UNDO_LIMIT = 40
@@ -4815,6 +4816,10 @@ class SamsungNotesCompanionApp(App):
         self._notes_strokes: Dict[int, List[StrokeRecord]] = {}
         self._pending_save: Optional[Tuple[str, str]] = None
         self._append_pdf_pending: bool = False
+        self._share_files: List[str] = []
+        self._share_uris: List[Any] = []
+        self._share_awaiting: bool = False
+        self._share_cleanup_ev: Any = None
         self._extra_page_files: Dict[int, str] = {}
         self._stylus_listener: Any = None
         self._history_role: str = "pdf"
@@ -5523,6 +5528,7 @@ class SamsungNotesCompanionApp(App):
             return None
         path = self._share_cache_dir() / f"note-{uuid.uuid4().hex[:10]}.pdf"
         path.write_bytes(pdf_bytes)
+        self._track_share_file(str(path))
         return str(path)
 
     def _copy_share_into_cache(self, activity: Any, src: str) -> str:
@@ -5540,7 +5546,9 @@ class SamsungNotesCompanionApp(App):
             source.close()
             output.close()
             if dest.exists() and dest.length() > 0:
-                return str(dest.getAbsolutePath())
+                copied = str(dest.getAbsolutePath())
+                self._track_share_file(copied)
+                return copied
         except Exception:
             pass
         folders: List[Path] = []
@@ -5563,12 +5571,134 @@ class SamsungNotesCompanionApp(App):
                 if os.path.abspath(src) != os.path.abspath(str(dest)):
                     shutil.copy2(src, dest)
                 if dest.is_file() and dest.stat().st_size > 0:
+                    self._track_share_file(str(dest))
                     return str(dest)
             except Exception as exc:
                 last_error = exc
         if last_error is not None:
             raise last_error
         raise RuntimeError("cannot copy share file")
+
+    def _track_share_file(self, path: str) -> None:
+        if not path:
+            return
+        resolved = os.path.abspath(path)
+        if resolved not in self._share_files:
+            self._share_files.append(resolved)
+
+    def _track_share_uri(self, uri: Any) -> None:
+        if uri is None:
+            return
+        key = str(uri)
+        for seen in self._share_uris:
+            if str(seen) == key:
+                return
+        self._share_uris.append(uri)
+
+    def _share_protected_paths(self) -> List[str]:
+        protected: List[str] = []
+        try:
+            protected.append(os.path.abspath(str(self.library_dir())))
+        except Exception:
+            pass
+        if self.pdf_path:
+            protected.append(os.path.abspath(self.pdf_path))
+        for extra in self._extra_page_files.values():
+            if extra:
+                protected.append(os.path.abspath(str(extra)))
+        return protected
+
+    def _share_allowed_roots(self) -> List[str]:
+        roots: List[str] = []
+        try:
+            roots.append(os.path.abspath(str(self._share_cache_dir())))
+        except Exception:
+            pass
+        try:
+            roots.append(os.path.abspath(str(Path(self.user_data_dir) / "share")))
+        except Exception:
+            pass
+        if not is_android():
+            return roots
+        try:
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            Env = autoclass("android.os.Environment")
+            app_dirs = [
+                activity.getCacheDir(),
+                activity.getFilesDir(),
+                activity.getExternalCacheDir(),
+            ]
+            for folder in app_dirs:
+                if folder is None:
+                    continue
+                base = os.path.abspath(str(folder.getAbsolutePath()))
+                roots.append(os.path.join(base, "share"))
+            for folder in (
+                activity.getExternalFilesDir(Env.DIRECTORY_DOCUMENTS),
+                activity.getExternalFilesDir(Env.DIRECTORY_DOWNLOADS),
+            ):
+                if folder is None:
+                    continue
+                roots.append(os.path.abspath(str(folder.getAbsolutePath())))
+        except Exception:
+            pass
+        return roots
+
+    def _is_owned_share_temp(self, path: str, known: Optional[Sequence[str]] = None) -> bool:
+        resolved = os.path.abspath(path)
+        if not os.path.isfile(resolved):
+            return False
+        tracked = {os.path.abspath(item) for item in (known if known is not None else self._share_files)}
+        if resolved not in tracked:
+            return False
+        for guarded in self._share_protected_paths():
+            if resolved == guarded or resolved.startswith(guarded + os.sep):
+                return False
+        for root in self._share_allowed_roots():
+            if resolved == root or resolved.startswith(root + os.sep):
+                return True
+        return False
+
+    def _schedule_share_cleanup(self, delay: float = 6.0) -> None:
+        ev = getattr(self, "_share_cleanup_ev", None)
+        if ev is not None:
+            try:
+                ev.cancel()
+            except Exception:
+                pass
+        self._share_cleanup_ev = Clock.schedule_once(lambda *_a: self._purge_share_temps(), delay)
+
+    def _purge_share_temps(self) -> None:
+        paths = list(self._share_files)
+        uris = list(self._share_uris)
+        self._share_awaiting = False
+        self._share_files = []
+        self._share_uris = []
+        for path in paths:
+            try:
+                if not self._is_owned_share_temp(path, paths):
+                    continue
+                os.remove(path)
+            except Exception:
+                pass
+        if not uris or not is_android():
+            return
+        try:
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            resolver = activity.getContentResolver()
+            for uri in uris:
+                try:
+                    if not str(uri).startswith("content:"):
+                        continue
+                    resolver.delete(uri, None, None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _android_file_uri(self, activity: Any, path: str) -> Any:
         """Unused: p4a APK has no androidx FileProvider class. Share uses MediaStore."""
@@ -5657,6 +5787,7 @@ class SamsungNotesCompanionApp(App):
                         done = ContentValues()
                         done.put(MediaColumns.IS_PENDING, Integer.valueOf(0))
                         resolver.update(uri, done, None, None)
+                    self._track_share_uri(uri)
                     return cast("android.net.Uri", uri)
                 except Exception as exc:
                     last_error = exc
@@ -5745,7 +5876,9 @@ class SamsungNotesCompanionApp(App):
                 dest = File(folder, name)
                 shutil.copy2(src, str(dest.getAbsolutePath()))
                 if dest.exists() and dest.length() > 0:
-                    return str(dest.getAbsolutePath())
+                    copied = str(dest.getAbsolutePath())
+                    self._track_share_file(copied)
+                    return copied
             except Exception as exc:
                 last_error = exc
         if last_error is not None:
@@ -5768,7 +5901,13 @@ class SamsungNotesCompanionApp(App):
                 if uri is None:
                     Clock.schedule_once(lambda *_a: app._notify("שיתוף נכשל: הסריקה לא החזירה URI"), 0)
                     return
-                Clock.schedule_once(lambda *_a, shared=uri: app._launch_share_intent(activity, [shared], title), 0)
+                Clock.schedule_once(
+                    lambda *_a, shared=uri: (
+                        app._track_share_uri(shared),
+                        app._launch_share_intent(activity, [shared], title),
+                    ),
+                    0,
+                )
 
         listener = Listener()
         self._share_scan_listener = listener
@@ -5807,7 +5946,7 @@ class SamsungNotesCompanionApp(App):
         grant = Intent.FLAG_GRANT_READ_URI_PERMISSION
         intent.addFlags(grant)
         chooser = Intent.createChooser(intent, String("Share"))
-        chooser.addFlags(grant | Intent.FLAG_ACTIVITY_NEW_TASK)
+        chooser.addFlags(grant)
         try:
             matches = activity.getPackageManager().queryIntentActivities(intent, 0)
             count = int(matches.size())
@@ -5815,10 +5954,17 @@ class SamsungNotesCompanionApp(App):
                 pkg = matches.get(index).activityInfo.packageName
                 for item in uris:
                     activity.grantUriPermission(pkg, item, grant)
+                    self._track_share_uri(item)
         except Exception:
-            pass
+            for item in uris:
+                self._track_share_uri(item)
         self._share_keep = [list(uris), intent, clip, chooser, activity]
-        activity.startActivity(chooser)
+        self._share_awaiting = True
+        try:
+            activity.startActivityForResult(chooser, SHARE_REQUEST)
+        except Exception:
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(chooser)
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -5862,8 +6008,9 @@ class SamsungNotesCompanionApp(App):
             except Exception as exc:
                 errors.append(_exception_reason(exc))
             Clock.schedule_once(
-                lambda *_a, msg=" | ".join(errors[:2]): self._notify(
-                    f"שיתוף נכשל: {msg or 'אין URI'}"
+                lambda *_a, msg=" | ".join(errors[:2]): (
+                    self._notify(f"שיתוף נכשל: {msg or 'אין URI'}"),
+                    self._purge_share_temps(),
                 ),
                 0,
             )
@@ -5999,6 +6146,10 @@ class SamsungNotesCompanionApp(App):
     def on_pause(self) -> bool:
         self._autosave_library_doc()
         return True
+
+    def on_resume(self) -> None:
+        if getattr(self, "_share_awaiting", False):
+            self._schedule_share_cleanup()
 
     def on_stop(self) -> None:
         self._autosave_library_doc()
@@ -6259,6 +6410,9 @@ class SamsungNotesCompanionApp(App):
         try:
             from jnius import autoclass
 
+            if request_code == SHARE_REQUEST:
+                self._schedule_share_cleanup()
+                return
             activity_cls = autoclass("android.app.Activity")
             if result_code != activity_cls.RESULT_OK or intent is None:
                 self._append_pdf_pending = False
