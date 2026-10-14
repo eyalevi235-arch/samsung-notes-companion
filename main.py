@@ -154,15 +154,24 @@ PASTE_HOLD_S = 1.0
 LIBRARY_ALL = "all"
 LIBRARY_UNFILED = "unfiled"
 FOLDER_PALETTE: Sequence[Tuple[str, str, Rgba]] = (
-    ("yellow", "#F2C94C", (0.95, 0.79, 0.30, 1.0)),
-    ("orange", "#F2994A", (0.95, 0.60, 0.29, 1.0)),
-    ("red", "#EB5757", (0.92, 0.34, 0.34, 1.0)),
-    ("pink", "#DD6B9D", (0.87, 0.42, 0.62, 1.0)),
-    ("purple", "#9B51E0", (0.61, 0.32, 0.88, 1.0)),
-    ("blue", "#2F80ED", (0.18, 0.50, 0.93, 1.0)),
-    ("teal", "#2DB7A3", (0.18, 0.72, 0.64, 1.0)),
-    ("green", "#27AE60", (0.15, 0.68, 0.38, 1.0)),
-    ("gray", "#9AA0A8", (0.60, 0.63, 0.66, 1.0)),
+    ("sand", "#E4D3B2", (0.89, 0.83, 0.70, 1.0)),
+    ("apricot", "#E7B48F", (0.91, 0.71, 0.56, 1.0)),
+    ("peach", "#E9A894", (0.91, 0.66, 0.58, 1.0)),
+    ("coral", "#D98B86", (0.85, 0.55, 0.53, 1.0)),
+    ("rose", "#D4A0B3", (0.83, 0.63, 0.70, 1.0)),
+    ("mauve", "#C3A3C9", (0.76, 0.64, 0.79, 1.0)),
+    ("lilac", "#B7A8D6", (0.72, 0.66, 0.84, 1.0)),
+    ("periwinkle", "#A9B4D6", (0.66, 0.71, 0.84, 1.0)),
+    ("sky", "#9BB8D0", (0.61, 0.72, 0.82, 1.0)),
+    ("powder", "#A9C5C9", (0.66, 0.77, 0.79, 1.0)),
+    ("mint", "#A8C9B8", (0.66, 0.79, 0.72, 1.0)),
+    ("sage", "#B4C4A4", (0.71, 0.77, 0.64, 1.0)),
+    ("olive", "#C2C29A", (0.76, 0.76, 0.60, 1.0)),
+    ("taupe", "#C6B8A8", (0.78, 0.72, 0.66, 1.0)),
+    ("slate", "#AEB6BF", (0.68, 0.71, 0.75, 1.0)),
+    ("fog", "#C5C8CC", (0.77, 0.78, 0.80, 1.0)),
+    ("stone", "#B7B1A8", (0.72, 0.69, 0.66, 1.0)),
+    ("denim", "#8FA4B8", (0.56, 0.64, 0.72, 1.0)),
 )
 HOVER_ACTIONS = {7, 9, 10}
 UP_ACTIONS = {1, 6}
@@ -443,20 +452,29 @@ def _short_label(text: str, limit: int = 11) -> str:
 
 
 def _folder_rgba(color: str) -> Rgba:
+    found: Optional[Rgba] = None
     for _key, hex_color, rgba in FOLDER_PALETTE:
         if color in {hex_color, _key}:
-            return rgba
-    if str(color).startswith("#") and len(color) >= 7:
+            found = rgba
+            break
+    if found is None and str(color).startswith("#") and len(color) >= 7:
         try:
-            return (
+            found = (
                 int(color[1:3], 16) / 255.0,
                 int(color[3:5], 16) / 255.0,
                 int(color[5:7], 16) / 255.0,
                 1.0,
             )
         except Exception:
-            pass
-    return FOLDER_PALETTE[-1][2]
+            found = None
+    if found is None:
+        found = FOLDER_PALETTE[-1][2]
+    return (
+        found[0] * 0.82 + 0.14,
+        found[1] * 0.82 + 0.14,
+        found[2] * 0.82 + 0.15,
+        1.0,
+    )
 
 
 def _has_hebrew(text: str) -> bool:
@@ -515,6 +533,108 @@ def set_hebrew_font(widget: Any) -> None:
         widget.font_name = "HebrewFont"
     except Exception:
         pass
+
+
+def is_light_theme() -> bool:
+    app = App.get_running_app()
+    return str(getattr(app, "ui_theme", "dark") or "dark") == "light"
+
+
+def ui_color(key: str) -> Rgba:
+    light = {
+        "bg": (0.945, 0.945, 0.955, 1.0),
+        "panel": (0.985, 0.986, 0.990, 1.0),
+        "text": (0.18, 0.19, 0.22, 1.0),
+        "muted": (0.42, 0.44, 0.48, 1.0),
+        "hair": (0.16, 0.17, 0.20, 0.14),
+        "sheet": (0.99, 0.99, 1.0, 1.0),
+        "btn": (0.93, 0.94, 0.96, 1.0),
+        "btn_hi": (0.97, 0.97, 0.99, 1.0),
+        "btn_lo": (0.86, 0.87, 0.90, 1.0),
+        "edge": (0.70, 0.72, 0.76, 1.0),
+        "danger": (0.78, 0.38, 0.38, 1.0),
+        "primary": (0.46, 0.58, 0.76, 1.0),
+    }
+    dark = {
+        "bg": (0.11, 0.12, 0.14, 1.0),
+        "panel": (0.08, 0.09, 0.10, 1.0),
+        "text": (0.96, 0.97, 0.98, 1.0),
+        "muted": (0.72, 0.74, 0.78, 1.0),
+        "hair": (1.0, 1.0, 1.0, 0.10),
+        "sheet": (0.17, 0.18, 0.21, 1.0),
+        "btn": (0.26, 0.28, 0.32, 1.0),
+        "btn_hi": (0.33, 0.35, 0.39, 1.0),
+        "btn_lo": (0.18, 0.19, 0.22, 1.0),
+        "edge": (0.46, 0.48, 0.52, 1.0),
+        "danger": (0.52, 0.24, 0.24, 1.0),
+        "primary": (0.28, 0.40, 0.58, 1.0),
+    }
+    palette = light if is_light_theme() else dark
+    return palette.get(key, palette["text"])
+
+
+class ChoiceButton(ButtonBehavior, Label):
+    """Compact rounded action button with a light depth edge."""
+
+    def __init__(
+        self,
+        caption: str,
+        on_press: Any = None,
+        danger: bool = False,
+        primary: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("markup", True)
+        kwargs.setdefault("halign", "center")
+        kwargs.setdefault("valign", "middle")
+        kwargs.setdefault("size_hint_y", None)
+        kwargs.setdefault("height", dp(40))
+        super().__init__(**kwargs)
+        self.text = mixed_markup(caption)
+        self._on_press = on_press
+        self._danger = danger
+        self._primary = primary
+        self.color = (1, 1, 1, 1)
+        with self.canvas.before:
+            self._shadow_c = Color(0, 0, 0, 0.18)
+            self._shadow = RoundedRectangle(radius=[dp(12)])
+            self._face_c = Color(0.3, 0.3, 0.3, 1)
+            self._face = RoundedRectangle(radius=[dp(12)])
+        with self.canvas.after:
+            self._edge_c = Color(1, 1, 1, 0.2)
+            self._edge = Line(width=1.15)
+        self.bind(pos=self._paint, size=self._paint)
+        self._paint()
+
+    def _paint(self, *_args: Any) -> None:
+        if self._danger:
+            face = ui_color("danger")
+        elif self._primary:
+            face = ui_color("primary")
+        else:
+            face = ui_color("btn")
+        hi = ui_color("btn_hi") if not (self._danger or self._primary) else tuple(
+            min(1.0, c + 0.08) for c in face[:3]
+        ) + (1.0,)
+        self._face_c.rgba = hi
+        self._shadow_c.rgba = ui_color("btn_lo")[:3] + (0.55,)
+        self._edge_c.rgba = ui_color("edge")
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self._shadow.pos = (x, y - dp(1.5))
+        self._shadow.size = (w, h)
+        self._face.pos = (x, y + dp(1.0))
+        self._face.size = (w, h - dp(1.5))
+        rad = dp(12)
+        self._edge.rounded_rectangle = (x + dp(0.5), y + dp(1.0), w - dp(1), h - dp(2.2), rad)
+        self.color = ui_color("text") if not (self._danger or self._primary) else (0.98, 0.98, 0.99, 1)
+        try:
+            self.text_size = (self.width, self.height)
+        except Exception:
+            pass
+
+    def on_release(self) -> None:
+        if callable(self._on_press):
+            self._on_press()
 
 
 def apply_hebrew_ui(root: Any, title: Optional[str] = None) -> None:
@@ -1059,6 +1179,29 @@ class ToolIcon(ButtonBehavior, Widget):
                 Color(*ink)
                 self._line([cx - w * 0.22, cy, cx + w * 0.22, cy], 1.7)
                 self._line([cx, cy - h * 0.22, cx, cy + h * 0.22], 1.7)
+            elif kind == "doc_add":
+                px, py = x + w * 0.12, y + h * 0.08
+                pw, ph = w * 0.58, h * 0.78
+                self._fill(ink, 0.16)
+                RoundedRectangle(pos=(px, py), size=(pw, ph), radius=[dp(3)])
+                Color(*ink)
+                Line(rounded_rectangle=(px, py, pw, ph, dp(3)), width=1.2)
+                fold = min(pw, ph) * 0.28
+                self._line([px + pw - fold, py + ph, px + pw, py + ph - fold], 1.15)
+                self._line([px + pw * 0.18, py + ph * 0.62, px + pw * 0.72, py + ph * 0.62], 1.05)
+                self._line([px + pw * 0.18, py + ph * 0.42, px + pw * 0.62, py + ph * 0.42], 1.05)
+                badge = min(w, h) * 0.20
+                bx, by = x + w * 0.80, y + h * 0.28
+                self._fill((0.12, 0.12, 0.14, 1) if self.on_dark else (0.96, 0.96, 0.97, 1), 1.0)
+                self._disk(bx, by, badge + dp(1.1))
+                Color(*ink)
+                Line(circle=(bx, by, badge), width=1.15)
+                self._line([bx - badge * 0.5, by, bx + badge * 0.5, by], 1.3)
+                self._line([bx, by - badge * 0.5, bx, by + badge * 0.5], 1.3)
+            elif kind == "theme":
+                Line(circle=(cx, cy, min(w, h) * 0.30), width=1.25)
+                self._fill(ink, 0.85)
+                Ellipse(pos=(cx - min(w, h) * 0.18, cy - min(w, h) * 0.30), size=(min(w, h) * 0.36, min(w, h) * 0.60))
             elif kind == "share":
                 r = min(w, h) * 0.11
                 nodes = (
@@ -3641,7 +3784,7 @@ class FolderTile(_HoldButton):
         name = Label(
             text=mixed_markup(_short_label(title)),
             markup=True,
-            color=(0.94, 0.95, 0.97, 1) if selected else (0.82, 0.84, 0.88, 1),
+            color=ui_color("text") if selected else ui_color("muted"),
             font_size=dp(13),
             halign="center",
             valign="top",
@@ -3672,7 +3815,7 @@ class NoteTile(_HoldButton):
         name = Label(
             text=mixed_markup(_short_label(str(doc.get("title") or "מסמך"))),
             markup=True,
-            color=(0.90, 0.91, 0.94, 1),
+            color=ui_color("text"),
             font_size=dp(13),
             halign="center",
                 valign="top",
@@ -3691,22 +3834,25 @@ class LibraryScreen(Screen):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._tree_open = False
+        self._query = ""
+        self._hair_colors: List[Any] = []
         root = BoxLayout(orientation="vertical", padding=(dp(18), dp(12), dp(18), dp(12)), spacing=0)
         with root.canvas.before:
-            Color(0.11, 0.12, 0.14, 1)
+            self._bg_c = Color(*ui_color("bg"))
             self._bg = Rectangle()
         root.bind(
             pos=lambda *_a: setattr(self._bg, "pos", root.pos),
             size=lambda *_a: setattr(self._bg, "size", root.size),
         )
+        self._root_box = root
+        dark_icons = not is_light_theme()
         self.header = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8), padding=(0, dp(4), 0, dp(10)))
-        self.header.add_widget(
-            ToolIcon("menu", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: self.toggle_tree())
-        )
+        self.menu_btn = ToolIcon("menu", on_dark=dark_icons, size=tool_icon_size(), trigger=lambda *_a: self.toggle_tree())
+        self.header.add_widget(self.menu_btn)
         self.title = Label(
             text=mixed_markup("הספרייה"),
             markup=True,
-            color=(0.96, 0.97, 0.98, 1),
+            color=ui_color("text"),
             font_size=dp(22),
             bold=True,
             halign="right",
@@ -3714,12 +3860,20 @@ class LibraryScreen(Screen):
         )
         self.header.add_widget(self.title)
         self.header.add_widget(Widget())
-        self.header.add_widget(
-            ToolIcon("folder_add", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().create_library_folder())
+        self.folder_add_btn = ToolIcon(
+            "folder_add",
+            on_dark=dark_icons,
+            size=tool_icon_size(),
+            trigger=lambda *_a: App.get_running_app().create_library_folder(),
         )
-        self.header.add_widget(
-            ToolIcon("plus", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: App.get_running_app().library_new_menu())
+        self.doc_add_btn = ToolIcon(
+            "doc_add",
+            on_dark=dark_icons,
+            size=tool_icon_size(),
+            trigger=lambda *_a: App.get_running_app().library_new_menu(),
         )
+        self.header.add_widget(self.folder_add_btn)
+        self.header.add_widget(self.doc_add_btn)
         root.add_widget(self.header)
         root.add_widget(self._hairline())
         shell = BoxLayout(orientation="horizontal", spacing=dp(10), padding=(0, dp(12), 0, 0))
@@ -3727,19 +3881,78 @@ class LibraryScreen(Screen):
             orientation="vertical",
             size_hint_x=None,
             width=0,
-            padding=(dp(8), dp(8), dp(8), dp(8)),
+            padding=(dp(10), dp(10), dp(10), dp(10)),
+            spacing=dp(8),
         )
         with self.tree_host.canvas.before:
-            Color(0.08, 0.09, 0.10, 1)
+            self._tree_bg_c = Color(*ui_color("panel"))
             self._tree_bg = Rectangle()
         self.tree_host.bind(
             pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_host.pos),
             size=lambda *_a: setattr(self._tree_bg, "size", self.tree_host.size),
         )
+        self.search_field = TextInput(
+            hint_text="חיפוש תיקיות ומסמכים",
+            multiline=False,
+            size_hint_y=None,
+            height=dp(36),
+            font_size=dp(14),
+            padding=(dp(10), dp(8)),
+            background_color=(1, 1, 1, 0.08),
+            foreground_color=ui_color("text"),
+            hint_text_color=ui_color("muted"),
+            cursor_color=ui_color("text"),
+            write_tab=False,
+        )
+        self.search_field.font_name = _input_font_name()
+        self.search_field.bind(text=self._on_search)
+        self.tree_host.add_widget(self.search_field)
+        nav_lbl = Label(
+            text=mixed_markup("ניווט"),
+            markup=True,
+            color=ui_color("muted"),
+            font_size=dp(12),
+            size_hint_y=None,
+            height=dp(18),
+            halign="right",
+        )
+        self._nav_label = nav_lbl
+        self.tree_host.add_widget(nav_lbl)
         self.tree_chart = FolderFlowChart()
         self.tree_scatter = TreeScatter(size_hint=(1, 1))
         self.tree_scatter.add_widget(self.tree_chart)
         self.tree_host.add_widget(self.tree_scatter)
+        self.tree_host.add_widget(self._hairline())
+        set_lbl = Label(
+            text=mixed_markup("הגדרות"),
+            markup=True,
+            color=ui_color("muted"),
+            font_size=dp(12),
+            size_hint_y=None,
+            height=dp(18),
+            halign="right",
+        )
+        self._set_label = set_lbl
+        self.tree_host.add_widget(set_lbl)
+        settings = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(88), spacing=dp(6))
+        theme_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        theme_row.add_widget(Widget())
+        self.theme_btn = ToolIcon(
+            "theme",
+            on_dark=dark_icons,
+            size=(dp(36), dp(34)),
+            trigger=lambda *_a: App.get_running_app().toggle_library_theme(),
+        )
+        theme_row.add_widget(self.theme_btn)
+        settings.add_widget(theme_row)
+        self.sort_btn = ChoiceButton(
+            "מיון: עדכני",
+            on_press=lambda: App.get_running_app().toggle_library_sort(),
+            height=dp(36),
+        )
+        settings.add_widget(self.sort_btn)
+        self._settings_box = settings
+        self.tree_host.add_widget(settings)
         self.tree_host.opacity = 0
         self.tree_host.disabled = True
         self.body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(14), padding=(0, dp(6), 0, dp(8)))
@@ -3752,12 +3965,15 @@ class LibraryScreen(Screen):
         self.add_widget(root)
         self._grid_cols = 0
         self.bind(size=self._on_size)
+        Clock.schedule_once(lambda _dt: self.apply_theme(), 0)
 
     def _hairline(self) -> Widget:
         line = Widget(size_hint_y=None, height=dp(1))
         with line.canvas:
-            Color(1, 1, 1, 0.10)
+            color = Color(*ui_color("hair"))
             rect = Rectangle()
+        self._hair_colors = getattr(self, "_hair_colors", [])
+        self._hair_colors.append(color)
 
         def _sync(*_a: Any) -> None:
             rect.pos = (line.x, line.y)
@@ -3765,6 +3981,32 @@ class LibraryScreen(Screen):
 
         line.bind(pos=_sync, size=_sync)
         return line
+
+    def _on_search(self, _field: Any, value: str) -> None:
+        self._query = str(value or "").strip()
+        self.refresh()
+
+    def apply_theme(self) -> None:
+        dark = not is_light_theme()
+        self._bg_c.rgba = ui_color("bg")
+        self._tree_bg_c.rgba = ui_color("panel")
+        self.title.color = ui_color("text")
+        self._nav_label.color = ui_color("muted")
+        self._set_label.color = ui_color("muted")
+        self.search_field.foreground_color = ui_color("text")
+        self.search_field.hint_text_color = ui_color("muted")
+        self.search_field.cursor_color = ui_color("text")
+        self.search_field.background_color = (1, 1, 1, 0.10) if dark else (0, 0, 0, 0.06)
+        for btn in (self.menu_btn, self.folder_add_btn, self.doc_add_btn, self.theme_btn):
+            btn.on_dark = dark
+            btn._redraw()
+        app = App.get_running_app()
+        sort_key = str(getattr(app, "doc_sort", "recent") or "recent")
+        self.sort_btn.text = mixed_markup("מיון: עדכני" if sort_key != "name" else "מיון: שם")
+        self.sort_btn._paint()
+        for color in getattr(self, "_hair_colors", []):
+            color.rgba = ui_color("hair")
+        self.refresh()
 
     def toggle_tree(self, *_args: Any) -> None:
         self._tree_open = not bool(self._tree_open)
@@ -3776,14 +4018,14 @@ class LibraryScreen(Screen):
         if not self._tree_open:
             self.tree_host.width = 0
             return
-        needed = max(dp(120), float(self.tree_chart.content_width()) + dp(24))
+        needed = max(dp(210), float(self.tree_chart.content_width()) + dp(28))
         try:
             self.tree_chart._layout_centered()
-            needed = max(needed, float(self.tree_chart.width) + dp(16))
+            needed = max(needed, float(self.tree_chart.width) + dp(20))
         except Exception:
             pass
-        cap = max(dp(120), max(1.0, float(self.width) - dp(8)))
-        self.tree_host.width = min(cap, needed)
+        cap = max(dp(210), min(float(self.width) * 0.46, max(1.0, float(self.width) - dp(8))))
+        self.tree_host.width = min(cap, max(dp(210), needed))
         self._tree_bg.pos = self.tree_host.pos
         self._tree_bg.size = self.tree_host.size
 
@@ -3808,32 +4050,42 @@ class LibraryScreen(Screen):
         self.body.clear_widgets()
         current = app._library_parent_id(selected)
         self._fill_tree(app, data, current)
+        query = str(getattr(self, "_query", "") or "").casefold()
         child_folders = app._child_folders(data, current)
         visible = app._docs_in_folder(data, current)
+        if query:
+            child_folders = [
+                item
+                for item in (data.get("folders") or [])
+                if query in str(item.get("name") or "").casefold()
+            ]
+            visible = [
+                item
+                for item in (data.get("documents") or [])
+                if query in str(item.get("title") or "").casefold()
+            ]
+            if str(getattr(app, "doc_sort", "recent") or "recent") == "name":
+                visible.sort(key=lambda item: str(item.get("title") or ""))
         if not current:
-            self.title.text = mixed_markup("הספרייה")
+            self.title.text = mixed_markup("חיפוש" if query else "הספרייה")
         else:
             folder = app._folder_by_id(data, current)
             self.title.text = mixed_markup(_short_label(str((folder or {}).get("name") or "תיקייה"), 16))
         if not child_folders and not visible:
             self.body.add_widget(self._empty_folder_actions())
             return
-        if current:
+        if current and not query:
             back_row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8), padding=(0, 0, 0, dp(4)))
-            back = Button(
-                text=mixed_markup("חזרה"),
-                markup=True,
-                size_hint=(None, 1),
-                width=dp(84),
-                background_normal="",
-                background_down="",
-                background_color=(0.20, 0.22, 0.26, 1),
-                color=(0.86, 0.88, 0.92, 1),
-            )
-            back.bind(on_release=lambda *_a: app.library_go_back())
+            back = ChoiceButton("חזרה", on_press=app.library_go_back, height=dp(34))
+            back.size_hint_x = None
+            back.width = dp(84)
             back_row.add_widget(Widget())
             back_row.add_widget(back)
             self.body.add_widget(back_row)
+        if not query:
+            self.body.add_widget(
+                Widget(size_hint_y=None, height=max(dp(18), float(self.height) * 0.30 - dp(52)))
+            )
         if child_folders:
             folder_grid = self._grid()
             for folder in child_folders:
@@ -3850,7 +4102,7 @@ class LibraryScreen(Screen):
             self.body.add_widget(self._hairline())
             self.body.add_widget(Widget(size_hint_y=None, height=dp(6)))
         if visible:
-            color = str((app._folder_by_id(data, current) or {}).get("color") or "#2F80ED")
+            color = str((app._folder_by_id(data, current) or {}).get("color") or FOLDER_PALETTE[-1][1])
             note_grid = self._grid()
             for doc in visible:
                 note_grid.add_widget(NoteTile(doc, color, checked=str(doc.get("id")) in picked))
@@ -3870,32 +4122,8 @@ class LibraryScreen(Screen):
             spacing=dp(16),
             pos_hint={"center_x": 0.5},
         )
-        folder_btn = Button(
-            text=mixed_markup("תיקייה חדשה"),
-            markup=True,
-            font_size=dp(20),
-            size_hint_y=None,
-            height=dp(72),
-            background_normal="",
-            background_down="",
-            background_color=(0.22, 0.32, 0.48, 1),
-            color=(1, 1, 1, 1),
-        )
-        doc_btn = Button(
-            text=mixed_markup("מסמך חדש"),
-            markup=True,
-            font_size=dp(20),
-            size_hint_y=None,
-            height=dp(72),
-            background_normal="",
-            background_down="",
-            background_color=(0.18, 0.42, 0.36, 1),
-            color=(1, 1, 1, 1),
-        )
-        folder_btn.bind(on_release=lambda *_a: app.create_library_folder())
-        doc_btn.bind(on_release=lambda *_a: app.library_new_menu())
-        apply_hebrew_ui(folder_btn)
-        apply_hebrew_ui(doc_btn)
+        folder_btn = ChoiceButton("תיקייה חדשה", on_press=app.create_library_folder, primary=True, height=dp(52), font_size=dp(18))
+        doc_btn = ChoiceButton("מסמך חדש", on_press=app.library_new_menu, height=dp(52), font_size=dp(18))
         actions.add_widget(folder_btn)
         actions.add_widget(doc_btn)
         row = BoxLayout(size_hint_y=None, height=block_h)
@@ -3943,6 +4171,7 @@ class RootLayout(FloatLayout):
         self.chrome.add_widget(self.restore_bar)
         self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
+        self.chrome.add_widget(self._build_slider_editor())
         self.shape_bar = self._build_shape_bar()
         self.shape_bar.height = 0
         self.shape_bar.opacity = 0
@@ -4419,12 +4648,24 @@ class RootLayout(FloatLayout):
             self._slider_glyphs[kind] = glyph
             glyphs.add_widget(glyph)
         host.add_widget(glyphs)
-        slot = BoxLayout(
+        self._toolbar_row = row
+        self._toolbar_host = host
+        return host
+
+    def _build_slider_editor(self) -> BoxLayout:
+        bar = BoxLayout(
             orientation="horizontal",
-            size_hint_x=None,
-            width=0,
-            padding=(dp(4), dp(4)),
-            spacing=dp(6),
+            size_hint_y=None,
+            height=0,
+            padding=(dp(10), dp(4)),
+            spacing=dp(8),
+        )
+        with bar.canvas.before:
+            Color(*TOOLBAR_BG)
+            self._slider_editor_bg = Rectangle()
+        bar.bind(
+            pos=lambda *_args: setattr(self._slider_editor_bg, "pos", bar.pos),
+            size=lambda *_args: setattr(self._slider_editor_bg, "size", bar.size),
         )
         self._slider_title_label = Label(
             text="",
@@ -4432,7 +4673,7 @@ class RootLayout(FloatLayout):
             color=(1, 1, 1, 1),
             font_size=dp(13) * layout_scale(),
             size_hint_x=None,
-            width=dp(52),
+            width=dp(64),
             halign="center",
             valign="middle",
         )
@@ -4443,21 +4684,17 @@ class RootLayout(FloatLayout):
             color=(1, 1, 1, 1),
             font_size=dp(13) * layout_scale(),
             size_hint_x=None,
-            width=dp(48),
+            width=dp(52),
             halign="center",
             valign="middle",
         )
-        slot.add_widget(self._slider_title_label)
-        slot.add_widget(self._slider_control)
-        slot.add_widget(self._slider_value_label)
-        slot.opacity = 0
-        slot.disabled = True
-        self._slider_slot = slot
-        self._slider_editor = slot
-        host.add_widget(slot)
-        self._toolbar_row = row
-        self._toolbar_host = host
-        return host
+        bar.add_widget(self._slider_title_label)
+        bar.add_widget(self._slider_control)
+        bar.add_widget(self._slider_value_label)
+        bar.opacity = 0
+        bar.disabled = True
+        self._slider_editor = bar
+        return bar
 
     def _build_shape_bar(self) -> BoxLayout:
         app = App.get_running_app()
@@ -4591,7 +4828,8 @@ class RootLayout(FloatLayout):
         if not getattr(self, "toolbar_visible", True):
             return dp(36) * scale
         extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
-        return (dp(44) + dp(52)) * scale + extra
+        editor = dp(44) * scale if getattr(self, "_slider_open", None) else 0.0
+        return (dp(44) + dp(52)) * scale + extra + editor
 
     def _apply_chrome_metrics(self) -> None:
         scale = layout_scale()
@@ -4603,12 +4841,11 @@ class RootLayout(FloatLayout):
         if hasattr(self, "shape_bar"):
             if self._shapes_open:
                 self.shape_bar.height = dp(SHAPE_BAR_DP) * scale
-        if hasattr(self, "_slider_slot"):
+        if hasattr(self, "_slider_editor"):
             open_slider = bool(self.toolbar_visible and getattr(self, "_slider_open", None))
-            self._slider_slot.size_hint_x = 0.46 if open_slider else None
-            self._slider_slot.width = 0 if not open_slider else 0
-            self._slider_slot.opacity = 1 if open_slider else 0
-            self._slider_slot.disabled = not open_slider
+            self._slider_editor.height = dp(44) * scale if open_slider else 0
+            self._slider_editor.opacity = 1 if open_slider else 0
+            self._slider_editor.disabled = not open_slider
         if hasattr(self, "restore_bar"):
             self.restore_bar.height = dp(36) * scale if not self.toolbar_visible else 0
             self.restore_bar.opacity = 1 if not self.toolbar_visible else 0
@@ -4617,13 +4854,13 @@ class RootLayout(FloatLayout):
             self.restore_btn.font_size = dp(12) * scale
             self.restore_btn.size = (dp(72) * scale, dp(28) * scale)
         if hasattr(self, "_slider_title_label"):
-            self._slider_title_label.font_size = dp(12) * scale
-            self._slider_title_label.width = dp(56) * scale
+            self._slider_title_label.font_size = dp(13) * scale
+            self._slider_title_label.width = dp(64) * scale
         for glyph in getattr(self, "_slider_glyphs", {}).values():
             glyph.size = (dp(30) * scale, dp(30) * scale)
         if hasattr(self, "_slider_value_label"):
-            self._slider_value_label.font_size = dp(12) * scale
-            self._slider_value_label.width = dp(48) * scale
+            self._slider_value_label.font_size = dp(13) * scale
+            self._slider_value_label.width = dp(52) * scale
         if hasattr(self, "_header_bar") and not self.toolbar_visible:
             self._header_bar.height = 0
         if hasattr(self, "_toolbar_host") and not self.toolbar_visible:
@@ -4829,6 +5066,9 @@ class SamsungNotesCompanionApp(App):
         self._library_moving = False
         self._library_move_ids: set = set()
         self._sm = ScreenManager(transition=FadeTransition(duration=0.12))
+        self.ui_theme = "dark"
+        self.doc_sort = "recent"
+        self._load_ui_prefs()
         self.library_screen = LibraryScreen(name="library")
         editor = Screen(name="editor")
         self.root_layout = RootLayout()
@@ -4899,8 +5139,45 @@ class SamsungNotesCompanionApp(App):
     def _docs_in_folder(self, data: Dict[str, Any], folder_id: str) -> List[Dict[str, Any]]:
         fid = self._library_parent_id(folder_id)
         docs = [item for item in data.get("documents") or [] if str(item.get("folder_id") or "") == fid]
-        docs.sort(key=lambda item: float(item.get("updated") or 0.0), reverse=True)
+        if str(getattr(self, "doc_sort", "recent") or "recent") == "name":
+            docs.sort(key=lambda item: str(item.get("title") or ""))
+        else:
+            docs.sort(key=lambda item: float(item.get("updated") or 0.0), reverse=True)
         return docs
+
+    def _prefs_path(self) -> Path:
+        return Path(str(self.user_data_dir)) / "prefs.json"
+
+    def _load_ui_prefs(self) -> None:
+        try:
+            payload = json.loads(self._prefs_path().read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        theme = str(payload.get("theme") or "dark")
+        self.ui_theme = "light" if theme == "light" else "dark"
+        sort_key = str(payload.get("sort") or "recent")
+        self.doc_sort = "name" if sort_key == "name" else "recent"
+
+    def _save_ui_prefs(self) -> None:
+        try:
+            path = self._prefs_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"theme": self.ui_theme, "sort": self.doc_sort}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def toggle_library_theme(self, *_args: Any) -> None:
+        self.ui_theme = "light" if self.ui_theme != "light" else "dark"
+        self._save_ui_prefs()
+        self.library_screen.apply_theme()
+
+    def toggle_library_sort(self, *_args: Any) -> None:
+        self.doc_sort = "name" if self.doc_sort != "name" else "recent"
+        self._save_ui_prefs()
+        self.library_screen.apply_theme()
 
     def _folder_descendants(self, data: Dict[str, Any], folder_id: str) -> List[str]:
         found: List[str] = []
@@ -5030,14 +5307,10 @@ class SamsungNotesCompanionApp(App):
         self.library_screen.refresh()
 
     def library_new_menu(self, *_args: Any) -> None:
-        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        popup = Popup(title="", content=body, size_hint=(0.78, 0.42))
-        blank = Button(text="מסמך חדש", size_hint_y=None, height=dp(48))
-        imported = Button(text="ייבוא PDF", size_hint_y=None, height=dp(48))
-        blank.bind(on_release=lambda *_a: (popup.dismiss(), self.new_library_document()))
-        imported.bind(on_release=lambda *_a: (popup.dismiss(), self.import_library_pdf()))
-        body.add_widget(blank)
-        body.add_widget(imported)
+        body, popup = self._card_popup(0.70, dp(188))
+        body.add_widget(Label(text=mixed_markup("מסמך חדש"), markup=True, color=ui_color("text"), size_hint_y=None, height=dp(28)))
+        body.add_widget(ChoiceButton("מסמך חדש", on_press=lambda: (popup.dismiss(), self.new_library_document()), primary=True))
+        body.add_widget(ChoiceButton("ייבוא PDF", on_press=lambda: (popup.dismiss(), self.import_library_pdf())))
         popup.open()
         apply_hebrew_ui(popup, "מסמך חדש")
 
@@ -5197,34 +5470,57 @@ class SamsungNotesCompanionApp(App):
             self._save_library_data(data)
         return data
 
+    def _card_popup(self, width_hint: float, height: float) -> Tuple[BoxLayout, Popup]:
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(14))
+        popup = Popup(
+            title="",
+            content=body,
+            size_hint=(width_hint, None),
+            height=height,
+            separator_height=0,
+            background_color=(0, 0, 0, 0),
+            auto_dismiss=True,
+        )
+        with body.canvas.before:
+            shadow = Color(*ui_color("btn_lo")[:3], 0.45)
+            shadow_r = RoundedRectangle(radius=[dp(18)])
+            face = Color(*ui_color("sheet"))
+            sheet = RoundedRectangle(radius=[dp(18)])
+        with body.canvas.after:
+            Color(*ui_color("edge"))
+            border = Line(width=1.1)
+
+        def _sync(*_a: Any) -> None:
+            x, y, w, h = body.x, body.y, body.width, body.height
+            shadow_r.pos = (x, y - dp(2))
+            shadow_r.size = (w, h)
+            sheet.pos = (x, y)
+            sheet.size = (w, h)
+            border.rounded_rectangle = (x + dp(0.6), y + dp(0.6), w - dp(1.2), h - dp(1.2), dp(18))
+
+        body.bind(pos=_sync, size=_sync)
+        return body, popup
+
     def _pick_library_destination(self, heading: str, on_pick: Any, exclude: Optional[set] = None) -> None:
         blocked = {str(item) for item in (exclude or set())}
         data = self.library_data()
-        body = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
-        popup = Popup(title="", content=body, size_hint=(0.9, 0.82), separator_height=0, background_color=(0, 0, 0, 0))
-        with body.canvas.before:
-            Color(0.14, 0.15, 0.18, 1)
-            sheet = RoundedRectangle(radius=[dp(22)])
-        body.bind(
-            pos=lambda *_a: setattr(sheet, "pos", body.pos),
-            size=lambda *_a: setattr(sheet, "size", body.size),
-        )
+        body, popup = self._card_popup(0.78, dp(420))
         title = Label(
             text=mixed_markup(heading),
             markup=True,
-            color=(0.94, 0.95, 0.97, 1),
-            font_size=dp(18),
+            color=ui_color("text"),
+            font_size=dp(16),
             bold=True,
             size_hint_y=None,
-            height=dp(32),
+            height=dp(28),
         )
         hint = Label(
             text=mixed_markup("בחרי תיקייה בעץ"),
             markup=True,
-            color=(0.72, 0.74, 0.78, 1),
-            font_size=dp(13),
+            color=ui_color("muted"),
+            font_size=dp(12),
             size_hint_y=None,
-            height=dp(22),
+            height=dp(20),
         )
         chart = FolderFlowChart()
         scatter = TreeScatter(size_hint=(1, 1))
@@ -5235,17 +5531,7 @@ class SamsungNotesCompanionApp(App):
             on_pick(folder_id)
 
         chart.set_tree(self._folder_tree_nodes(data), "", on_pick=_choose, blocked=blocked)
-        cancel = Button(
-            text=mixed_markup("ביטול"),
-            markup=True,
-            size_hint_y=None,
-            height=dp(42),
-            background_normal="",
-            background_down="",
-            background_color=(0.28, 0.30, 0.34, 1),
-            color=(0.90, 0.91, 0.94, 1),
-        )
-        cancel.bind(on_release=lambda *_a: popup.dismiss())
+        cancel = ChoiceButton("ביטול", on_press=popup.dismiss)
         body.add_widget(title)
         body.add_widget(hint)
         body.add_widget(scatter)
@@ -5263,39 +5549,19 @@ class SamsungNotesCompanionApp(App):
         self._save_library_data(data)
         self.library_screen.refresh()
 
-    def _sheet_button(self, caption: str, on_press: Any, danger: bool = False) -> Button:
-        button = Button(
-            text=mixed_markup(caption),
-            markup=True,
-            size_hint_y=None,
-            height=dp(46),
-            background_normal="",
-            background_down="",
-            background_color=(0.42, 0.22, 0.22, 1) if danger else (0.28, 0.30, 0.34, 1),
-            color=(0.98, 0.86, 0.86, 1) if danger else (0.94, 0.95, 0.97, 1),
-        )
-        button.bind(on_release=lambda *_a: on_press())
-        return button
+    def _sheet_button(self, caption: str, on_press: Any, danger: bool = False) -> ChoiceButton:
+        return ChoiceButton(caption, on_press=on_press, danger=danger, height=dp(40))
 
     def _action_sheet(self, heading: str, actions: Sequence[Tuple[str, Any, bool]]) -> None:
-        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(16))
-        popup = Popup(title="", content=body, size_hint=(0.82, None), separator_height=0, background_color=(0, 0, 0, 0))
-        popup.height = dp(86 + 54 * (len(actions) + 1))
-        with body.canvas.before:
-            Color(0.20, 0.21, 0.24, 1)
-            sheet = RoundedRectangle(radius=[dp(22)])
-        body.bind(
-            pos=lambda *_a: setattr(sheet, "pos", body.pos),
-            size=lambda *_a: setattr(sheet, "size", body.size),
-        )
+        body, popup = self._card_popup(0.68, dp(72 + 46 * (len(actions) + 1)))
         title = Label(
             text=mixed_markup(_short_label(heading, 22)),
             markup=True,
-            color=(0.94, 0.95, 0.97, 1),
-            font_size=dp(18),
+            color=ui_color("text"),
+            font_size=dp(16),
             bold=True,
             size_hint_y=None,
-            height=dp(32),
+            height=dp(28),
         )
         body.add_widget(title)
 
@@ -6215,27 +6481,23 @@ class SamsungNotesCompanionApp(App):
         field = TextInput(
             text=str(initial or ""),
             multiline=False,
-            font_size=dp(18),
+            font_size=dp(16),
             size_hint_y=None,
-            height=dp(46),
+            height=dp(40),
         )
         field.font_name = _input_font_name()
-        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="", content=body, size_hint=(0.86, 0.38), auto_dismiss=False)
+        body, popup = self._card_popup(0.72, dp(188))
+        popup.auto_dismiss = False
 
-        def _save(_btn: Button) -> None:
+        def _save() -> None:
             popup.dismiss()
             if callable(on_done):
                 on_done(field.text)
 
-        save_btn = Button(text="שמירה")
-        cancel_btn = Button(text="ביטול")
-        save_btn.bind(on_release=_save)
-        cancel_btn.bind(on_release=lambda *_a: popup.dismiss())
-        buttons.add_widget(save_btn)
-        buttons.add_widget(cancel_btn)
-        body.add_widget(Label(text=mixed_markup(title), markup=True, size_hint_y=None, height=dp(28)))
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        buttons.add_widget(ChoiceButton("שמירה", on_press=_save, primary=True))
+        buttons.add_widget(ChoiceButton("ביטול", on_press=popup.dismiss))
+        body.add_widget(Label(text=mixed_markup(title), markup=True, color=ui_color("text"), size_hint_y=None, height=dp(26)))
         body.add_widget(field)
         body.add_widget(buttons)
         popup.open()
@@ -6243,30 +6505,18 @@ class SamsungNotesCompanionApp(App):
         focus_system_keyboard(field)
 
     def _folder_editor(self, folder: Optional[Dict[str, Any]], parent_id: Optional[str] = None) -> None:
-        chosen = {"color": str((folder or {}).get("color") or FOLDER_PALETTE[5][1])}
-        name_state = {"text": str((folder or {}).get("name") or "")}
-        name_btn = Button(
-            text=mixed_markup(name_state["text"] or "שם התיקייה"),
-            markup=True,
+        chosen = {"color": str((folder or {}).get("color") or FOLDER_PALETTE[8][1])}
+        field = TextInput(
+            text=str((folder or {}).get("name") or ""),
+            hint_text="שם התיקייה",
+            multiline=False,
+            font_size=dp(16),
             size_hint_y=None,
-            height=dp(46),
-            background_normal="",
-            background_down="",
-            background_color=(0.93, 0.94, 0.96, 1),
-            color=(0.12, 0.13, 0.16, 1),
-            font_size=dp(18),
-            halign="right",
+            height=dp(40),
+            padding=(dp(10), dp(8)),
         )
-
-        def _show_name(value: str) -> None:
-            name_state["text"] = value.strip()
-            name_btn.text = mixed_markup(name_state["text"] or "שם התיקייה")
-
-        def _edit_name(*_args: Any) -> None:
-            self._prompt_line("שם התיקייה", name_state["text"], _show_name)
-
-        name_btn.bind(on_release=_edit_name)
-        swatches = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        field.font_name = _input_font_name()
+        swatches = GridLayout(cols=6, spacing=dp(6), size_hint_y=None, height=dp(112))
         dots: List[ColorDot] = []
 
         def _pick(dot: ColorDot, hex_color: str) -> None:
@@ -6276,17 +6526,16 @@ class SamsungNotesCompanionApp(App):
 
         for _key, hex_color, rgba in FOLDER_PALETTE:
             dot = ColorDot(rgba, trigger=lambda d, value=hex_color: _pick(d, value))
-            dot.size = (dp(32), dp(32))
-            if hex_color == chosen["color"]:
+            dot.size = (dp(28), dp(28))
+            if hex_color == chosen["color"] or _key == chosen["color"]:
                 dot.selected = True
             dots.append(dot)
             swatches.add_widget(dot)
-        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
-        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="", content=body, size_hint=(0.86, 0.52), auto_dismiss=False)
+        body, popup = self._card_popup(0.78, dp(292))
+        popup.auto_dismiss = False
 
-        def _save(_btn: Button) -> None:
-            name = name_state["text"].strip() or "תיקייה"
+        def _save() -> None:
+            name = field.text.strip() or "תיקייה"
             data = self.library_data()
             folders = data.setdefault("folders", [])
             if folder is None:
@@ -6307,19 +6556,16 @@ class SamsungNotesCompanionApp(App):
             popup.dismiss()
             self.library_screen.refresh()
 
-        save_btn = Button(text="שמירה")
-        cancel_btn = Button(text="ביטול")
-        save_btn.bind(on_release=_save)
-        cancel_btn.bind(on_release=lambda *_a: popup.dismiss())
-        buttons.add_widget(save_btn)
-        buttons.add_widget(cancel_btn)
-        body.add_widget(Label(text=mixed_markup("שם וצבע לתיקייה"), markup=True, size_hint_y=None, height=dp(28)))
-        body.add_widget(name_btn)
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        buttons.add_widget(ChoiceButton("שמירה", on_press=_save, primary=True))
+        buttons.add_widget(ChoiceButton("ביטול", on_press=popup.dismiss))
+        body.add_widget(Label(text=mixed_markup("תיקייה חדשה" if folder is None else "עריכת תיקייה"), markup=True, color=ui_color("text"), size_hint_y=None, height=dp(26)))
+        body.add_widget(field)
         body.add_widget(swatches)
         body.add_widget(buttons)
         popup.open()
         apply_hebrew_ui(popup, "תיקייה")
-        Clock.schedule_once(lambda _dt: _edit_name(), 0.15)
+        focus_system_keyboard(field)
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
