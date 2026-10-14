@@ -5571,32 +5571,8 @@ class SamsungNotesCompanionApp(App):
         raise RuntimeError("cannot copy share file")
 
     def _android_file_uri(self, activity: Any, path: str) -> Any:
-        from jnius import autoclass, cast
-
-        File = autoclass("java.io.File")
-        java_file = File(str(path))
-        if not java_file.exists():
-            raise RuntimeError("share file missing")
-        package = str(activity.getPackageName())
-        authorities = (
-            package + ".fileprovider",
-            "org.kivy.android.fileprovider",
-        )
-        last_error: Optional[Exception] = None
-        try:
-            provider = autoclass("org.kivy.android.GenericFileProvider")
-        except Exception as exc:
-            raise RuntimeError(f"GenericFileProvider missing: {_exception_reason(exc)}") from exc
-        for context in (activity, activity.getApplicationContext()):
-            for authority in authorities:
-                try:
-                    uri = provider.getUriForFile(context, authority, java_file)
-                    return cast("android.net.Uri", uri)
-                except Exception as exc:
-                    last_error = exc
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("FileProvider unavailable")
+        """Unused: p4a APK has no androidx FileProvider class. Share uses MediaStore."""
+        raise RuntimeError("FileProvider is not packaged in this APK")
 
     def _pipe_file_to_stream(self, src: str, stream: Any) -> None:
         from jnius import autoclass
@@ -5632,57 +5608,58 @@ class SamsungNotesCompanionApp(App):
 
         ContentValues = autoclass("android.content.ContentValues")
         Integer = autoclass("java.lang.Integer")
-        String = autoclass("java.lang.String")
+        MediaColumns = autoclass("android.provider.MediaStore$MediaColumns")
         resolver = activity.getContentResolver()
-        display = f"note-{uuid.uuid4().hex[:8]}.pdf"
+        display = f"{self._file_stem()}-{uuid.uuid4().hex[:6]}.pdf"
         sdk = _android_sdk_int()
-        collections: List[Tuple[Any, Optional[str]]] = []
+        collections: List[Any] = []
         if sdk >= 29:
             try:
                 Downloads = autoclass("android.provider.MediaStore$Downloads")
-                collections.append((Downloads.EXTERNAL_CONTENT_URI, "Download/"))
+                MediaStore = autoclass("android.provider.MediaStore")
+                try:
+                    collections.append(Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY))
+                except Exception:
+                    pass
+                collections.append(Downloads.EXTERNAL_CONTENT_URI)
             except Exception:
                 pass
-            try:
-                FilesTable = autoclass("android.provider.MediaStore$Files")
-                collections.append((FilesTable.getContentUri("external_primary"), "Download/"))
-                collections.append((FilesTable.getContentUri("external_primary"), "Documents/"))
-            except Exception:
-                pass
-        FilesTable = autoclass("android.provider.MediaStore$Files")
-        collections.append((FilesTable.getContentUri("external"), "Download/"))
+        try:
+            FilesTable = autoclass("android.provider.MediaStore$Files")
+            collections.append(FilesTable.getContentUri("external"))
+        except Exception:
+            pass
         last_error: Optional[Exception] = None
-
-        def _put(values: Any, key: str, value: Any) -> None:
-            jkey = String(str(key))
-            if isinstance(value, int):
-                values.put(jkey, Integer.valueOf(int(value)))
-            else:
-                values.put(jkey, String(str(value)))
-
-        for collection, rel in collections:
-            try:
-                values = ContentValues()
-                _put(values, "_display_name", display)
-                _put(values, "mime_type", "application/pdf")
-                if rel:
-                    _put(values, "relative_path", rel)
-                if sdk >= 29:
-                    _put(values, "is_pending", 1)
-                uri = resolver.insert(collection, values)
-                if uri is None:
-                    continue
-                dest = resolver.openOutputStream(uri)
-                if dest is None:
-                    continue
-                self._copy_file_to_stream(path, dest)
-                if sdk >= 29:
-                    done = ContentValues()
-                    _put(done, "is_pending", 0)
-                    resolver.update(uri, done, None, None)
-                return cast("android.net.Uri", uri)
-            except Exception as exc:
-                last_error = exc
+        for collection in collections:
+            if collection is None:
+                continue
+            for pending in ((sdk >= 29), False):
+                try:
+                    values = ContentValues()
+                    values.put(MediaColumns.DISPLAY_NAME, display)
+                    values.put(MediaColumns.MIME_TYPE, "application/pdf")
+                    if sdk >= 29:
+                        try:
+                            Env = autoclass("android.os.Environment")
+                            values.put(MediaColumns.RELATIVE_PATH, Env.DIRECTORY_DOWNLOADS)
+                        except Exception:
+                            pass
+                    if pending:
+                        values.put(MediaColumns.IS_PENDING, Integer.valueOf(1))
+                    uri = resolver.insert(collection, values)
+                    if uri is None:
+                        continue
+                    dest = resolver.openOutputStream(uri)
+                    if dest is None:
+                        continue
+                    self._copy_file_to_stream(path, dest)
+                    if pending:
+                        done = ContentValues()
+                        done.put(MediaColumns.IS_PENDING, Integer.valueOf(0))
+                        resolver.update(uri, done, None, None)
+                    return cast("android.net.Uri", uri)
+                except Exception as exc:
+                    last_error = exc
         if last_error is not None:
             raise last_error
         raise RuntimeError("MediaStore insert failed")
@@ -5739,18 +5716,68 @@ class SamsungNotesCompanionApp(App):
             intent.putExtra("android.intent.extra.STREAM", uri)
 
     def _share_content_uri(self, activity: Any, path: str, title: str) -> Any:
+        return self._android_mediastore_pdf_uri(activity, path, title)
+
+    def _public_share_copy(self, activity: Any, src: str) -> str:
+        from jnius import autoclass
+
+        Env = autoclass("android.os.Environment")
+        File = autoclass("java.io.File")
+        name = Path(src).name or f"note-{uuid.uuid4().hex[:8]}.pdf"
+        folders: List[Any] = []
+        try:
+            folders.append(activity.getExternalFilesDir(Env.DIRECTORY_DOCUMENTS))
+        except Exception:
+            pass
+        try:
+            folders.append(activity.getExternalFilesDir(Env.DIRECTORY_DOWNLOADS))
+        except Exception:
+            pass
+        try:
+            folders.append(activity.getExternalCacheDir())
+        except Exception:
+            pass
         last_error: Optional[Exception] = None
-        try:
-            return self._android_file_uri(activity, path)
-        except Exception as exc:
-            last_error = exc
-        try:
-            return self._android_mediastore_pdf_uri(activity, path, title)
-        except Exception as exc:
-            last_error = exc
+        for folder in folders:
+            if folder is None:
+                continue
+            try:
+                dest = File(folder, name)
+                shutil.copy2(src, str(dest.getAbsolutePath()))
+                if dest.exists() and dest.length() > 0:
+                    return str(dest.getAbsolutePath())
+            except Exception as exc:
+                last_error = exc
         if last_error is not None:
             raise last_error
-        raise RuntimeError("share uri failed")
+        raise RuntimeError("cannot copy share file to public app storage")
+
+    def _share_via_media_scanner(self, activity: Any, path: str, title: str) -> None:
+        from jnius import PythonJavaClass, autoclass, java_method
+
+        app = self
+
+        class Listener(PythonJavaClass):
+            __javainterfaces__ = ["android/media/MediaScannerConnection$OnScanCompletedListener"]
+
+            def __init__(self) -> None:
+                super().__init__()
+
+            @java_method("(Ljava/lang/String;Landroid/net/Uri;)V")
+            def onScanCompleted(self, _scanned: str, uri: Any) -> None:
+                if uri is None:
+                    Clock.schedule_once(lambda *_a: app._notify("שיתוף נכשל: הסריקה לא החזירה URI"), 0)
+                    return
+                Clock.schedule_once(lambda *_a, shared=uri: app._launch_share_intent(activity, [shared], title), 0)
+
+        listener = Listener()
+        self._share_scan_listener = listener
+        autoclass("android.media.MediaScannerConnection").scanFile(
+            activity.getApplicationContext(),
+            [path],
+            ["application/pdf"],
+            listener,
+        )
 
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from jnius import autoclass, cast
@@ -5777,15 +5804,21 @@ class SamsungNotesCompanionApp(App):
             intent.setClipData(clip)
         except Exception:
             clip = None
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        grant = Intent.FLAG_GRANT_READ_URI_PERMISSION
+        intent.addFlags(grant)
         chooser = Intent.createChooser(intent, String("Share"))
-        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        self._share_keep = [list(uris), intent, clip, chooser, activity]
+        chooser.addFlags(grant | Intent.FLAG_ACTIVITY_NEW_TASK)
         try:
-            activity.startActivity(chooser)
+            matches = activity.getPackageManager().queryIntentActivities(intent, 0)
+            count = int(matches.size())
+            for index in range(count):
+                pkg = matches.get(index).activityInfo.packageName
+                for item in uris:
+                    activity.grantUriPermission(pkg, item, grant)
         except Exception:
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            activity.startActivity(chooser)
+            pass
+        self._share_keep = [list(uris), intent, clip, chooser, activity]
+        activity.startActivity(chooser)
 
     def _android_share_pdfs(self, paths: Sequence[str], title: str) -> None:
         files = [item for item in paths if item and os.path.isfile(item)]
@@ -5809,33 +5842,31 @@ class SamsungNotesCompanionApp(App):
 
         @run_on_ui_thread
         def _share() -> None:
+            errors: List[str] = []
+            uris: List[Any] = []
+            for path in cached_files:
+                try:
+                    uris.append(self._android_mediastore_pdf_uri(activity, path, title))
+                except Exception as exc:
+                    errors.append(_exception_reason(exc))
+            if uris:
+                try:
+                    self._launch_share_intent(activity, uris, title)
+                    return
+                except Exception as exc:
+                    errors.append(_exception_reason(exc))
             try:
-                uris = []
-                for path in cached_files:
-                    store_exc: Optional[Exception] = None
-                    file_exc: Optional[Exception] = None
-                    try:
-                        uris.append(self._android_file_uri(activity, path))
-                        continue
-                    except Exception as exc:
-                        file_exc = exc
-                    try:
-                        uris.append(self._android_mediastore_pdf_uri(activity, path, title))
-                    except Exception as exc:
-                        store_exc = exc
-                        raise RuntimeError(
-                            f"שיתוף: {_exception_reason(file_exc)} | {_exception_reason(store_exc)}"
-                        ) from exc
-                if not uris:
-                    raise RuntimeError("לא נוצר קישור לקובץ")
-                self._launch_share_intent(activity, uris, title)
+                public = self._public_share_copy(activity, cached_files[0])
+                self._share_via_media_scanner(activity, public, title)
+                return
             except Exception as exc:
-                Clock.schedule_once(
-                    lambda *_a, err=exc: self._notify(
-                        f"שיתוף נכשל: {_exception_reason(err)}"
-                    ),
-                    0,
-                )
+                errors.append(_exception_reason(exc))
+            Clock.schedule_once(
+                lambda *_a, msg=" | ".join(errors[:2]): self._notify(
+                    f"שיתוף נכשל: {msg or 'אין URI'}"
+                ),
+                0,
+            )
 
         _share()
 
