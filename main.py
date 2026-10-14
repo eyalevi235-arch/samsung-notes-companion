@@ -88,6 +88,7 @@ PDF_PREVIEW_SCALE = 1.0
 PDF_PREVIEW_MAX_SIDE = 900.0
 MAX_GPU_PAGES = 5
 PAGE_GAP = 28.0
+APPEND_REQUEST = 4104
 DASH_LENGTH = 18.0
 GAP_LENGTH = 12.0
 UNDO_LIMIT = 40
@@ -1570,6 +1571,20 @@ class InkColorPicker(BoxLayout):
         return False
 
 
+def _slider_to_t(value: float, lo: float, hi: float, log_scale: bool) -> float:
+    value = max(lo, min(hi, float(value)))
+    if log_scale and lo > 0.0 and hi > lo:
+        return math.log(value / lo) / math.log(hi / lo)
+    return 0.0 if hi <= lo else (value - lo) / (hi - lo)
+
+
+def _slider_from_t(t: float, lo: float, hi: float, log_scale: bool) -> float:
+    t = max(0.0, min(1.0, float(t)))
+    if log_scale and lo > 0.0 and hi > lo:
+        return lo * ((hi / lo) ** t)
+    return lo + t * (hi - lo)
+
+
 class SliderGlyph(Widget):
     """Tiny legend next to a slider: width, opacity, or dash gap."""
 
@@ -1577,12 +1592,30 @@ class SliderGlyph(Widget):
     amount = NumericProperty(1.0)
 
     def __init__(self, kind: str, **kwargs: Any) -> None:
+        self.trigger = kwargs.pop("trigger", None)
         kwargs.setdefault("size_hint", (None, None))
-        kwargs.setdefault("size", (dp(28), dp(28)))
+        kwargs.setdefault("size", (dp(36), dp(36)))
         super().__init__(**kwargs)
         self.kind = kind
         self.bind(pos=self._redraw, size=self._redraw, amount=self._redraw, kind=self._redraw)
         Clock.schedule_once(lambda _dt: self._redraw(), 0)
+
+    def collide_point(self, x: float, y: float) -> bool:
+        pad = dp(8)
+        return self.x - pad <= x <= self.right + pad and self.y - pad <= y <= self.top + pad
+
+    def on_touch_down(self, touch: MotionEvent) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
+        if _is_hover_touch(touch):
+            return False
+        if not self.collide_point(*touch.pos):
+            return False
+        trigger = getattr(self, "trigger", None)
+        if callable(trigger):
+            trigger(self)
+            return True
+        return super().on_touch_down(touch)
 
     def _redraw(self, *_args: Any) -> None:
         self.canvas.clear()
@@ -1642,6 +1675,7 @@ class SPenAnnotationCanvas(Widget):
         self._text_texture_keepers: Dict[Tuple[Any, ...], Any] = {}
         self._text_layouts: Dict[Tuple[Any, ...], List[Tuple[Any, Any, float, float]]] = {}
         self.selected_ids: List[int] = []
+        self._locked_pages: set = set()
         self._undo_stack: List[List[StrokeRecord]] = []
         self._redo_stack: List[List[StrokeRecord]] = []
         self._paste_clock: Any = None
@@ -1922,7 +1956,7 @@ class SPenAnnotationCanvas(Widget):
         if len(loaded) <= MAX_GPU_PAGES:
             return
         for index in loaded:
-            if index in keep_set:
+            if index in keep_set or index in self._locked_pages:
                 continue
             self._page_textures[index] = None
 
@@ -3254,10 +3288,29 @@ class TreeScatter(Scatter):
             chart.select_at(lx, ly)
         return handled
 
+    def collide_point(self, x: float, y: float) -> bool:
+        if super().collide_point(x, y):
+            return True
+        if not self.children:
+            return False
+        lx, ly = self.to_local(x, y)
+        return bool(self.children[0].collide_point(lx, ly))
+
     def on_touch_down(self, touch: MotionEvent) -> bool:
         touch.ud["_tree_xy"] = (touch.x, touch.y)
         touch.ud["_tree_scale"] = self.scale
         return super().on_touch_down(touch)
+
+
+class TreeHost(BoxLayout):
+    """Folder tree pane; hit-tests overflow drawn by pinch-zoom."""
+
+    def collide_point(self, x: float, y: float) -> bool:
+        if self.disabled or self.opacity <= 0:
+            return False
+        if super().collide_point(x, y):
+            return True
+        return any(child.collide_point(x, y) for child in self.children)
 
 
 class FolderFlowChart(Widget):
@@ -3272,9 +3325,15 @@ class FolderFlowChart(Widget):
         self._drawing = False
         self._picker: Optional[Any] = None
         self._blocked: set = set()
+        with self.canvas.before:
+            Color(0.12, 0.13, 0.15, 1)
+            self._pane_bg = Rectangle()
         self.bind(pos=self._on_geom, size=self._on_geom)
 
     def _on_geom(self, *_args: Any) -> None:
+        if getattr(self, "_pane_bg", None) is not None:
+            self._pane_bg.pos = self.pos
+            self._pane_bg.size = self.size
         Clock.unschedule(self._redraw)
         Clock.schedule_once(self._redraw, 0)
 
@@ -3529,7 +3588,7 @@ class LibraryScreen(Screen):
         )
         root.add_widget(self.header)
         shell = BoxLayout(orientation="horizontal", spacing=dp(8))
-        self.tree_host = BoxLayout(
+        self.tree_host = TreeHost(
             orientation="vertical",
             size_hint_x=None,
             width=0,
@@ -3569,9 +3628,16 @@ class LibraryScreen(Screen):
         if not self._tree_open:
             self.tree_host.width = 0
             return
-        needed = max(dp(96), float(self.tree_chart.content_width()) + dp(16))
-        cap = max(dp(96), min(self.width * 0.9, self.width - dp(48)))
+        needed = max(dp(120), float(self.tree_chart.content_width()) + dp(24))
+        try:
+            self.tree_chart._layout_centered()
+            needed = max(needed, float(self.tree_chart.width) + dp(16))
+        except Exception:
+            pass
+        cap = max(dp(120), max(1.0, float(self.width) - dp(8)))
         self.tree_host.width = min(cap, needed)
+        self._tree_bg.pos = self.tree_host.pos
+        self._tree_bg.size = self.tree_host.size
 
     def _on_size(self, *_args: Any) -> None:
         cols = 4 if self.width >= dp(900) else (2 if self.width < dp(520) else 3)
@@ -3671,6 +3737,8 @@ class RootLayout(FloatLayout):
             spacing=0,
         )
         self._shapes_open = False
+        self.restore_bar = self._build_restore_bar()
+        self.chrome.add_widget(self.restore_bar)
         self.chrome.add_widget(self._build_header())
         self.chrome.add_widget(self._build_toolbar())
         self.shape_bar = self._build_shape_bar()
@@ -3679,15 +3747,7 @@ class RootLayout(FloatLayout):
         self.shape_bar.disabled = True
         self.chrome.add_widget(self.shape_bar)
         self.chrome.add_widget(self._build_slider_bar())
-        self.restore_btn = ToolIcon(
-            "restore",
-            on_dark=True,
-            size_hint=(None, None),
-            size=(dp(88), dp(44)),
-            trigger=self.show_toolbar,
-        )
-        self.restore_btn.opacity = 0
-        self.restore_btn.disabled = True
+        self.chrome.add_widget(self._build_slider_editor())
         self.copy_chip = SelectionBar()
         self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
         self._paste_target: Optional[Tuple[Any, float, float]] = None
@@ -3697,7 +3757,6 @@ class RootLayout(FloatLayout):
         self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
-        self.add_widget(self.restore_btn)
         self.hide_copy_chip()
         self.hide_paste_chip()
         self.hide_text_overlay()
@@ -3715,13 +3774,10 @@ class RootLayout(FloatLayout):
         Clock.schedule_once(lambda _dt: self.apply_orientation(), 0)
 
     def _fit_workspace(self, *_args: Any) -> None:
-        chrome_h = float(self.chrome.height) if self.toolbar_visible else 0.0
+        chrome_h = float(self.chrome.height)
         work_h = max(1.0, float(self.height) - chrome_h)
         self.workspace.size = (float(self.width), work_h)
         self.workspace.pos = (float(self.x), float(self.y))
-        self.restore_btn.size = (dp(96) * layout_scale(), dp(44) * layout_scale())
-        self.restore_btn.center_x = self.center_x
-        self.restore_btn.top = self.top - dp(10)
         self.dock_notes()
         self.sync_floating_tools()
 
@@ -3985,7 +4041,7 @@ class RootLayout(FloatLayout):
         tools.bind(minimum_width=tools.setter("width"))
         for key, kind, handler in (
             ("home", "home", app.show_library),
-            ("open", "plus", app.open_pdf),
+            ("open", "plus", app.add_pages_menu),
             ("image", "image", app.import_image),
             ("save_as", "save", app.save_document_as),
             ("share", "share", app.share_current_document),
@@ -4108,27 +4164,79 @@ class RootLayout(FloatLayout):
         self._shape_row = row
         return bar
 
-    def _make_slider(
-        self, kind: str, minimum: float, maximum: float, value: float, on_change: Any
-    ) -> BoxLayout:
-        cluster = BoxLayout(orientation="horizontal", size_hint_x=1, spacing=dp(2))
-        glyph = SliderGlyph(kind, amount=value)
-        slider = Slider(min=minimum, max=maximum, value=value, size_hint_x=1)
-        slider.bind(value=lambda _slider, amount, g=glyph, cb=on_change: (setattr(g, "amount", amount), cb(amount)))
-        cluster.add_widget(glyph)
-        cluster.add_widget(slider)
-        return cluster
+    def _slider_specs(self) -> Dict[str, Dict[str, Any]]:
+        app = App.get_running_app()
+        return {
+            "width": {
+                "lo": 1.0,
+                "hi": 16.0,
+                "log": True,
+                "get": lambda: float(app.ink_width),
+                "set": app.set_ink_width,
+                "fmt": lambda value: f"{value:.1f}",
+            },
+            "opacity": {
+                "lo": 0.15,
+                "hi": 1.0,
+                "log": False,
+                "get": lambda: float(app.ink_opacity),
+                "set": app.set_ink_opacity,
+                "fmt": lambda value: f"{int(round(value * 100))}%",
+            },
+            "dash": {
+                "lo": 4.0,
+                "hi": 40.0,
+                "log": True,
+                "get": lambda: float(app.dash_gap),
+                "set": app.set_dash_gap,
+                "fmt": lambda value: f"{value:.0f}",
+            },
+        }
+
+    def _build_restore_bar(self) -> BoxLayout:
+        bar = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=0,
+            padding=(dp(8), dp(4)),
+            spacing=dp(8),
+        )
+        with bar.canvas.before:
+            Color(0.12, 0.12, 0.14, 0.97)
+            self._restore_bg = Rectangle()
+        bar.bind(
+            pos=lambda *_args: setattr(self._restore_bg, "pos", bar.pos),
+            size=lambda *_args: setattr(self._restore_bg, "size", bar.size),
+        )
+        button = Button(
+            text=mixed_markup("כלים"),
+            markup=True,
+            font_size=dp(16) * layout_scale(),
+            background_normal="",
+            background_down="",
+            background_color=(0.22, 0.24, 0.28, 1),
+            color=(1, 1, 1, 1),
+        )
+        button.bind(on_release=self.show_toolbar)
+        apply_hebrew_ui(button)
+        bar.add_widget(button)
+        bar.opacity = 0
+        bar.disabled = True
+        self.restore_btn = button
+        return bar
 
     def _build_slider_bar(self) -> BoxLayout:
         app = App.get_running_app()
         bar = BoxLayout(
             orientation="horizontal",
             size_hint_y=None,
-            height=dp(40) * layout_scale(),
-            padding=(dp(8), dp(4)),
-            spacing=dp(8),
+            height=dp(36) * layout_scale(),
+            padding=(dp(10), dp(4)),
+            spacing=dp(12),
         )
         self._slider_bar = bar
+        self._slider_open: Optional[str] = None
+        self._slider_glyphs: Dict[str, SliderGlyph] = {}
         with bar.canvas.before:
             Color(*TOOLBAR_BG)
             self._slider_bg = Rectangle()
@@ -4136,16 +4244,86 @@ class RootLayout(FloatLayout):
             pos=lambda *_args: setattr(self._slider_bg, "pos", bar.pos),
             size=lambda *_args: setattr(self._slider_bg, "size", bar.size),
         )
-        bar.add_widget(self._make_slider("width", 1.0, 16.0, float(app.ink_width), app.set_ink_width))
-        bar.add_widget(self._make_slider("opacity", 0.15, 1.0, float(app.ink_opacity), app.set_ink_opacity))
-        bar.add_widget(self._make_slider("dash", 4.0, 40.0, float(app.dash_gap), app.set_dash_gap))
+        for kind, amount in (
+            ("width", float(app.ink_width)),
+            ("opacity", float(app.ink_opacity)),
+            ("dash", float(app.dash_gap)),
+        ):
+            glyph = SliderGlyph(
+                kind,
+                amount=amount,
+                trigger=lambda _g, name=kind: self.toggle_slider_editor(name),
+            )
+            self._slider_glyphs[kind] = glyph
+            bar.add_widget(glyph)
         bar.add_widget(Widget())
         return bar
 
+    def _build_slider_editor(self) -> BoxLayout:
+        bar = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=0,
+            padding=(dp(12), dp(8)),
+            spacing=dp(10),
+        )
+        with bar.canvas.before:
+            Color(*TOOLBAR_BG)
+            self._slider_editor_bg = Rectangle()
+        bar.bind(
+            pos=lambda *_args: setattr(self._slider_editor_bg, "pos", bar.pos),
+            size=lambda *_args: setattr(self._slider_editor_bg, "size", bar.size),
+        )
+        self._slider_control = Slider(min=0.0, max=1.0, value=0.5, cursor_size=(dp(28), dp(28)))
+        self._slider_control.bind(value=self._on_slider_editor)
+        self._slider_value_label = Label(
+            text="",
+            color=(1, 1, 1, 1),
+            font_size=dp(16) * layout_scale(),
+            size_hint_x=None,
+            width=dp(64),
+            halign="center",
+            valign="middle",
+        )
+        bar.add_widget(self._slider_control)
+        bar.add_widget(self._slider_value_label)
+        bar.opacity = 0
+        bar.disabled = True
+        self._slider_editor = bar
+        return bar
+
+    def toggle_slider_editor(self, kind: str, *_args: Any) -> None:
+        if self._slider_open == kind:
+            self._slider_open = None
+        else:
+            self._slider_open = kind
+            spec = self._slider_specs()[kind]
+            self._slider_control.value = _slider_to_t(
+                spec["get"](), spec["lo"], spec["hi"], spec["log"]
+            )
+            self._slider_value_label.text = spec["fmt"](spec["get"]())
+        self._apply_chrome_metrics()
+        self._fit_workspace()
+
+    def _on_slider_editor(self, _slider: Slider, amount: float) -> None:
+        kind = self._slider_open
+        if not kind:
+            return
+        spec = self._slider_specs()[kind]
+        value = _slider_from_t(float(amount), spec["lo"], spec["hi"], spec["log"])
+        spec["set"](value)
+        self._slider_value_label.text = spec["fmt"](value)
+        glyph = self._slider_glyphs.get(kind)
+        if glyph is not None:
+            glyph.amount = value
+
     def _chrome_height(self) -> float:
         scale = layout_scale()
+        if not getattr(self, "toolbar_visible", True):
+            return dp(52) * scale
         extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
-        return (dp(44) + dp(52) + dp(40)) * scale + extra
+        editor = dp(64) * scale if getattr(self, "_slider_open", None) else 0.0
+        return (dp(44) + dp(52) + dp(36)) * scale + extra + editor
 
     def _apply_chrome_metrics(self) -> None:
         scale = layout_scale()
@@ -4158,7 +4336,27 @@ class RootLayout(FloatLayout):
             if self._shapes_open:
                 self.shape_bar.height = dp(SHAPE_BAR_DP) * scale
         if hasattr(self, "_slider_bar"):
-            self._slider_bar.height = dp(40) * scale
+            self._slider_bar.height = dp(36) * scale if self.toolbar_visible else 0
+        if hasattr(self, "_slider_editor"):
+            open_slider = bool(self.toolbar_visible and getattr(self, "_slider_open", None))
+            self._slider_editor.height = dp(64) * scale if open_slider else 0
+            self._slider_editor.opacity = 1 if open_slider else 0
+            self._slider_editor.disabled = not open_slider
+        if hasattr(self, "restore_bar"):
+            self.restore_bar.height = dp(52) * scale if not self.toolbar_visible else 0
+            self.restore_bar.opacity = 1 if not self.toolbar_visible else 0
+            self.restore_bar.disabled = bool(self.toolbar_visible)
+        if hasattr(self, "restore_btn"):
+            self.restore_btn.font_size = dp(16) * scale
+        for glyph in getattr(self, "_slider_glyphs", {}).values():
+            glyph.size = (dp(36) * scale, dp(36) * scale)
+        if hasattr(self, "_slider_value_label"):
+            self._slider_value_label.font_size = dp(16) * scale
+            self._slider_value_label.width = dp(72) * scale
+        if hasattr(self, "_header_bar") and not self.toolbar_visible:
+            self._header_bar.height = 0
+        if hasattr(self, "_toolbar_host") and not self.toolbar_visible:
+            self._toolbar_host.height = 0
         for button in self.tool_buttons.values():
             if isinstance(button, ToolIcon):
                 button.size = icon
@@ -4168,8 +4366,7 @@ class RootLayout(FloatLayout):
             self.title_button.font_size = dp(15) * scale
         if hasattr(self, "status_label"):
             self.status_label.font_size = dp(12) * scale
-        if self.toolbar_visible:
-            self.chrome.height = self._chrome_height()
+        self.chrome.height = self._chrome_height()
 
     def set_shapes_open(self, open_menu: bool) -> None:
         self._shapes_open = bool(open_menu)
@@ -4186,20 +4383,23 @@ class RootLayout(FloatLayout):
 
     def hide_toolbar(self, *_args: Any) -> None:
         self.set_shapes_open(False)
+        self._slider_open = None
         self.toolbar_visible = False
-        self.chrome.opacity = 0
-        self.chrome.disabled = True
-        self.chrome.height = 0
-        self.restore_btn.opacity = 1
-        self.restore_btn.disabled = False
-        self.restore_btn.size = (dp(96) * layout_scale(), dp(44) * layout_scale())
-        self.restore_btn.center_x = self.center_x
-        self.restore_btn.top = self.top - dp(10)
-        try:
-            self.remove_widget(self.restore_btn)
-            self.add_widget(self.restore_btn)
-        except Exception:
-            pass
+        self.chrome.opacity = 1
+        self.chrome.disabled = False
+        if hasattr(self, "_header_bar"):
+            self._header_bar.opacity = 0
+            self._header_bar.disabled = True
+            self._header_bar.height = 0
+        if hasattr(self, "_toolbar_host"):
+            self._toolbar_host.opacity = 0
+            self._toolbar_host.disabled = True
+            self._toolbar_host.height = 0
+        if hasattr(self, "_slider_bar"):
+            self._slider_bar.opacity = 0
+            self._slider_bar.disabled = True
+            self._slider_bar.height = 0
+        self._apply_chrome_metrics()
         self._fit_workspace()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
@@ -4207,9 +4407,16 @@ class RootLayout(FloatLayout):
         self.toolbar_visible = True
         self.chrome.opacity = 1
         self.chrome.disabled = False
-        self.chrome.height = self._chrome_height()
-        self.restore_btn.opacity = 0
-        self.restore_btn.disabled = True
+        if hasattr(self, "_header_bar"):
+            self._header_bar.opacity = 1
+            self._header_bar.disabled = False
+        if hasattr(self, "_toolbar_host"):
+            self._toolbar_host.opacity = 1
+            self._toolbar_host.disabled = False
+        if hasattr(self, "_slider_bar"):
+            self._slider_bar.opacity = 1
+            self._slider_bar.disabled = False
+        self._apply_chrome_metrics()
         self._fit_workspace()
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
@@ -4341,6 +4548,7 @@ class SamsungNotesCompanionApp(App):
         self._page_strokes: Dict[int, List[StrokeRecord]] = {}
         self._notes_strokes: Dict[int, List[StrokeRecord]] = {}
         self._pending_save: Optional[Tuple[str, str]] = None
+        self._append_pdf_pending: bool = False
         self._stylus_listener: Any = None
         self._history_role: str = "pdf"
         self._clipboard: List[StrokeRecord] = []
@@ -5260,9 +5468,31 @@ class SamsungNotesCompanionApp(App):
 
     def _share_content_uri(self, activity: Any, path: str, title: str) -> Any:
         try:
-            return self._android_mediastore_pdf_uri(activity, path, title)
-        except Exception:
             return self._android_file_uri(activity, path)
+        except Exception:
+            return self._android_mediastore_pdf_uri(activity, path, title)
+
+    def _grant_share_uri(self, activity: Any, intent: Any, uris: Sequence[Any]) -> None:
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+        try:
+            PackageManager = autoclass("android.content.pm.PackageManager")
+            matches = activity.getPackageManager().queryIntentActivities(
+                intent, PackageManager.MATCH_DEFAULT_ONLY
+            )
+            count = int(matches.size())
+            for index in range(count):
+                info = matches.get(index)
+                name = str(info.activityInfo.packageName)
+                for uri in uris:
+                    try:
+                        activity.grantUriPermission(name, uri, flags)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _launch_share_intent(self, activity: Any, uris: Sequence[Any], title: str) -> None:
         from jnius import autoclass, cast
@@ -5270,9 +5500,10 @@ class SamsungNotesCompanionApp(App):
         Intent = autoclass("android.content.Intent")
         String = autoclass("java.lang.String")
         ClipData = autoclass("android.content.ClipData")
+        mime = "application/pdf"
         if len(uris) == 1:
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("*/*")
+            intent.setType(mime)
             self._put_share_stream(intent, uris[0])
         else:
             ArrayList = autoclass("java.util.ArrayList")
@@ -5280,16 +5511,20 @@ class SamsungNotesCompanionApp(App):
             for uri in uris:
                 stream.add(cast("android.os.Parcelable", uri))
             intent = Intent(Intent.ACTION_SEND_MULTIPLE)
-            intent.setType("*/*")
+            intent.setType(mime)
             intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, stream)
-        clip = ClipData.newRawUri(String("pdf"), uris[0])
+        clip = ClipData.newRawUri(String(title or "pdf"), uris[0])
         for uri in uris[1:]:
             clip.addItem(ClipData.Item(uri))
         intent.setClipData(clip)
+        intent.putExtra(Intent.EXTRA_SUBJECT, String(title or "PDF"))
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        self._grant_share_uri(activity, intent, uris)
         chooser = Intent.createChooser(intent, String("Share"))
         chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        self._grant_share_uri(activity, chooser, uris)
         self._share_keep = [list(uris), intent, clip, chooser, activity]
         activity.startActivity(chooser)
 
@@ -5320,8 +5555,8 @@ class SamsungNotesCompanionApp(App):
                 if not uris:
                     raise RuntimeError("no uri")
                 self._launch_share_intent(activity, uris, title)
-            except Exception:
-                Clock.schedule_once(lambda *_a: self._notify("שיתוף נכשל"), 0)
+            except Exception as exc:
+                Clock.schedule_once(lambda *_a, err=exc: self._notify(f"שיתוף נכשל: {err}"), 0)
 
         _share()
 
@@ -5715,6 +5950,7 @@ class SamsungNotesCompanionApp(App):
 
             activity_cls = autoclass("android.app.Activity")
             if result_code != activity_cls.RESULT_OK or intent is None:
+                self._append_pdf_pending = False
                 self._notify("הפעולה בוטלה")
                 return
             uri = intent.getData()
@@ -5732,7 +5968,10 @@ class SamsungNotesCompanionApp(App):
                 )
             except Exception:
                 pass
-            if request_code == OPEN_REQUEST:
+            if request_code == APPEND_REQUEST:
+                self._append_pdf_pending = False
+                self._append_android_uri(uri)
+            elif request_code == OPEN_REQUEST:
                 self._open_android_uri(uri)
             elif request_code == IMAGE_REQUEST:
                 self._open_android_image_uri(uri)
@@ -6927,6 +7166,142 @@ class SamsungNotesCompanionApp(App):
                 self._notify(f"לא ניתן לפתוח את ספריית הקבצים: {exc}")
                 return
         self._desktop_open_dialog()
+
+    def add_pages_menu(self, *_args: Any) -> None:
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
+        popup = Popup(title="", content=body, size_hint=(0.82, 0.42))
+        blank = Button(text="דף ריק בסוף המסמך", size_hint_y=None, height=dp(48))
+        imported = Button(text="PDF בסוף המסמך", size_hint_y=None, height=dp(48))
+        blank.bind(on_release=lambda *_a: (popup.dismiss(), self.append_blank_page()))
+        imported.bind(on_release=lambda *_a: (popup.dismiss(), self.append_pdf_pages()))
+        body.add_widget(blank)
+        body.add_widget(imported)
+        popup.open()
+        apply_hebrew_ui(popup, "הוספת דפים")
+
+    def append_blank_page(self, *_args: Any) -> None:
+        self._extend_notebook(1)
+        self._notify("נוסף דף ריק בסוף המסמך")
+
+    def append_pdf_pages(self, *_args: Any) -> None:
+        self._append_pdf_pending = True
+        if is_android():
+            try:
+                self._start_android_append_pdf()
+                return
+            except Exception as exc:
+                self._append_pdf_pending = False
+                self._notify(f"לא ניתן לבחור PDF: {exc}")
+                return
+        self._desktop_append_pdf_dialog()
+
+    def _extend_notebook(self, extra: int) -> int:
+        extra = max(0, int(extra))
+        start = max(0, int(self.page_count))
+        if extra <= 0:
+            return start
+        total = start + extra
+        for canvas in (self.root_layout.pdf_canvas, self.root_layout.notes_canvas):
+            while len(canvas._page_textures) < total:
+                canvas._page_textures.append(None)
+        self.page_count = total
+        self.root_layout.pdf_canvas.redraw_all()
+        self.root_layout.notes_canvas.redraw_all()
+        self.root_layout.set_page_status(0, total)
+        return start
+
+    def _append_android_uri(self, uri: Any) -> None:
+        try:
+            path = self._copy_uri_to_temp(uri, ".pdf")
+        except Exception as exc:
+            self._notify(f"לא ניתן להעתיק את ה-PDF: {exc}")
+            return
+        display = self._uri_display_name(uri)
+        if not (
+            self._bytes_look_like_pdf(path)
+            or str(display).lower().endswith(".pdf")
+            or self._uri_is_pdf(uri)
+        ):
+            self._notify("יש לבחור קובץ PDF")
+            return
+        self._append_local_pdf(path, display)
+
+    def _append_local_pdf(self, path: str, display: str) -> None:
+        if is_android():
+            try:
+                from jnius import autoclass
+
+                file_cls = autoclass("java.io.File")
+                pfd_cls = autoclass("android.os.ParcelFileDescriptor")
+                renderer_cls = autoclass("android.graphics.pdf.PdfRenderer")
+                pfd = pfd_cls.open(file_cls(str(path)), pfd_cls.MODE_READ_ONLY)
+                renderer = renderer_cls(pfd)
+                extra = int(renderer.getPageCount())
+                start = self._extend_notebook(extra)
+                pdf = self.root_layout.pdf_canvas
+                for index in range(extra):
+                    page = renderer.openPage(int(index))
+                    image_path = None
+                    try:
+                        image_path = self._render_opened_page(page, for_export=False)
+                        if image_path:
+                            pdf.set_page_image_at(
+                                start + index, image_path, int(self.page_count)
+                            )
+                            pdf._locked_pages.add(start + index)
+                    finally:
+                        page.close()
+                        if image_path:
+                            try:
+                                os.unlink(image_path)
+                            except Exception:
+                                pass
+                renderer.close()
+                pfd.close()
+                self._notify(f"נוספו {extra} דפים מ-{display}")
+                return
+            except Exception as exc:
+                self._notify(f"לא ניתן לצרף את ה-PDF: {exc}")
+                return
+        self._extend_notebook(1)
+        self._notify("במחשב נוסף דף ריק. צירוף PDF זמין באנדרואיד")
+
+    def _start_android_append_pdf(self) -> None:
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType("application/pdf")
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        self._launch_android_intent(intent, APPEND_REQUEST)
+
+    def _desktop_append_pdf_dialog(self) -> None:
+        chooser = FileChooserListView(
+            path=self._desktop_start_dir(),
+            filters=["*.pdf", "*"],
+        )
+        body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        popup = Popup(title="", content=body, size_hint=(0.94, 0.94))
+
+        def _load(_instance: Button) -> None:
+            self._append_pdf_pending = False
+            if chooser.selection:
+                path = chooser.selection[0]
+                self._append_local_pdf(path, os.path.basename(path))
+            popup.dismiss()
+
+        load_btn = Button(text="Open")
+        cancel_btn = Button(text="Cancel")
+        load_btn.bind(on_release=_load)
+        cancel_btn.bind(on_release=lambda _btn: setattr(self, "_append_pdf_pending", False) or popup.dismiss())
+        buttons.add_widget(load_btn)
+        buttons.add_widget(cancel_btn)
+        body.add_widget(chooser)
+        body.add_widget(buttons)
+        popup.open()
+        apply_hebrew_ui(popup, "צירוף PDF")
 
     def save_document_as(self, *_args: Any) -> None:
         if not is_android():
