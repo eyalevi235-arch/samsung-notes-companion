@@ -1370,9 +1370,9 @@ class PageScrollRail(Widget):
         super().__init__(**kwargs)
         self.opacity = 1.0
         with self.canvas:
-            self._track_c = Color(0.08, 0.10, 0.14, 0.94)
+            self._track_c = Color(0.08, 0.10, 0.14, 0.0)
             self._track = RoundedRectangle(radius=[dp(9)])
-            self._thumb_c = Color(0.32, 0.58, 0.98, 1.0)
+            self._thumb_c = Color(0.32, 0.58, 0.98, 0.40)
             self._thumb = RoundedRectangle(radius=[dp(8)])
         self.bind(pos=self._redraw, size=self._redraw, value=self._redraw)
         Clock.schedule_once(lambda _dt: self._redraw(), 0)
@@ -5578,25 +5578,22 @@ class SamsungNotesCompanionApp(App):
         if not java_file.exists():
             raise RuntimeError("share file missing")
         package = str(activity.getPackageName())
-        authorities = (package + ".fileprovider",)
-        providers = (
-            "org.kivy.android.GenericFileProvider",
-            "androidx.core.content.FileProvider",
+        authorities = (
+            package + ".fileprovider",
+            "org.kivy.android.fileprovider",
         )
         last_error: Optional[Exception] = None
+        try:
+            provider = autoclass("org.kivy.android.GenericFileProvider")
+        except Exception as exc:
+            raise RuntimeError(f"GenericFileProvider missing: {_exception_reason(exc)}") from exc
         for context in (activity, activity.getApplicationContext()):
-            for cls_name in providers:
+            for authority in authorities:
                 try:
-                    provider = autoclass(cls_name)
+                    uri = provider.getUriForFile(context, authority, java_file)
+                    return cast("android.net.Uri", uri)
                 except Exception as exc:
                     last_error = exc
-                    continue
-                for authority in authorities:
-                    try:
-                        uri = provider.getUriForFile(context, authority, java_file)
-                        return cast("android.net.Uri", uri)
-                    except Exception as exc:
-                        last_error = exc
         if last_error is not None:
             raise last_error
         raise RuntimeError("FileProvider unavailable")
@@ -5635,6 +5632,7 @@ class SamsungNotesCompanionApp(App):
 
         ContentValues = autoclass("android.content.ContentValues")
         Integer = autoclass("java.lang.Integer")
+        String = autoclass("java.lang.String")
         resolver = activity.getContentResolver()
         display = f"note-{uuid.uuid4().hex[:8]}.pdf"
         sdk = _android_sdk_int()
@@ -5654,26 +5652,33 @@ class SamsungNotesCompanionApp(App):
         FilesTable = autoclass("android.provider.MediaStore$Files")
         collections.append((FilesTable.getContentUri("external"), "Download/"))
         last_error: Optional[Exception] = None
+
+        def _put(values: Any, key: str, value: Any) -> None:
+            jkey = String(str(key))
+            if isinstance(value, int):
+                values.put(jkey, Integer.valueOf(int(value)))
+            else:
+                values.put(jkey, String(str(value)))
+
         for collection, rel in collections:
             try:
                 values = ContentValues()
-                values.put("_display_name", display)
-                values.put("mime_type", "application/pdf")
+                _put(values, "_display_name", display)
+                _put(values, "mime_type", "application/pdf")
                 if rel:
-                    values.put("relative_path", rel)
+                    _put(values, "relative_path", rel)
                 if sdk >= 29:
-                    values.put("is_pending", Integer.valueOf(1))
+                    _put(values, "is_pending", 1)
                 uri = resolver.insert(collection, values)
                 if uri is None:
                     continue
-                source = autoclass("java.io.FileInputStream")(str(path))
                 dest = resolver.openOutputStream(uri)
-                autoclass("android.os.FileUtils").copy(source, dest)
-                source.close()
-                dest.close()
+                if dest is None:
+                    continue
+                self._copy_file_to_stream(path, dest)
                 if sdk >= 29:
                     done = ContentValues()
-                    done.put("is_pending", Integer.valueOf(0))
+                    _put(done, "is_pending", 0)
                     resolver.update(uri, done, None, None)
                 return cast("android.net.Uri", uri)
             except Exception as exc:
@@ -5810,16 +5815,16 @@ class SamsungNotesCompanionApp(App):
                     store_exc: Optional[Exception] = None
                     file_exc: Optional[Exception] = None
                     try:
-                        uris.append(self._android_mediastore_pdf_uri(activity, path, title))
+                        uris.append(self._android_file_uri(activity, path))
                         continue
                     except Exception as exc:
-                        store_exc = exc
-                    try:
-                        uris.append(self._android_file_uri(activity, path))
-                    except Exception as exc:
                         file_exc = exc
+                    try:
+                        uris.append(self._android_mediastore_pdf_uri(activity, path, title))
+                    except Exception as exc:
+                        store_exc = exc
                         raise RuntimeError(
-                            f"MediaStore: {_exception_reason(store_exc)} | FileProvider: {_exception_reason(file_exc)}"
+                            f"שיתוף: {_exception_reason(file_exc)} | {_exception_reason(store_exc)}"
                         ) from exc
                 if not uris:
                     raise RuntimeError("לא נוצר קישור לקובץ")
@@ -7036,22 +7041,19 @@ class SamsungNotesCompanionApp(App):
                 page_w,
                 page_h,
             )
-            note_strokes = self._notes_strokes.get(index, [])
-            if note_strokes:
-                export_notes_h = background.size[1]
-                export_notes_w = max(1, int(round(notes_w * export_notes_h / max(page_h, 1.0))))
-                notes = Image.new("RGB", (export_notes_w, export_notes_h), (255, 255, 255))
-                self._draw_notes_grid_pil(notes)
-                self._stroke_on_image(notes, note_strokes, notes_w, page_h)
-                combined = Image.new(
-                    "RGB",
-                    (notes.size[0] + background.size[0], background.size[1]),
-                    (255, 255, 255),
-                )
-                combined.paste(notes, (0, 0))
-                combined.paste(background, (notes.size[0], 0))
-            else:
-                combined = background
+            note_strokes = self._notes_strokes.get(index, []) or []
+            export_notes_h = background.size[1]
+            export_notes_w = max(1, int(round(notes_w * export_notes_h / max(page_h, 1.0))))
+            notes = Image.new("RGB", (export_notes_w, export_notes_h), (255, 255, 255))
+            self._draw_notes_grid_pil(notes)
+            self._stroke_on_image(notes, note_strokes, notes_w, page_h)
+            combined = Image.new(
+                "RGB",
+                (notes.size[0] + background.size[0], background.size[1]),
+                (255, 255, 255),
+            )
+            combined.paste(notes, (0, 0))
+            combined.paste(background, (notes.size[0], 0))
             buffer = io.BytesIO()
             combined.save(buffer, format="JPEG", quality=90, optimize=False, progressive=False)
             pages.append((buffer.getvalue(), combined.size[0], combined.size[1]))
