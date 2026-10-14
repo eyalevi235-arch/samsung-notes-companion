@@ -4050,6 +4050,9 @@ class LibraryScreen(Screen):
         self.tree_host.opacity = 1 if self._tree_open else 0
         self.tree_host.disabled = not self._tree_open
         self._fit_tree_panel()
+        app = App.get_running_app()
+        if hasattr(app, "_sync_rtl_search"):
+            app._sync_rtl_search()
 
     def _place_library_shell(self, *_args: Any) -> None:
         shell = getattr(self, "_library_shell", None)
@@ -4065,6 +4068,9 @@ class LibraryScreen(Screen):
         if not self._tree_open:
             self.tree_host.width = 0
             self.tree_host.height = 0
+            app = App.get_running_app()
+            if hasattr(app, "_dismiss_rtl_edit"):
+                app._dismiss_rtl_edit("search")
             return
         needed = max(dp(210), float(self.tree_chart.content_width()) + dp(28))
         try:
@@ -4102,6 +4108,9 @@ class LibraryScreen(Screen):
             self.tree_host.height = host_h
         self._tree_bg.pos = self.tree_host.pos
         self._tree_bg.size = self.tree_host.size
+        app = App.get_running_app()
+        if hasattr(app, "_layout_rtl_edits"):
+            app._layout_rtl_edits()
 
     def _on_size(self, *_args: Any) -> None:
         cols = 4 if self.width >= dp(900) else (2 if self.width < dp(520) else 3)
@@ -5247,6 +5256,9 @@ class SamsungNotesCompanionApp(App):
         self.ui_theme = "light" if self.ui_theme != "light" else "dark"
         self._save_ui_prefs()
         self.library_screen.apply_theme()
+        if is_android() and "search" in getattr(self, "_rtl_edits", {}):
+            self._dismiss_rtl_edit("search")
+            self._sync_rtl_search()
 
     def toggle_library_sort(self, *_args: Any) -> None:
         self.doc_sort = "name" if self.doc_sort != "name" else "recent"
@@ -6694,7 +6706,9 @@ class SamsungNotesCompanionApp(App):
         popup.auto_dismiss = False
 
         def _save() -> None:
-            name = str(field.text or "").strip() or "תיקייה"
+            typed = self._rtl_edit_value("folder") if is_android() else field.text
+            name = str(typed or field.text or "").strip() or "תיקייה"
+            self._dismiss_rtl_edit("folder")
             data = self.library_data()
             folders = data.setdefault("folders", [])
             if folder is None:
@@ -6715,19 +6729,39 @@ class SamsungNotesCompanionApp(App):
             popup.dismiss()
             self.library_screen.refresh()
 
+        def _cancel() -> None:
+            self._dismiss_rtl_edit("folder")
+            popup.dismiss()
+
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         buttons.add_widget(ChoiceButton("שמירה", on_press=_save, primary=True))
-        buttons.add_widget(ChoiceButton("ביטול", on_press=popup.dismiss))
+        buttons.add_widget(ChoiceButton("ביטול", on_press=_cancel))
         body.add_widget(Label(text=mixed_markup("תיקייה חדשה" if folder is None else "עריכת תיקייה"), markup=True, color=ui_color("text"), size_hint_y=None, height=dp(26)))
         body.add_widget(field)
         body.add_widget(swatches)
         body.add_widget(buttons)
+        popup.bind(on_dismiss=lambda *_a: self._dismiss_rtl_edit("folder"))
         popup.open()
         apply_hebrew_ui(popup, "תיקייה")
-        focus_system_keyboard(field)
+        if is_android():
+            field.readonly = True
+            field.focus = False
+            Clock.schedule_once(
+                lambda *_a: self._attach_rtl_edit(
+                    "folder",
+                    field,
+                    "שם התיקייה",
+                    str((folder or {}).get("name") or ""),
+                ),
+                0.2,
+            )
+        else:
+            focus_system_keyboard(field)
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
+        for role in list(getattr(self, "_rtl_edits", {})):
+            self._dismiss_rtl_edit(role)
         try:
             self._persist_share_ledger()
         except Exception:
@@ -6913,7 +6947,10 @@ class SamsungNotesCompanionApp(App):
             activity.bind(on_new_intent=self._on_new_intent)
         except Exception:
             pass
+        self._rtl_edits: Dict[str, Any] = {}
+        self._rtl_retries: Dict[str, int] = {}
         Clock.schedule_once(lambda _dt: self._consume_launch_intent(), 1.0)
+        Clock.schedule_interval(self._tick_rtl_edits, 0.2)
         self._attach_spen_listeners()
 
     def _on_new_intent(self, intent: Any, *_args: Any) -> None:
@@ -6960,6 +6997,223 @@ class SamsungNotesCompanionApp(App):
             self._open_android_uri(uri)
         except Exception:
             pass
+
+    def _android_argb(self, rgba: Sequence[float]) -> int:
+        red, green, blue, alpha = (list(rgba) + [1, 1, 1, 1])[:4]
+        return (
+            (max(0, min(255, int(float(alpha) * 255))) << 24)
+            | (max(0, min(255, int(float(red) * 255))) << 16)
+            | (max(0, min(255, int(float(green) * 255))) << 8)
+            | max(0, min(255, int(float(blue) * 255)))
+        )
+
+    def _kivy_to_android_rect(self, widget: Any) -> Tuple[int, int, int, int]:
+        wx, wy = widget.to_window(*widget.pos)
+        width = max(1, min(int(round(widget.width)), int(Window.width)))
+        height = max(1, min(int(round(widget.height)), int(Window.height)))
+        left = int(round(wx))
+        top = int(round(Window.height - wy - widget.height))
+        return left, top, width, height
+
+    def _prepare_kivy_input(self, widget: Any) -> None:
+        try:
+            widget.focus = False
+            widget.readonly = True
+            widget.foreground_color = (0, 0, 0, 0)
+            widget.cursor_color = (0, 0, 0, 0)
+            widget.hint_text_color = (0, 0, 0, 0)
+        except Exception:
+            pass
+
+    def _restore_kivy_input(self, widget: Any) -> None:
+        if widget is None:
+            return
+        try:
+            widget.readonly = False
+            widget.foreground_color = ui_color("text")
+            widget.cursor_color = ui_color("text")
+            widget.hint_text_color = ui_color("muted")
+        except Exception:
+            pass
+
+    def _configure_rtl_edit(self, edit: Any, hint: str, initial: str) -> None:
+        from jnius import autoclass
+
+        View = autoclass("android.view.View")
+        Gravity = autoclass("android.view.Gravity")
+        InputType = autoclass("android.text.InputType")
+        String = autoclass("java.lang.String")
+        ColorDrawable = autoclass("android.graphics.drawable.ColorDrawable")
+        edit.setSingleLine(True)
+        edit.setHint(String(hint or ""))
+        edit.setText(String(str(initial or "")))
+        edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+        try:
+            edit.setLayoutDirection(View.LAYOUT_DIRECTION_RTL)
+            edit.setTextDirection(View.TEXT_DIRECTION_RTL)
+            edit.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START)
+        except Exception:
+            pass
+        edit.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT)
+        edit.setPadding(int(dp(10)), int(dp(6)), int(dp(10)), int(dp(6)))
+        dark = not is_light_theme()
+        text = ui_color("text")
+        muted = ui_color("muted")
+        edit.setTextColor(self._android_argb(text))
+        edit.setHintTextColor(self._android_argb(muted))
+        edit.setBackground(ColorDrawable(self._android_argb((0.18, 0.19, 0.22, 1) if dark else (0.96, 0.96, 0.97, 1))))
+        try:
+            edit.setElevation(24.0)
+            edit.setTextSize(16.0)
+            edit.setSelection(edit.getText().length())
+        except Exception:
+            pass
+
+    def _attach_rtl_edit(self, role: str, widget: Any, hint: str, initial: str) -> None:
+        if not is_android() or widget is None:
+            return
+        if role in getattr(self, "_rtl_edits", {}):
+            self._layout_rtl_edits()
+            return
+        if float(widget.width) < 24 or float(widget.height) < 16:
+            count = int(getattr(self, "_rtl_retries", {}).get(role, 0))
+            if count > 16:
+                return
+            self._rtl_retries[role] = count + 1
+            Clock.schedule_once(lambda _dt: self._attach_rtl_edit(role, widget, hint, initial), 0.12)
+            return
+        self._rtl_retries[role] = 0
+        left, top, width, height = self._kivy_to_android_rect(widget)
+        try:
+            from android.runnable import run_on_ui_thread
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            EditText = autoclass("android.widget.EditText")
+            LayoutParams = autoclass("android.view.WindowManager$LayoutParams")
+            PixelFormat = autoclass("android.graphics.PixelFormat")
+            Gravity = autoclass("android.view.Gravity")
+            edit = EditText(activity)
+            self._configure_rtl_edit(edit, hint, initial)
+            params = LayoutParams()
+            params.width = width
+            params.height = height
+            params.x = left
+            params.y = top
+            params.gravity = Gravity.TOP | Gravity.LEFT
+            params.format = PixelFormat.TRANSLUCENT
+            params.type = LayoutParams.TYPE_APPLICATION_PANEL
+            params.flags = LayoutParams.FLAG_NOT_TOUCH_MODAL | LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+            params.softInputMode = LayoutParams.SOFT_INPUT_ADJUST_PAN
+            try:
+                params.token = activity.getWindow().getDecorView().getWindowToken()
+            except Exception:
+                pass
+            self._rtl_edits[role] = {"view": edit, "widget": widget, "params": params, "hint": hint}
+            self._prepare_kivy_input(widget)
+
+            @run_on_ui_thread
+            def _add() -> None:
+                try:
+                    activity.getWindowManager().addView(edit, params)
+                    edit.requestFocus()
+                except Exception:
+                    self._rtl_edits.pop(role, None)
+                    self._restore_kivy_input(widget)
+
+            _add()
+        except Exception:
+            self._rtl_edits.pop(role, None)
+            self._restore_kivy_input(widget)
+
+    def _layout_rtl_edits(self) -> None:
+        items = getattr(self, "_rtl_edits", {})
+        if not items or not is_android():
+            return
+        try:
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            manager = activity.getWindowManager()
+        except Exception:
+            return
+        for role, item in list(items.items()):
+            widget = item.get("widget")
+            view = item.get("view")
+            params = item.get("params")
+            if widget is None or view is None or params is None or widget.parent is None:
+                continue
+            if float(widget.width) < 8 or float(widget.height) < 8:
+                continue
+            left, top, width, height = self._kivy_to_android_rect(widget)
+            if params.x == left and params.y == top and params.width == width and params.height == height:
+                continue
+            params.x = left
+            params.y = top
+            params.width = width
+            params.height = height
+            try:
+                manager.updateViewLayout(view, params)
+            except Exception:
+                pass
+
+    def _rtl_edit_value(self, role: str) -> str:
+        item = getattr(self, "_rtl_edits", {}).get(role) or {}
+        view = item.get("view")
+        if view is None:
+            return ""
+        try:
+            return str(view.getText().toString() or "")
+        except Exception:
+            return ""
+
+    def _dismiss_rtl_edit(self, role: str) -> None:
+        item = getattr(self, "_rtl_edits", {}).pop(role, None)
+        if not item:
+            return
+        self._restore_kivy_input(item.get("widget"))
+        view = item.get("view")
+        if view is None:
+            return
+        try:
+            from android.runnable import run_on_ui_thread
+            from jnius import autoclass
+
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+
+            @run_on_ui_thread
+            def _remove() -> None:
+                try:
+                    activity.getWindowManager().removeView(view)
+                except Exception:
+                    try:
+                        activity.getWindowManager().removeViewImmediate(view)
+                    except Exception:
+                        pass
+
+            _remove()
+        except Exception:
+            pass
+
+    def _sync_rtl_search(self) -> None:
+        screen = getattr(self, "library_screen", None)
+        if not is_android() or screen is None or not getattr(screen, "_tree_open", False):
+            self._dismiss_rtl_edit("search")
+            return
+        field = screen.search_field
+        current = self._rtl_edit_value("search") or str(getattr(screen, "_query", "") or field.text or "")
+        self._attach_rtl_edit("search", field, "חיפוש תיקיות ומסמכים", current)
+
+    def _tick_rtl_edits(self, _dt: float) -> bool:
+        if not getattr(self, "_rtl_edits", None):
+            return True
+        self._layout_rtl_edits()
+        screen = getattr(self, "library_screen", None)
+        if screen is not None and "search" in self._rtl_edits:
+            value = self._rtl_edit_value("search")
+            if value != getattr(screen, "_query", ""):
+                screen._on_search(screen.search_field, value)
+        return True
 
     def _update_spen_from_motion(self, event: Any) -> None:
         action_down = 0
