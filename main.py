@@ -1110,7 +1110,10 @@ class ToolIcon(ButtonBehavior, Widget):
         return super().on_touch_up(touch)
 
     def _sync_bg(self, *_args: Any) -> None:
-        bg = TOOL_ACTIVE if self.selected else (TOOL_IDLE if self.on_dark else (1, 1, 1, 1))
+        if self.kind == "search":
+            bg = (0, 0, 0, 0)
+        else:
+            bg = TOOL_ACTIVE if self.selected else (TOOL_IDLE if self.on_dark else (1, 1, 1, 1))
         self._bg_color.rgba = bg
         self._bg_rect.pos = self.pos
         self._bg_rect.size = self.size
@@ -1187,6 +1190,21 @@ class ToolIcon(ButtonBehavior, Widget):
                 for yy in (y + h * 0.72, cy, y + h * 0.28):
                     self._line([x + w * 0.12, yy, x + w * 0.88, yy], 1.7)
                     self._disk(x + w * 0.12, yy, dp(1.5))
+            elif kind == "search":
+                radius = min(w, h) * 0.28
+                gx = cx - w * 0.08
+                gy = cy + h * 0.06
+                Line(circle=(gx, gy, radius), width=1.45)
+                handle = radius * 0.92
+                self._line(
+                    [
+                        gx + radius * 0.62,
+                        gy - radius * 0.62,
+                        gx + handle * 1.15,
+                        gy - handle * 1.15,
+                    ],
+                    1.7,
+                )
             elif kind == "plus":
                 self._fill(ink, 0.16)
                 Line(circle=(cx, cy, min(w, h) * 0.38), width=1.2)
@@ -3932,55 +3950,45 @@ class LibraryScreen(Screen):
             pos=lambda *_a: setattr(self._tree_bg, "pos", self.tree_host.pos),
             size=lambda *_a: setattr(self._tree_bg, "size", self.tree_host.size),
         )
-        self.search_field = TextInput(
-            hint_text="חיפוש תיקיות ומסמכים",
-            multiline=False,
-            size_hint_y=None,
-            height=dp(36),
-            font_size=dp(14),
-            padding=(dp(10), dp(8)),
-            background_color=(1, 1, 1, 0.08),
-            foreground_color=ui_color("text"),
-            hint_text_color=ui_color("muted"),
-            cursor_color=ui_color("text"),
-            write_tab=False,
-            halign="right",
+        self.search_field = BoxLayout(size_hint_y=None, height=dp(36), padding=(dp(4), dp(2)))
+        with self.search_field.canvas.before:
+            self._search_bg_c = Color(1, 1, 1, 0.10) if not is_light_theme() else Color(0, 0, 0, 0.06)
+            self._search_bg = RoundedRectangle(radius=[dp(8)])
+        self.search_field.bind(
+            pos=lambda *_a: setattr(self._search_bg, "pos", self.search_field.pos),
+            size=lambda *_a: setattr(self._search_bg, "size", self.search_field.size),
         )
-        style_hebrew_input(self.search_field)
-        self.search_field.bind(text=self._on_search)
         self._search_prompt_open = False
-        if is_android():
-            self.search_field.readonly = True
-            original_touch = self.search_field.on_touch_down
 
-            def _search_touch(touch: Any) -> bool:
-                if not self.search_field.collide_point(*touch.pos):
-                    return original_touch(touch)
-                if self._search_prompt_open:
-                    return True
-                self.search_field.focus = False
-                self._search_prompt_open = True
-                app = App.get_running_app()
+        def _open_search(*_args: Any) -> None:
+            if self._search_prompt_open:
+                return
+            self._search_prompt_open = True
+            app = App.get_running_app()
 
-                def _done(value: str) -> None:
+            def _done(value: str) -> None:
+                self._search_prompt_open = False
+                self._on_search(None, value)
+
+            def _watch(_dt: float) -> bool:
+                if not self._search_prompt_open:
+                    return False
+                if getattr(app, "_android_line_callback", None) is None and getattr(app, "_android_line_edit", None) is None:
                     self._search_prompt_open = False
-                    text = str(value or "")
-                    self.search_field.text = text
-                    self._on_search(self.search_field, text)
-
-                def _watch(_dt: float) -> bool:
-                    if not self._search_prompt_open:
-                        return False
-                    if getattr(app, "_android_line_callback", None) is None and getattr(app, "_android_line_edit", None) is None:
-                        self._search_prompt_open = False
-                        return False
-                    return True
-
-                app._prompt_line("חיפוש", str(getattr(self, "_query", "") or ""), _done)
-                Clock.schedule_interval(_watch, 0.25)
+                    return False
                 return True
 
-            self.search_field.on_touch_down = _search_touch
+            app._prompt_line("חיפוש", str(getattr(self, "_query", "") or ""), _done)
+            Clock.schedule_interval(_watch, 0.25)
+
+        self.search_icon = ToolIcon(
+            "search",
+            on_dark=dark_icons,
+            size=(dp(32), dp(32)),
+            trigger=_open_search,
+        )
+        self.search_icon.size_hint = (1, 1)
+        self.search_field.add_widget(self.search_icon)
         self.tree_host.add_widget(self.search_field)
         nav_lbl = Label(
             text=mixed_markup("ניווט"),
@@ -4064,14 +4072,10 @@ class LibraryScreen(Screen):
         self.title.color = ui_color("text")
         self._nav_label.color = ui_color("muted")
         self._set_label.color = ui_color("muted")
-        self.search_field.foreground_color = ui_color("text")
-        self.search_field.hint_text_color = ui_color("muted")
-        self.search_field.cursor_color = ui_color("text")
-        self.search_field.background_color = (1, 1, 1, 0.10) if dark else (0, 0, 0, 0.06)
-        style_hebrew_input(self.search_field)
+        self._search_bg_c.rgba = (1, 1, 1, 0.10) if dark else (0, 0, 0, 0.06)
         self.theme_btn.kind = "moon" if is_light_theme() else "sun"
         self.theme_btn.size = (dp(56), dp(48))
-        for btn in (self.menu_btn, self.folder_add_btn, self.doc_add_btn, self.theme_btn):
+        for btn in (self.menu_btn, self.folder_add_btn, self.doc_add_btn, self.theme_btn, self.search_icon):
             btn.on_dark = dark
             btn._redraw()
         for color in getattr(self, "_hair_colors", []):
@@ -6735,16 +6739,6 @@ class SamsungNotesCompanionApp(App):
             valign="middle",
         )
 
-        def _set_name(value: str) -> None:
-            name_state["text"] = str(value or "").strip()
-            name_btn.text = mixed_markup(_caption())
-            name_btn.color = ui_color("text") if name_state["text"] else ui_color("muted")
-
-        def _edit_name(*_args: Any) -> None:
-            self._prompt_line("שם התיקייה", name_state["text"], _set_name)
-
-        name_btn.bind(on_release=_edit_name)
-
         def _save() -> None:
             name = str(name_state["text"] or "").strip() or "תיקייה"
             data = self.library_data()
@@ -6767,6 +6761,14 @@ class SamsungNotesCompanionApp(App):
             popup.dismiss()
             self.library_screen.refresh()
 
+        def _set_name(value: str) -> None:
+            name_state["text"] = str(value or "").strip()
+            _save()
+
+        def _edit_name(*_args: Any) -> None:
+            self._prompt_line("שם התיקייה", name_state["text"], _set_name)
+
+        name_btn.bind(on_release=_edit_name)
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         buttons.add_widget(ChoiceButton("שמירה", on_press=_save, primary=True))
         buttons.add_widget(ChoiceButton("ביטול", on_press=popup.dismiss))
@@ -6776,7 +6778,6 @@ class SamsungNotesCompanionApp(App):
         body.add_widget(buttons)
         popup.open()
         apply_hebrew_ui(popup)
-        Clock.schedule_once(lambda *_a: _edit_name(), 0.2)
 
     def on_pause(self) -> bool:
         self._autosave_library_doc()
