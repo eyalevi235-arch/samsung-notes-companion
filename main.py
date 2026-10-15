@@ -1642,28 +1642,38 @@ class PageScrollRail(Widget):
 class AbsorbLayout(BoxLayout):
     """Toolbar container that keeps touches from falling through to the canvas."""
 
+    def __init__(self, **kwargs: Any) -> None:
+        self.absorb_empty = True
+        super().__init__(**kwargs)
+
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if self.disabled or self.opacity <= 0 or not self.collide_point(*touch.pos):
             return False
         if _is_hover_touch(touch):
+            return bool(self.absorb_empty)
+        handled = super().on_touch_down(touch)
+        if self.absorb_empty:
             return True
-        super().on_touch_down(touch)
-        return True
+        return handled
 
     def on_touch_move(self, touch: MotionEvent) -> bool:
         if self.disabled or self.opacity <= 0:
             return False
         if self.collide_point(*touch.pos) or touch.grab_current is not None:
-            super().on_touch_move(touch)
-            return True
+            handled = super().on_touch_move(touch)
+            if self.absorb_empty:
+                return True
+            return handled
         return super().on_touch_move(touch)
 
     def on_touch_up(self, touch: MotionEvent) -> bool:
         if self.disabled or self.opacity <= 0:
             return False
         if self.collide_point(*touch.pos) or touch.grab_current is not None:
-            super().on_touch_up(touch)
-            return True
+            handled = super().on_touch_up(touch)
+            if self.absorb_empty:
+                return True
+            return handled
         return super().on_touch_up(touch)
 
 
@@ -3541,10 +3551,10 @@ class SPenAnnotationCanvas(Widget):
         right, _ = self.from_doc(x + w, y)
         _xl, top_y = self.from_doc(x, y + h)
         _xb, bot_y = self.from_doc(x, y)
-        btn_w = float(dp(44))
-        btn_h = float(dp(40))
-        gap = float(dp(6))
-        pad = float(dp(6))
+        btn_w = float(dp(62))
+        btn_h = float(dp(36))
+        gap = float(dp(4))
+        pad = float(dp(8))
         bar_w = btn_w * 3.0 + gap * 4.0
         bar_h = btn_h + pad * 2.0
         cx = (left + right) / 2.0
@@ -3561,53 +3571,47 @@ class SPenAnnotationCanvas(Widget):
             cursor += btn_w + gap
         return bar_x, bar_y, bar_w, bar_h, slots
 
+    def _action_caption_texture(self, text: str) -> Optional[Any]:
+        keepers = getattr(self, "_sel_action_keepers", None)
+        if keepers is None:
+            keepers = {}
+            self._sel_action_keepers = keepers
+        cached = keepers.get(text)
+        if cached is not None:
+            return cached.texture
+        widget = self._make_line_label(text, float(dp(15)), (1.0, 1.0, 1.0, 1.0))
+        keepers[text] = widget
+        return widget.texture
+
     def _draw_selection_actions(self) -> None:
         self._sel_action_rects = {}
         layout = self._selection_action_layout()
         if layout is None:
             return
         bar_x, bar_y, bar_w, bar_h, slots = layout
-        Color(0.12, 0.12, 0.14, 0.96)
-        RoundedRectangle(pos=(bar_x, bar_y), size=(bar_w, bar_h), radius=[dp(10)])
-        Color(1, 1, 1, 0.55)
-        edge = Line(width=1.2)
-        try:
-            edge.rounded_rectangle = (
-                bar_x + dp(0.5),
-                bar_y + dp(0.5),
-                bar_w - dp(1),
-                bar_h - dp(1),
-                dp(10),
-            )
-        except Exception:
-            edge.rectangle = (bar_x, bar_y, bar_w, bar_h)
-        ink = (1.0, 1.0, 1.0, 1.0)
+        Color(0.10, 0.11, 0.14, 1)
+        Rectangle(pos=(bar_x, bar_y), size=(bar_w, bar_h))
+        Color(0.18, 0.42, 0.86, 1)
+        Rectangle(pos=(bar_x, bar_y), size=(bar_w, dp(3)))
+        Color(1, 1, 1, 0.95)
+        Line(rectangle=(bar_x, bar_y, bar_w, bar_h), width=1.4)
+        captions = {"copy": "העתק", "cut": "גזור", "trash": "מחק"}
         for name, bx, by, bw, bh in slots:
             self._sel_action_rects[name] = (bx, by, bw, bh)
-            Color(*ink)
-            pad = dp(8)
-            x, y = bx + pad, by + pad
-            w, h = bw - 2 * pad, bh - 2 * pad
-            cx, cy = bx + bw / 2.0, by + bh / 2.0
-            if name == "copy":
-                Color(1, 1, 1, 0.16)
-                RoundedRectangle(pos=(x + w * 0.3, y + h * 0.08), size=(w * 0.58, h * 0.62), radius=[dp(2)])
-                Color(*ink)
-                Line(rectangle=(x + w * 0.08, y + h * 0.24, w * 0.54, h * 0.6), width=1.2)
-                Line(rectangle=(x + w * 0.3, y + h * 0.08, w * 0.58, h * 0.62), width=1.25)
-            elif name == "cut":
-                Line(points=[x + w * 0.18, y + h * 0.18, x + w * 0.82, y + h * 0.82], width=1.35)
-                Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.18], width=1.35)
-                Line(circle=(x + w * 0.22, y + h * 0.22, min(w, h) * 0.13), width=1.2)
-                Line(circle=(x + w * 0.22, y + h * 0.78, min(w, h) * 0.13), width=1.2)
-            else:
-                Color(1, 1, 1, 0.16)
-                RoundedRectangle(pos=(x + w * 0.22, y + h * 0.1), size=(w * 0.56, h * 0.58), radius=[dp(2)])
-                Color(*ink)
-                Line(rectangle=(x + w * 0.22, y + h * 0.1, w * 0.56, h * 0.58), width=1.2)
-                Line(points=[x + w * 0.16, y + h * 0.72, x + w * 0.84, y + h * 0.72], width=1.4)
-                Line(rectangle=(x + w * 0.38, y + h * 0.78, w * 0.24, h * 0.14), width=1.15)
-                Line(points=[cx, y + h * 0.58, cx, y + h * 0.22], width=1.05)
+            Color(0.22, 0.24, 0.28, 1)
+            Rectangle(pos=(bx, by), size=(bw, bh))
+            tex = self._action_caption_texture(captions[name])
+            if tex is None:
+                continue
+            tw, th = tex.size
+            scale = min(1.0, (bw - dp(6)) / max(1.0, float(tw)), (bh - dp(6)) / max(1.0, float(th)))
+            dw, dh = float(tw) * scale, float(th) * scale
+            Color(1, 1, 1, 1)
+            Rectangle(
+                texture=tex,
+                pos=(bx + (bw - dw) / 2.0, by + (bh - dh) / 2.0),
+                size=(dw, dh),
+            )
 
     def _hit_selection_action(self, x: float, y: float) -> Optional[str]:
         pad = float(dp(4))
@@ -5045,37 +5049,23 @@ class RootLayout(FloatLayout):
             },
         }
 
-    def _build_restore_bar(self) -> BoxLayout:
-        bar = BoxLayout(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=0,
-            padding=(dp(6), dp(4)),
-            spacing=dp(6),
-        )
-        with bar.canvas.before:
-            Color(0.12, 0.12, 0.14, 0.96)
-            self._restore_bg = Rectangle()
-        bar.bind(
-            pos=lambda *_args: setattr(self._restore_bg, "pos", bar.pos),
-            size=lambda *_args: setattr(self._restore_bg, "size", bar.size),
-        )
+    def _build_restore_bar(self) -> FloatLayout:
+        bar = FloatLayout(size_hint_y=None, height=0)
         button = Button(
             text=mixed_markup("כלים"),
             markup=True,
             font_size=dp(13) * layout_scale(),
             size_hint=(None, None),
-            size=(dp(84), dp(30)),
+            size=(dp(72), dp(32)),
+            pos_hint={"center_x": 0.5, "center_y": 0.5},
             background_normal="",
             background_down="",
-            background_color=(0.18, 0.42, 0.86, 0.96),
+            background_color=(0.18, 0.42, 0.86, 1),
             color=(1, 1, 1, 1),
         )
         button.bind(on_release=self.show_toolbar)
         apply_hebrew_ui(button)
-        bar.add_widget(Widget())
         bar.add_widget(button)
-        bar.add_widget(Widget())
         bar.opacity = 0
         bar.disabled = True
         self.restore_btn = button
@@ -5136,7 +5126,8 @@ class RootLayout(FloatLayout):
             self.restore_bar.disabled = bool(self.toolbar_visible)
         if hasattr(self, "restore_btn"):
             self.restore_btn.font_size = dp(13) * scale
-            self.restore_btn.size = (dp(84) * scale, dp(30) * scale)
+            self.restore_btn.size = (dp(72) * scale, dp(32) * scale)
+            self.restore_btn.pos_hint = {"center_x": 0.5, "center_y": 0.5}
         if hasattr(self, "_slider_title_label"):
             self._slider_title_label.font_size = dp(13) * scale
             self._slider_title_label.width = dp(64) * scale
@@ -5164,6 +5155,7 @@ class RootLayout(FloatLayout):
         if hasattr(self, "status_label"):
             self.status_label.font_size = dp(12) * scale
         self.chrome.height = self._chrome_height()
+        self.chrome.absorb_empty = bool(self.toolbar_visible)
 
     def set_shapes_open(self, open_menu: bool) -> None:
         self._shapes_open = bool(open_menu)
@@ -5184,6 +5176,7 @@ class RootLayout(FloatLayout):
         self.toolbar_visible = False
         self.chrome.opacity = 1
         self.chrome.disabled = False
+        self.chrome.absorb_empty = False
         if hasattr(self, "_header_bar"):
             self._header_bar.opacity = 0
             self._header_bar.disabled = True
@@ -5200,6 +5193,7 @@ class RootLayout(FloatLayout):
         self.toolbar_visible = True
         self.chrome.opacity = 1
         self.chrome.disabled = False
+        self.chrome.absorb_empty = True
         if hasattr(self, "_header_bar"):
             self._header_bar.opacity = 1
             self._header_bar.disabled = False
