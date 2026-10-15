@@ -2079,6 +2079,8 @@ class SPenAnnotationCanvas(Widget):
         self._redo_stack: List[List[StrokeRecord]] = []
         self._paste_clock: Any = None
         self._gesture_snapshot = False
+        self._sel_action_rects: Dict[str, Tuple[float, float, float, float]] = {}
+        self._sel_action_keepers: Dict[str, Any] = {}
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -2628,9 +2630,7 @@ class SPenAnnotationCanvas(Widget):
             PopMatrix()
             StencilUnUse()
             StencilPop()
-        layout = getattr(App.get_running_app(), "root_layout", None)
-        if layout is not None and hasattr(layout, "sync_floating_tools"):
-            Clock.schedule_once(lambda _dt: layout.sync_floating_tools(), 0)
+            self._draw_selection_actions()
 
     def _start_view_gesture(self, touch: MotionEvent) -> None:
         app = App.get_running_app()
@@ -2756,6 +2756,11 @@ class SPenAnnotationCanvas(Widget):
         if layout is not None:
             layout.hide_paste_chip()
         tool_mode = str(getattr(app, "tool_mode", "none"))
+        if tool_mode == "lasso":
+            action = self._hit_selection_action(touch.x, touch.y)
+            if action:
+                self._run_selection_action(action)
+                return True
         touch.grab(self)
         app._pointers[touch.uid] = (touch.x, touch.y)
         if tool_mode != "text":
@@ -3532,6 +3537,112 @@ class SPenAnnotationCanvas(Widget):
                     rectangle=(hx - size / 2.5, hy - size / 2.5, size * 0.8, size * 0.8),
                     width=1.2,
                 )
+
+    def _action_caption_texture(self, text: str) -> Optional[Any]:
+        cached = self._sel_action_keepers.get(text)
+        if cached is not None:
+            return cached.texture
+        kwargs: Dict[str, Any] = {
+            "text": ui_text(text),
+            "font_size": int(dp(16)),
+            "color": (1.0, 1.0, 1.0, 1.0),
+            "bold": True,
+            "halign": "center",
+            "valign": "middle",
+        }
+        if _HEBREW_FONT_READY:
+            kwargs["font_name"] = "HebrewFont"
+        elif _LATIN_FONT_READY:
+            kwargs["font_name"] = "LatinFont"
+        label = CoreLabel(**kwargs)
+        label.refresh()
+        self._sel_action_keepers[text] = label
+        return label.texture
+
+    def _draw_action_icon(self, name: str, x: float, y: float, w: float, h: float) -> None:
+        Color(1, 1, 1, 1)
+        if name == "copy":
+            Rectangle(pos=(x + w * 0.12, y + h * 0.28), size=(w * 0.52, h * 0.52))
+            Color(0.22, 0.24, 0.28, 1)
+            Rectangle(pos=(x + w * 0.18, y + h * 0.34), size=(w * 0.40, h * 0.40))
+            Color(1, 1, 1, 1)
+            Rectangle(pos=(x + w * 0.32, y + h * 0.12), size=(w * 0.52, h * 0.52))
+        elif name == "cut":
+            Line(points=[x + w * 0.18, y + h * 0.18, x + w * 0.82, y + h * 0.82], width=2.2)
+            Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.18], width=2.2)
+            Ellipse(pos=(x + w * 0.08, y + h * 0.08), size=(w * 0.28, h * 0.28))
+            Ellipse(pos=(x + w * 0.08, y + h * 0.64), size=(w * 0.28, h * 0.28))
+        else:
+            Rectangle(pos=(x + w * 0.22, y + h * 0.08), size=(w * 0.56, h * 0.58))
+            Rectangle(pos=(x + w * 0.14, y + h * 0.66), size=(w * 0.72, h * 0.12))
+            Rectangle(pos=(x + w * 0.36, y + h * 0.78), size=(w * 0.28, h * 0.16))
+
+    def _draw_selection_actions(self) -> None:
+        self._sel_action_rects = {}
+        if str(getattr(App.get_running_app(), "tool_mode", "")) != "lasso":
+            return
+        box = self._selection_bbox()
+        if box is None:
+            return
+        x, y, w, h = box
+        left, _ = self.from_doc(x, y)
+        right, _ = self.from_doc(x + w, y)
+        _t, top_y = self.from_doc(x, y + h)
+        _b, bot_y = self.from_doc(x, y)
+        btn_w = float(dp(70))
+        btn_h = float(dp(58))
+        gap = float(dp(6))
+        pad = float(dp(6))
+        bar_w = btn_w * 3.0 + gap * 4.0
+        bar_h = btn_h + pad * 2.0
+        bar_x = (left + right) / 2.0 - bar_w / 2.0
+        bar_y = top_y + float(dp(10))
+        if bar_y + bar_h > self.top - dp(4):
+            bar_y = bot_y - bar_h - float(dp(10))
+        bar_x = max(self.x + dp(6), min(bar_x, self.right - bar_w - dp(6)))
+        bar_y = max(self.y + dp(6), min(bar_y, self.top - bar_h - dp(6)))
+        Color(0.10, 0.11, 0.14, 1)
+        Rectangle(pos=(bar_x, bar_y), size=(bar_w, bar_h))
+        Color(1, 1, 1, 1)
+        Line(rectangle=(bar_x, bar_y, bar_w, bar_h), width=1.6)
+        captions = {"copy": "העתק", "cut": "גזור", "trash": "מחק"}
+        cursor = bar_x + gap
+        for name in ("copy", "cut", "trash"):
+            bx, by, bw, bh = cursor, bar_y + pad, btn_w, btn_h
+            self._sel_action_rects[name] = (bx, by, bw, bh)
+            Color(0.20, 0.22, 0.26, 1)
+            Rectangle(pos=(bx, by), size=(bw, bh))
+            icon_h = bh * 0.48
+            self._draw_action_icon(name, bx + bw * 0.18, by + bh * 0.46, bw * 0.64, icon_h)
+            tex = self._action_caption_texture(captions[name])
+            if tex is not None:
+                tw, th = float(tex.size[0]), float(tex.size[1])
+                scale = min(1.0, (bw - dp(8)) / max(1.0, tw), (bh * 0.38) / max(1.0, th))
+                dw, dh = tw * scale, th * scale
+                Color(1, 1, 1, 1)
+                Rectangle(
+                    texture=tex,
+                    pos=(bx + (bw - dw) / 2.0, by + dp(4)),
+                    size=(dw, dh),
+                )
+            cursor += btn_w + gap
+
+    def _hit_selection_action(self, x: float, y: float) -> Optional[str]:
+        pad = float(dp(4))
+        for name, (rx, ry, rw, rh) in self._sel_action_rects.items():
+            if rx - pad <= x <= rx + rw + pad and ry - pad <= y <= ry + rh + pad:
+                return name
+        return None
+
+    def _run_selection_action(self, action: str) -> None:
+        app = App.get_running_app()
+        if action == "copy":
+            app.copy_selection()
+        elif action == "cut":
+            app.cut_selection()
+        elif action == "trash":
+            app.delete_selection()
+
 
 class _HoldButton(FloatLayout):
     """Tap or long-press tile used by the document library."""
@@ -4369,7 +4480,6 @@ class RootLayout(FloatLayout):
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
-        self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
@@ -4411,9 +4521,8 @@ class RootLayout(FloatLayout):
             return
         chip.opacity = 0
         chip.disabled = True
-        chip.pos = (dp(8), -dp(160))
-        if chip.parent is None:
-            self.add_widget(chip)
+        if chip.parent is not None:
+            chip.parent.remove_widget(chip)
 
     def hide_paste_chip(self) -> None:
         self.paste_chip.opacity = 0
@@ -4465,37 +4574,7 @@ class RootLayout(FloatLayout):
         self._raise_overlay(chip)
 
     def sync_floating_tools(self, *_args: Any) -> None:
-        if getattr(self, "_syncing_tools", False):
-            return
-        self._syncing_tools = True
-        try:
-            self._place_lasso_bar()
-        finally:
-            self._syncing_tools = False
-
-    def _place_lasso_bar(self) -> None:
-        app = App.get_running_app()
-        chip = self.copy_chip
-        if not self._editor_active() or str(getattr(app, "tool_mode", "")) != "lasso":
-            self.hide_copy_chip()
-            return
-        canvas = None
-        box = None
-        for candidate in (self.pdf_canvas, self.notes_canvas):
-            if candidate.selected_ids:
-                box = candidate._selection_bbox()
-                if box is not None:
-                    canvas = candidate
-                    break
-        if canvas is None or box is None:
-            self.hide_copy_chip()
-            return
-        chip.size = (dp(228), dp(46))
-        x, y, w, h = box
-        abs_x, abs_y = canvas.from_doc(x + w / 2.0, y + h)
-        local_x = abs_x - float(canvas.x)
-        local_y = abs_y - float(canvas.y)
-        self._place_chip(chip, canvas, local_x, local_y, lift=dp(10))
+        self.hide_copy_chip()
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
