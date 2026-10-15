@@ -1721,44 +1721,43 @@ class FloatingChip(ButtonBehavior, BoxLayout):
 
 
 class SelectionBar(BoxLayout):
-    """Icon-only copy / cut / delete bar above a lasso selection."""
+    """Copy / cut / delete bar with real Hebrew buttons above a lasso selection."""
 
     def __init__(self, **kwargs: Any) -> None:
         kwargs.setdefault("orientation", "horizontal")
         kwargs.setdefault("size_hint", (None, None))
-        kwargs.setdefault("size", (dp(136), dp(44)))
-        kwargs.setdefault("spacing", dp(2))
-        kwargs.setdefault("padding", (dp(4), dp(4)))
+        kwargs.setdefault("size", (dp(228), dp(46)))
+        kwargs.setdefault("spacing", dp(4))
+        kwargs.setdefault("padding", (dp(6), dp(5)))
         super().__init__(**kwargs)
         with self.canvas.before:
-            self._bg = Color(0.12, 0.12, 0.14, 0.96)
-            self._rect = RoundedRectangle(radius=[dp(10)])
-        with self.canvas.after:
-            self._edge_c = Color(1, 1, 1, 0.55)
-            self._edge = Line(width=1.2)
+            self._bg = Color(0.10, 0.11, 0.14, 1)
+            self._rect = Rectangle()
         self.bind(pos=self._sync, size=self._sync)
         app = App.get_running_app()
-        for kind, handler in (
-            ("copy", app.copy_selection),
-            ("cut", app.cut_selection),
-            ("trash", app.delete_selection),
+        for caption, handler in (
+            ("העתק", app.copy_selection),
+            ("גזור", app.cut_selection),
+            ("מחק", app.delete_selection),
         ):
-            self.add_widget(ToolIcon(kind, on_dark=True, size=(dp(40), dp(36)), trigger=handler))
+            button = Button(
+                text=mixed_markup(caption),
+                markup=True,
+                font_size=dp(14),
+                size_hint=(1, 1),
+                background_normal="",
+                background_down="",
+                background_color=(0.22, 0.24, 0.28, 1),
+                color=(1, 1, 1, 1),
+            )
+            button.bind(on_release=handler)
+            apply_hebrew_ui(button)
+            self.add_widget(button)
         Clock.schedule_once(lambda _dt: self._sync(), 0)
 
     def _sync(self, *_args: Any) -> None:
         self._rect.pos = self.pos
         self._rect.size = self.size
-        try:
-            self._edge.rounded_rectangle = (
-                self.x + dp(0.5),
-                self.y + dp(0.5),
-                self.width - dp(1),
-                self.height - dp(1),
-                dp(10),
-            )
-        except Exception:
-            pass
 
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if self.disabled or self.opacity <= 0:
@@ -2080,7 +2079,6 @@ class SPenAnnotationCanvas(Widget):
         self._redo_stack: List[List[StrokeRecord]] = []
         self._paste_clock: Any = None
         self._gesture_snapshot = False
-        self._sel_action_rects: Dict[str, Tuple[float, float, float, float]] = {}
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -2630,7 +2628,9 @@ class SPenAnnotationCanvas(Widget):
             PopMatrix()
             StencilUnUse()
             StencilPop()
-            self._draw_selection_actions()
+        layout = getattr(App.get_running_app(), "root_layout", None)
+        if layout is not None and hasattr(layout, "sync_floating_tools"):
+            Clock.schedule_once(lambda _dt: layout.sync_floating_tools(), 0)
 
     def _start_view_gesture(self, touch: MotionEvent) -> None:
         app = App.get_running_app()
@@ -2756,11 +2756,6 @@ class SPenAnnotationCanvas(Widget):
         if layout is not None:
             layout.hide_paste_chip()
         tool_mode = str(getattr(app, "tool_mode", "none"))
-        if tool_mode == "lasso":
-            action = self._hit_selection_action(touch.x, touch.y)
-            if action:
-                self._run_selection_action(action)
-                return True
         touch.grab(self)
         app._pointers[touch.uid] = (touch.x, touch.y)
         if tool_mode != "text":
@@ -3537,98 +3532,6 @@ class SPenAnnotationCanvas(Widget):
                     rectangle=(hx - size / 2.5, hy - size / 2.5, size * 0.8, size * 0.8),
                     width=1.2,
                 )
-
-    def _selection_action_layout(
-        self,
-    ) -> Optional[Tuple[float, float, float, float, List[Tuple[str, float, float, float, float]]]]:
-        if str(getattr(App.get_running_app(), "tool_mode", "")) != "lasso":
-            return None
-        box = self._selection_bbox()
-        if box is None:
-            return None
-        x, y, w, h = box
-        left, _ = self.from_doc(x, y)
-        right, _ = self.from_doc(x + w, y)
-        _xl, top_y = self.from_doc(x, y + h)
-        _xb, bot_y = self.from_doc(x, y)
-        btn_w = float(dp(62))
-        btn_h = float(dp(36))
-        gap = float(dp(4))
-        pad = float(dp(8))
-        bar_w = btn_w * 3.0 + gap * 4.0
-        bar_h = btn_h + pad * 2.0
-        cx = (left + right) / 2.0
-        bar_x = cx - bar_w / 2.0
-        bar_y = top_y + float(dp(10))
-        if bar_y + bar_h > self.top - dp(4):
-            bar_y = bot_y - bar_h - float(dp(10))
-        bar_x = max(self.x + dp(6), min(bar_x, self.right - bar_w - dp(6)))
-        bar_y = max(self.y + dp(6), min(bar_y, self.top - bar_h - dp(6)))
-        slots: List[Tuple[str, float, float, float, float]] = []
-        cursor = bar_x + gap
-        for name in ("copy", "cut", "trash"):
-            slots.append((name, cursor, bar_y + pad, btn_w, btn_h))
-            cursor += btn_w + gap
-        return bar_x, bar_y, bar_w, bar_h, slots
-
-    def _action_caption_texture(self, text: str) -> Optional[Any]:
-        keepers = getattr(self, "_sel_action_keepers", None)
-        if keepers is None:
-            keepers = {}
-            self._sel_action_keepers = keepers
-        cached = keepers.get(text)
-        if cached is not None:
-            return cached.texture
-        widget = self._make_line_label(text, float(dp(15)), (1.0, 1.0, 1.0, 1.0))
-        keepers[text] = widget
-        return widget.texture
-
-    def _draw_selection_actions(self) -> None:
-        self._sel_action_rects = {}
-        layout = self._selection_action_layout()
-        if layout is None:
-            return
-        bar_x, bar_y, bar_w, bar_h, slots = layout
-        Color(0.10, 0.11, 0.14, 1)
-        Rectangle(pos=(bar_x, bar_y), size=(bar_w, bar_h))
-        Color(0.18, 0.42, 0.86, 1)
-        Rectangle(pos=(bar_x, bar_y), size=(bar_w, dp(3)))
-        Color(1, 1, 1, 0.95)
-        Line(rectangle=(bar_x, bar_y, bar_w, bar_h), width=1.4)
-        captions = {"copy": "העתק", "cut": "גזור", "trash": "מחק"}
-        for name, bx, by, bw, bh in slots:
-            self._sel_action_rects[name] = (bx, by, bw, bh)
-            Color(0.22, 0.24, 0.28, 1)
-            Rectangle(pos=(bx, by), size=(bw, bh))
-            tex = self._action_caption_texture(captions[name])
-            if tex is None:
-                continue
-            tw, th = tex.size
-            scale = min(1.0, (bw - dp(6)) / max(1.0, float(tw)), (bh - dp(6)) / max(1.0, float(th)))
-            dw, dh = float(tw) * scale, float(th) * scale
-            Color(1, 1, 1, 1)
-            Rectangle(
-                texture=tex,
-                pos=(bx + (bw - dw) / 2.0, by + (bh - dh) / 2.0),
-                size=(dw, dh),
-            )
-
-    def _hit_selection_action(self, x: float, y: float) -> Optional[str]:
-        pad = float(dp(4))
-        for name, (rx, ry, rw, rh) in self._sel_action_rects.items():
-            if rx - pad <= x <= rx + rw + pad and ry - pad <= y <= ry + rh + pad:
-                return name
-        return None
-
-    def _run_selection_action(self, action: str) -> None:
-        app = App.get_running_app()
-        if action == "copy":
-            app.copy_selection()
-        elif action == "cut":
-            app.cut_selection()
-        elif action == "trash":
-            app.delete_selection()
-
 
 class _HoldButton(FloatLayout):
     """Tap or long-press tile used by the document library."""
@@ -4466,6 +4369,7 @@ class RootLayout(FloatLayout):
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
+        self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
@@ -4507,8 +4411,9 @@ class RootLayout(FloatLayout):
             return
         chip.opacity = 0
         chip.disabled = True
-        if chip.parent is not None:
-            chip.parent.remove_widget(chip)
+        chip.pos = (dp(8), -dp(160))
+        if chip.parent is None:
+            self.add_widget(chip)
 
     def hide_paste_chip(self) -> None:
         self.paste_chip.opacity = 0
@@ -4560,7 +4465,37 @@ class RootLayout(FloatLayout):
         self._raise_overlay(chip)
 
     def sync_floating_tools(self, *_args: Any) -> None:
-        self.hide_copy_chip()
+        if getattr(self, "_syncing_tools", False):
+            return
+        self._syncing_tools = True
+        try:
+            self._place_lasso_bar()
+        finally:
+            self._syncing_tools = False
+
+    def _place_lasso_bar(self) -> None:
+        app = App.get_running_app()
+        chip = self.copy_chip
+        if not self._editor_active() or str(getattr(app, "tool_mode", "")) != "lasso":
+            self.hide_copy_chip()
+            return
+        canvas = None
+        box = None
+        for candidate in (self.pdf_canvas, self.notes_canvas):
+            if candidate.selected_ids:
+                box = candidate._selection_bbox()
+                if box is not None:
+                    canvas = candidate
+                    break
+        if canvas is None or box is None:
+            self.hide_copy_chip()
+            return
+        chip.size = (dp(228), dp(46))
+        x, y, w, h = box
+        abs_x, abs_y = canvas.from_doc(x + w / 2.0, y + h)
+        local_x = abs_x - float(canvas.x)
+        local_y = abs_y - float(canvas.y)
+        self._place_chip(chip, canvas, local_x, local_y, lift=dp(10))
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
