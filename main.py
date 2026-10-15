@@ -4363,6 +4363,7 @@ class RootLayout(FloatLayout):
         self.shape_bar.disabled = True
         self.chrome.add_widget(self.shape_bar)
         self.lasso_bar = self._build_lasso_action_bar()
+        self.chrome.add_widget(self.lasso_bar)
         self.copy_chip = SelectionBar()
         self.paste_chip = self._build_paste_chip()
         self._paste_target: Optional[Tuple[Any, float, float]] = None
@@ -4372,7 +4373,6 @@ class RootLayout(FloatLayout):
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
-        self.add_widget(self.lasso_bar)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
         self.add_widget(self.paste_chip)
@@ -4497,30 +4497,23 @@ class RootLayout(FloatLayout):
         return self._has_lasso_selection() or self._clipboard_ready()
 
     def _lasso_bar_height(self) -> float:
-        return 0.0
+        if not self._action_bar_open():
+            return 0.0
+        return dp(36) * layout_scale()
 
     def _place_action_bar(self) -> None:
-        bar = getattr(self, "lasso_bar", None)
-        row = getattr(self, "lasso_row", None)
-        if bar is None or row is None:
-            return
+        self._action_bar_spec_cache = None
         self._refresh_action_row()
         show = self._action_bar_open()
-        bar.size_hint = (None, None)
-        bar.pos_hint = {}
-        if not show:
-            bar.opacity = 0
-            bar.disabled = True
-            bar.size = (dp(4), dp(4))
-            bar.pos = (dp(8), -dp(80))
+        bar = getattr(self, "lasso_bar", None)
+        if bar is None:
             return
-        bar.size = (float(row.width), float(row.height))
-        bar.center_x = float(self.x) + float(self.width) / 2.0
-        bar.top = min(float(self.chrome.y) - dp(4), float(self.height) - dp(4))
-        bar.opacity = 1
-        bar.disabled = False
-        if bar.parent is None:
-            self.add_widget(bar)
+        scale = layout_scale()
+        bar.size_hint_x = 1
+        bar.size_hint_y = None
+        bar.height = dp(36) * scale if show else 0
+        bar.opacity = 1 if show else 0
+        bar.disabled = not show
 
     def note_paste_point(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         self._paste_target = (canvas, x, y)
@@ -4580,6 +4573,7 @@ class RootLayout(FloatLayout):
             prev = float(self.chrome.height)
             self._apply_chrome_metrics()
             self._place_action_bar()
+            self.chrome.height = self._chrome_height()
             if abs(float(self.chrome.height) - prev) > 0.5:
                 self._fit_workspace()
         finally:
@@ -5191,6 +5185,12 @@ class RootLayout(FloatLayout):
             self.restore_btn.font_size = dp(13) * scale
             self.restore_btn.size = (dp(72) * scale, dp(32) * scale)
             self.restore_btn.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+        show_actions = self._action_bar_open()
+        if hasattr(self, "lasso_bar"):
+            self.lasso_bar.height = dp(36) * scale if show_actions else 0
+            self.lasso_bar.opacity = 1 if show_actions else 0
+            self.lasso_bar.disabled = not show_actions
+        self._action_bar_spec_cache = None
         self._refresh_action_row()
         if hasattr(self, "_slider_title_label"):
             self._slider_title_label.font_size = dp(13) * scale
