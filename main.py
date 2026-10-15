@@ -4296,15 +4296,23 @@ class RootLayout(FloatLayout):
         self.page_scroll = PageScrollRail(width=dp(32))
         self._scroll_syncing = False
         self.page_scroll.bind(value=self._on_page_scroll)
+        self.restore_fab = ToolIcon(
+            "restore",
+            on_dark=True,
+            size=tool_icon_size(),
+            trigger=self.show_toolbar,
+        )
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
         self.add_widget(self.copy_chip)
         self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
+        self.add_widget(self.restore_fab)
         self.hide_copy_chip()
         self.hide_paste_chip()
         self.hide_text_overlay()
+        self._place_restore_fab()
         self.refresh_tool_styles()
         app = App.get_running_app()
 
@@ -4331,6 +4339,7 @@ class RootLayout(FloatLayout):
         self.workspace.pos = (float(self.x), float(self.y))
         self.dock_notes()
         self._place_page_scroll()
+        self._place_restore_fab()
         self.sync_floating_tools()
 
     def hide_copy_chip(self) -> None:
@@ -4343,6 +4352,27 @@ class RootLayout(FloatLayout):
         self.paste_chip.disabled = True
         self.paste_chip.pos = (-2000.0, -2000.0)
         self._paste_target = None
+
+    def _raise_overlay(self, widget: Widget) -> None:
+        if widget.parent is self:
+            self.remove_widget(widget)
+            self.add_widget(widget)
+
+    def _place_restore_fab(self, *_args: Any) -> None:
+        fab = getattr(self, "restore_fab", None)
+        if fab is None:
+            return
+        if self.toolbar_visible:
+            fab.opacity = 0
+            fab.disabled = True
+            fab.pos = (-2000.0, -2000.0)
+            return
+        fab.size = tool_icon_size()
+        fab.center_x = float(self.center_x)
+        fab.top = float(self.top) - dp(8)
+        fab.opacity = 1
+        fab.disabled = False
+        self._raise_overlay(fab)
 
     def _place_chip(
         self,
@@ -4360,12 +4390,19 @@ class RootLayout(FloatLayout):
             self.width - chip.width / 2.0 - dp(8),
         )
         chip.y = local_y + lift
-        if self.toolbar_visible and chip.top > self.chrome.y - dp(4):
-            chip.y = self.chrome.y - chip.height - dp(6)
-        if chip.y < dp(8):
-            chip.y = dp(8)
+        work_top = float(self.workspace.top) if self.workspace.height else float(self.height)
+        work_bot = float(self.workspace.y)
+        if self.toolbar_visible:
+            work_top = min(work_top, float(self.chrome.y) - dp(4))
+        fab = getattr(self, "restore_fab", None)
+        if fab is not None and fab.opacity > 0:
+            work_top = min(work_top, float(fab.y) - dp(6))
+        chip.y = min(chip.y, work_top - chip.height - dp(8))
+        if chip.y < work_bot + dp(8):
+            chip.y = max(work_bot + dp(8), work_top - chip.height - dp(8))
         chip.opacity = 1
         chip.disabled = False
+        self._raise_overlay(chip)
 
     def sync_floating_tools(self, *_args: Any) -> None:
         app = App.get_running_app()
@@ -4383,8 +4420,8 @@ class RootLayout(FloatLayout):
         if canvas is None or box is None:
             self.hide_copy_chip()
             return
-        sx, sy = canvas.from_doc(box[0] + box[2], box[1] + box[3])
-        self._place_chip(self.copy_chip, canvas, sx, sy, lift=dp(72), side=dp(44))
+        sx, sy = canvas.from_doc(box[0] + box[2] / 2.0, box[1] + box[3])
+        self._place_chip(self.copy_chip, canvas, sx, sy, lift=dp(56), side=0.0)
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
@@ -4731,9 +4768,6 @@ class RootLayout(FloatLayout):
         palette_btn = ToolIcon("palette", on_dark=True, size=tool_icon_size(), trigger=app.open_color_picker)
         row.add_widget(palette_btn)
         self.tool_buttons["palette"] = palette_btn
-        hide_btn = ToolIcon("hide", on_dark=True, size=tool_icon_size(), trigger=self.hide_toolbar)
-        row.add_widget(hide_btn)
-        self.tool_buttons["hide"] = hide_btn
         scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
         scroller.add_widget(row)
         host.add_widget(scroller)
@@ -4760,6 +4794,9 @@ class RootLayout(FloatLayout):
             self._slider_glyphs[kind] = glyph
             glyphs.add_widget(glyph)
         host.add_widget(glyphs)
+        hide_btn = ToolIcon("hide", on_dark=True, size=tool_icon_size(), trigger=self.hide_toolbar)
+        host.add_widget(hide_btn)
+        self.tool_buttons["hide"] = hide_btn
         self._toolbar_row = row
         self._toolbar_host = host
         return host
@@ -4938,7 +4975,7 @@ class RootLayout(FloatLayout):
     def _chrome_height(self) -> float:
         scale = layout_scale()
         if not getattr(self, "toolbar_visible", True):
-            return dp(36) * scale
+            return 0.0
         extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
         editor = dp(44) * scale if getattr(self, "_slider_open", None) else 0.0
         return (dp(44) + dp(52)) * scale + extra + editor
@@ -4987,6 +5024,7 @@ class RootLayout(FloatLayout):
         if hasattr(self, "status_label"):
             self.status_label.font_size = dp(12) * scale
         self.chrome.height = self._chrome_height()
+        self._place_restore_fab()
 
     def set_shapes_open(self, open_menu: bool) -> None:
         self._shapes_open = bool(open_menu)
