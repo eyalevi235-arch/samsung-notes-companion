@@ -2757,12 +2757,10 @@ class SPenAnnotationCanvas(Widget):
             return True
         layout = getattr(app, "root_layout", None)
         if layout is not None:
-            layout.hide_paste_chip()
+            layout.note_paste_point(self, touch.x, touch.y)
         tool_mode = str(getattr(app, "tool_mode", "none"))
         touch.grab(self)
         app._pointers[touch.uid] = (touch.x, touch.y)
-        if tool_mode != "text":
-            self._arm_paste_hold(touch)
         if len(app._pointers) >= 2:
             self._begin_two_finger_view(touch)
             return True
@@ -4365,7 +4363,6 @@ class RootLayout(FloatLayout):
         self.shape_bar.disabled = True
         self.chrome.add_widget(self.shape_bar)
         self.lasso_bar = self._build_lasso_action_bar()
-        self.chrome.add_widget(self.lasso_bar)
         self.copy_chip = SelectionBar()
         self.paste_chip = self._build_paste_chip()
         self._paste_target: Optional[Tuple[Any, float, float]] = None
@@ -4375,6 +4372,7 @@ class RootLayout(FloatLayout):
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
+        self.add_widget(self.lasso_bar)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
         self.add_widget(self.paste_chip)
@@ -4421,13 +4419,15 @@ class RootLayout(FloatLayout):
             chip.parent.remove_widget(chip)
 
     def hide_paste_chip(self) -> None:
-        self.paste_chip.opacity = 0
-        self.paste_chip.disabled = True
-        self.paste_chip.pos_hint = {}
-        self.paste_chip.pos = (dp(8), -dp(160))
-        self._paste_target = None
-        if self.paste_chip.parent is None:
-            self.add_widget(self.paste_chip)
+        chip = getattr(self, "paste_chip", None)
+        if chip is None:
+            return
+        chip.opacity = 0
+        chip.disabled = True
+        chip.pos_hint = {}
+        chip.pos = (dp(8), -dp(160))
+        if chip.parent is None:
+            self.add_widget(chip)
 
     def _editor_active(self) -> bool:
         app = App.get_running_app()
@@ -4490,10 +4490,85 @@ class RootLayout(FloatLayout):
                 return True
         return False
 
+    def _clipboard_ready(self) -> bool:
+        return bool(getattr(App.get_running_app(), "_clipboard", None))
+
+    def _action_bar_open(self) -> bool:
+        return self._has_lasso_selection() or self._clipboard_ready()
+
     def _lasso_bar_height(self) -> float:
-        if not self._has_lasso_selection():
-            return 0.0
-        return dp(44) * layout_scale()
+        return 0.0
+
+    def _place_action_bar(self) -> None:
+        bar = getattr(self, "lasso_bar", None)
+        row = getattr(self, "lasso_row", None)
+        if bar is None or row is None:
+            return
+        self._refresh_action_row()
+        show = self._action_bar_open()
+        bar.size_hint = (None, None)
+        bar.pos_hint = {}
+        if not show:
+            bar.opacity = 0
+            bar.disabled = True
+            bar.size = (dp(4), dp(4))
+            bar.pos = (dp(8), -dp(80))
+            return
+        bar.size = (float(row.width), float(row.height))
+        bar.center_x = float(self.x) + float(self.width) / 2.0
+        bar.top = min(float(self.chrome.y) - dp(4), float(self.height) - dp(4))
+        bar.opacity = 1
+        bar.disabled = False
+        if bar.parent is None:
+            self.add_widget(bar)
+
+    def note_paste_point(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
+        self._paste_target = (canvas, x, y)
+
+    def _chrome_mini_button(self, caption: str, handler: Any) -> Button:
+        scale = layout_scale()
+        button = Button(
+            text=mixed_markup(caption),
+            markup=True,
+            font_size=dp(13) * scale,
+            size_hint=(None, None),
+            size=(dp(68) * scale, dp(30) * scale),
+            background_normal="",
+            background_down="",
+            background_color=(0.18, 0.42, 0.86, 1),
+            color=(1, 1, 1, 1),
+        )
+        button.bind(on_release=handler)
+        apply_hebrew_ui(button)
+        return button
+
+    def _refresh_action_row(self) -> None:
+        row = getattr(self, "lasso_row", None)
+        if row is None:
+            return
+        show_sel = self._has_lasso_selection()
+        show_paste = self._clipboard_ready()
+        spec = (show_sel, show_paste)
+        scale = layout_scale()
+        if spec != getattr(self, "_action_bar_spec_cache", None):
+            self._action_bar_spec_cache = spec
+            row.clear_widgets()
+            app = App.get_running_app()
+            if show_sel:
+                row.add_widget(self._chrome_mini_button("העתק", app.copy_selection))
+                row.add_widget(self._chrome_mini_button("גזור", app.cut_selection))
+                row.add_widget(self._chrome_mini_button("מחק", app.delete_selection))
+            if show_paste:
+                row.add_widget(self._chrome_mini_button("הדבק", self._on_chrome_paste))
+        count = len(row.children)
+        gap = dp(6) * scale
+        btn_w = dp(68) * scale
+        btn_h = dp(30) * scale
+        pad = dp(4) * scale
+        row.size = (max(btn_w, count * btn_w + max(0, count - 1) * gap) + pad * 2, btn_h + pad * 2)
+        row.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+        for child in row.children:
+            child.size = (btn_w, btn_h)
 
     def sync_floating_tools(self, *_args: Any) -> None:
         if getattr(self, "_syncing_tools", False):
@@ -4501,8 +4576,10 @@ class RootLayout(FloatLayout):
         self._syncing_tools = True
         try:
             self.hide_copy_chip()
+            self.hide_paste_chip()
             prev = float(self.chrome.height)
             self._apply_chrome_metrics()
+            self._place_action_bar()
             if abs(float(self.chrome.height) - prev) > 0.5:
                 self._fit_workspace()
         finally:
@@ -4537,7 +4614,14 @@ class RootLayout(FloatLayout):
         App.get_running_app().copy_selection()
 
     def _on_paste_chip(self, *_args: Any) -> None:
-        App.get_running_app().paste_at_chip()
+        self._on_chrome_paste()
+
+    def _on_chrome_paste(self, *_args: Any) -> None:
+        app = App.get_running_app()
+        if getattr(self, "_paste_target", None):
+            app.paste_at_chip()
+        else:
+            app.paste_selection()
         self.hide_paste_chip()
 
     def _build_text_overlay(self) -> AbsorbLayout:
@@ -5034,44 +5118,19 @@ class RootLayout(FloatLayout):
 
     def _build_lasso_action_bar(self) -> FloatLayout:
         host = FloatLayout(size_hint_y=None, height=0)
-        app = App.get_running_app()
         row = BoxLayout(
             orientation="horizontal",
             size_hint=(None, None),
-            size=(dp(252), dp(36)),
+            size=(dp(68), dp(30)),
             pos_hint={"center_x": 0.5, "center_y": 0.5},
             spacing=dp(6),
             padding=(dp(4), dp(2)),
         )
-        with row.canvas.before:
-            Color(0.10, 0.11, 0.14, 1)
-            self._lasso_row_bg = Rectangle()
-        row.bind(
-            pos=lambda *_a: setattr(self._lasso_row_bg, "pos", row.pos),
-            size=lambda *_a: setattr(self._lasso_row_bg, "size", row.size),
-        )
-        for caption, handler in (
-            ("העתק", app.copy_selection),
-            ("גזור", app.cut_selection),
-            ("מחק", app.delete_selection),
-        ):
-            button = Button(
-                text=mixed_markup(caption),
-                markup=True,
-                font_size=dp(14),
-                size_hint=(1, 1),
-                background_normal="",
-                background_down="",
-                background_color=(0.18, 0.42, 0.86, 1),
-                color=(1, 1, 1, 1),
-            )
-            button.bind(on_release=handler)
-            apply_hebrew_ui(button)
-            row.add_widget(button)
         host.add_widget(row)
         host.opacity = 0
         host.disabled = True
         self.lasso_row = row
+        self._action_bar_spec_cache = None
         return host
 
     def toggle_slider_editor(self, kind: str, *_args: Any) -> None:
@@ -5132,15 +5191,7 @@ class RootLayout(FloatLayout):
             self.restore_btn.font_size = dp(13) * scale
             self.restore_btn.size = (dp(72) * scale, dp(32) * scale)
             self.restore_btn.pos_hint = {"center_x": 0.5, "center_y": 0.5}
-        show_lasso = self._has_lasso_selection()
-        lasso_h = dp(44) * scale if show_lasso else 0
-        if hasattr(self, "lasso_bar"):
-            self.lasso_bar.height = lasso_h
-            self.lasso_bar.opacity = 1 if show_lasso else 0
-            self.lasso_bar.disabled = not show_lasso
-        if hasattr(self, "lasso_row"):
-            self.lasso_row.size = (dp(252) * scale, dp(36) * scale)
-            self.lasso_row.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+        self._refresh_action_row()
         if hasattr(self, "_slider_title_label"):
             self._slider_title_label.font_size = dp(13) * scale
             self._slider_title_label.width = dp(64) * scale
@@ -9525,6 +9576,7 @@ class SamsungNotesCompanionApp(App):
             self._notify("אין בחירה להעתקה")
             return
         self._clipboard = payload
+        self.root_layout.sync_floating_tools()
         self._notify("הועתק")
 
     def cut_selection(self, *_args: Any) -> None:
@@ -9538,6 +9590,7 @@ class SamsungNotesCompanionApp(App):
             self._notify("אין בחירה לגזירה")
             return
         self._clipboard = payload
+        self.root_layout.sync_floating_tools()
         for canvas in (self.root_layout.pdf_canvas, self.root_layout.notes_canvas):
             if canvas.selected_ids and canvas.delete_selected():
                 self._history_role = canvas.view_role
