@@ -2070,6 +2070,7 @@ class SPenAnnotationCanvas(Widget):
         self._redo_stack: List[List[StrokeRecord]] = []
         self._paste_clock: Any = None
         self._gesture_snapshot = False
+        self._sel_action_rects: Dict[str, Tuple[float, float, float, float]] = {}
         with self.canvas.before:
             Color(*LETTERBOX)
             self._bg_rect = Rectangle(pos=self.pos, size=self.size)
@@ -2619,9 +2620,7 @@ class SPenAnnotationCanvas(Widget):
             PopMatrix()
             StencilUnUse()
             StencilPop()
-        layout = getattr(App.get_running_app(), "root_layout", None)
-        if layout is not None and hasattr(layout, "sync_floating_tools"):
-            Clock.schedule_once(lambda _dt: layout.sync_floating_tools(), 0)
+            self._draw_selection_actions()
 
     def _start_view_gesture(self, touch: MotionEvent) -> None:
         app = App.get_running_app()
@@ -2743,12 +2742,17 @@ class SPenAnnotationCanvas(Widget):
             factor = 1.12 if touch.button == "scrollup" else 0.89
             self._set_scale(self._scale_value() * factor)
             return True
-        touch.grab(self)
-        app._pointers[touch.uid] = (touch.x, touch.y)
         layout = getattr(app, "root_layout", None)
         if layout is not None:
             layout.hide_paste_chip()
         tool_mode = str(getattr(app, "tool_mode", "none"))
+        if tool_mode == "lasso":
+            action = self._hit_selection_action(touch.x, touch.y)
+            if action:
+                self._run_selection_action(action)
+                return True
+        touch.grab(self)
+        app._pointers[touch.uid] = (touch.x, touch.y)
         if tool_mode != "text":
             self._arm_paste_hold(touch)
         if len(app._pointers) >= 2:
@@ -3523,6 +3527,103 @@ class SPenAnnotationCanvas(Widget):
                     rectangle=(hx - size / 2.5, hy - size / 2.5, size * 0.8, size * 0.8),
                     width=1.2,
                 )
+
+    def _selection_action_layout(
+        self,
+    ) -> Optional[Tuple[float, float, float, float, List[Tuple[str, float, float, float, float]]]]:
+        if str(getattr(App.get_running_app(), "tool_mode", "")) != "lasso":
+            return None
+        box = self._selection_bbox()
+        if box is None:
+            return None
+        x, y, w, h = box
+        left, _ = self.from_doc(x, y)
+        right, _ = self.from_doc(x + w, y)
+        _xl, top_y = self.from_doc(x, y + h)
+        _xb, bot_y = self.from_doc(x, y)
+        btn_w = float(dp(44))
+        btn_h = float(dp(40))
+        gap = float(dp(6))
+        pad = float(dp(6))
+        bar_w = btn_w * 3.0 + gap * 4.0
+        bar_h = btn_h + pad * 2.0
+        cx = (left + right) / 2.0
+        bar_x = cx - bar_w / 2.0
+        bar_y = top_y + float(dp(10))
+        if bar_y + bar_h > self.top - dp(4):
+            bar_y = bot_y - bar_h - float(dp(10))
+        bar_x = max(self.x + dp(6), min(bar_x, self.right - bar_w - dp(6)))
+        bar_y = max(self.y + dp(6), min(bar_y, self.top - bar_h - dp(6)))
+        slots: List[Tuple[str, float, float, float, float]] = []
+        cursor = bar_x + gap
+        for name in ("copy", "cut", "trash"):
+            slots.append((name, cursor, bar_y + pad, btn_w, btn_h))
+            cursor += btn_w + gap
+        return bar_x, bar_y, bar_w, bar_h, slots
+
+    def _draw_selection_actions(self) -> None:
+        self._sel_action_rects = {}
+        layout = self._selection_action_layout()
+        if layout is None:
+            return
+        bar_x, bar_y, bar_w, bar_h, slots = layout
+        Color(0.12, 0.12, 0.14, 0.96)
+        RoundedRectangle(pos=(bar_x, bar_y), size=(bar_w, bar_h), radius=[dp(10)])
+        Color(1, 1, 1, 0.55)
+        edge = Line(width=1.2)
+        try:
+            edge.rounded_rectangle = (
+                bar_x + dp(0.5),
+                bar_y + dp(0.5),
+                bar_w - dp(1),
+                bar_h - dp(1),
+                dp(10),
+            )
+        except Exception:
+            edge.rectangle = (bar_x, bar_y, bar_w, bar_h)
+        ink = (1.0, 1.0, 1.0, 1.0)
+        for name, bx, by, bw, bh in slots:
+            self._sel_action_rects[name] = (bx, by, bw, bh)
+            Color(*ink)
+            pad = dp(8)
+            x, y = bx + pad, by + pad
+            w, h = bw - 2 * pad, bh - 2 * pad
+            cx, cy = bx + bw / 2.0, by + bh / 2.0
+            if name == "copy":
+                Color(1, 1, 1, 0.16)
+                RoundedRectangle(pos=(x + w * 0.3, y + h * 0.08), size=(w * 0.58, h * 0.62), radius=[dp(2)])
+                Color(*ink)
+                Line(rectangle=(x + w * 0.08, y + h * 0.24, w * 0.54, h * 0.6), width=1.2)
+                Line(rectangle=(x + w * 0.3, y + h * 0.08, w * 0.58, h * 0.62), width=1.25)
+            elif name == "cut":
+                Line(points=[x + w * 0.18, y + h * 0.18, x + w * 0.82, y + h * 0.82], width=1.35)
+                Line(points=[x + w * 0.18, y + h * 0.82, x + w * 0.82, y + h * 0.18], width=1.35)
+                Line(circle=(x + w * 0.22, y + h * 0.22, min(w, h) * 0.13), width=1.2)
+                Line(circle=(x + w * 0.22, y + h * 0.78, min(w, h) * 0.13), width=1.2)
+            else:
+                Color(1, 1, 1, 0.16)
+                RoundedRectangle(pos=(x + w * 0.22, y + h * 0.1), size=(w * 0.56, h * 0.58), radius=[dp(2)])
+                Color(*ink)
+                Line(rectangle=(x + w * 0.22, y + h * 0.1, w * 0.56, h * 0.58), width=1.2)
+                Line(points=[x + w * 0.16, y + h * 0.72, x + w * 0.84, y + h * 0.72], width=1.4)
+                Line(rectangle=(x + w * 0.38, y + h * 0.78, w * 0.24, h * 0.14), width=1.15)
+                Line(points=[cx, y + h * 0.58, cx, y + h * 0.22], width=1.05)
+
+    def _hit_selection_action(self, x: float, y: float) -> Optional[str]:
+        pad = float(dp(4))
+        for name, (rx, ry, rw, rh) in self._sel_action_rects.items():
+            if rx - pad <= x <= rx + rw + pad and ry - pad <= y <= ry + rh + pad:
+                return name
+        return None
+
+    def _run_selection_action(self, action: str) -> None:
+        app = App.get_running_app()
+        if action == "copy":
+            app.copy_selection()
+        elif action == "cut":
+            app.cut_selection()
+        elif action == "trash":
+            app.delete_selection()
 
 
 class _HoldButton(FloatLayout):
@@ -4359,27 +4460,15 @@ class RootLayout(FloatLayout):
         self.page_scroll = PageScrollRail(width=dp(32))
         self._scroll_syncing = False
         self.page_scroll.bind(value=self._on_page_scroll)
-        self.restore_fab = Button(
-            text=mixed_markup("כלים"),
-            markup=True,
-            font_size=dp(13),
-            size_hint=(None, None),
-            size=(dp(72), dp(32)),
-            background_normal="",
-            background_down="",
-            background_color=(0.18, 0.42, 0.86, 0.96),
-            color=(1, 1, 1, 1),
-        )
-        self.restore_fab.bind(on_release=self.show_toolbar)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
+        self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
-        Window.bind(size=lambda *_a: (self._place_restore_fab(), self.sync_floating_tools()))
+        Window.bind(size=lambda *_a: self.sync_floating_tools())
         self.hide_copy_chip()
         self.hide_paste_chip()
         self.hide_text_overlay()
-        self._place_restore_fab()
         self.refresh_tool_styles()
         app = App.get_running_app()
 
@@ -4406,66 +4495,39 @@ class RootLayout(FloatLayout):
         self.workspace.pos = (float(self.x), float(self.y))
         self.dock_notes()
         self._place_page_scroll()
-        self._place_restore_fab()
         self.sync_floating_tools()
 
     def hide_copy_chip(self) -> None:
-        self._hide_window_overlay(self.copy_chip)
+        chip = getattr(self, "copy_chip", None)
+        if chip is None:
+            return
+        chip.opacity = 0
+        chip.disabled = True
+        if chip.parent is not None:
+            chip.parent.remove_widget(chip)
 
     def hide_paste_chip(self) -> None:
-        self._hide_window_overlay(self.paste_chip)
+        self.paste_chip.opacity = 0
+        self.paste_chip.disabled = True
+        self.paste_chip.pos = (dp(8), -dp(80))
         self._paste_target = None
+        if self.paste_chip.parent is None:
+            self.add_widget(self.paste_chip)
 
     def _editor_active(self) -> bool:
         app = App.get_running_app()
         manager = getattr(app, "_sm", None)
         return manager is not None and str(manager.current) == "editor"
 
-    def _dock_window_overlay(self, widget: Widget, center_x: float, top: float) -> None:
-        widget.size_hint = (None, None)
-        widget.pos_hint = {}
-        if widget.parent is not None and widget.parent is not Window:
-            widget.parent.remove_widget(widget)
-        if widget.parent is None:
-            Window.add_widget(widget)
-        widget.center_x = float(center_x)
-        widget.top = float(top)
-        widget.opacity = 1
-        widget.disabled = False
-
-    def _hide_window_overlay(self, widget: Widget) -> None:
-        widget.opacity = 0
-        widget.disabled = True
-        widget.pos_hint = {}
-        widget.pos = (dp(8), float(Window.height) + dp(80))
-        if widget.parent is not None and widget.parent is not Window:
-            widget.parent.remove_widget(widget)
-        if widget.parent is None:
-            Window.add_widget(widget)
-
     def hide_window_overlays(self) -> None:
         self.hide_copy_chip()
         self.hide_paste_chip()
-        fab = getattr(self, "restore_fab", None)
-        if fab is not None:
-            self._hide_window_overlay(fab)
 
     def _raise_overlay(self, widget: Widget) -> None:
         parent = widget.parent
         if parent is not None:
             parent.remove_widget(widget)
             parent.add_widget(widget)
-
-    def _place_restore_fab(self, *_args: Any) -> None:
-        fab = getattr(self, "restore_fab", None)
-        if fab is None:
-            return
-        if self.toolbar_visible or not self._editor_active():
-            self._hide_window_overlay(fab)
-            return
-        fab.size = (dp(72), dp(32))
-        fab.font_size = dp(13)
-        self._dock_window_overlay(fab, float(Window.width) / 2.0, float(Window.height) - dp(10))
 
     def _place_chip(
         self,
@@ -4485,11 +4547,7 @@ class RootLayout(FloatLayout):
         chip.y = local_y + lift
         work_top = float(self.workspace.top) if self.workspace.height else float(self.height)
         work_bot = float(self.workspace.y)
-        if self.toolbar_visible:
-            work_top = min(work_top, float(self.chrome.y) - dp(4))
-        fab = getattr(self, "restore_fab", None)
-        if fab is not None and fab.opacity > 0:
-            work_top = min(work_top, float(fab.y) - dp(6))
+        work_top = min(work_top, float(self.chrome.y) - dp(4))
         chip.y = min(chip.y, work_top - chip.height - dp(8))
         if chip.y < work_bot + dp(8):
             chip.y = max(work_bot + dp(8), work_top - chip.height - dp(8))
@@ -4498,39 +4556,17 @@ class RootLayout(FloatLayout):
         self._raise_overlay(chip)
 
     def sync_floating_tools(self, *_args: Any) -> None:
-        app = App.get_running_app()
-        if not self._editor_active() or str(getattr(app, "tool_mode", "")) != "lasso":
-            self.hide_copy_chip()
-            return
-        canvas = None
-        box = None
-        for candidate in (self.pdf_canvas, self.notes_canvas):
-            if candidate.selected_ids:
-                box = candidate._selection_bbox()
-                if box is not None:
-                    canvas = candidate
-                    break
-        if canvas is None or box is None:
-            self.hide_copy_chip()
-            return
-        chip = self.copy_chip
-        chip.size = (dp(148), dp(48))
-        top = float(Window.height) - dp(12)
-        if self.toolbar_visible:
-            win_x, win_y = self.chrome.to_window(self.chrome.x, self.chrome.y)
-            top = min(top, float(win_y) - dp(8))
-        elif getattr(self, "restore_fab", None) is not None and self.restore_fab.opacity > 0:
-            top = min(top, float(self.restore_fab.y) - dp(8))
-        self._dock_window_overlay(chip, float(Window.width) / 2.0, top)
+        self.hide_copy_chip()
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
         if not getattr(app, "_clipboard", None):
             return
         self._paste_target = (canvas, x, y)
-        win_x, win_y = canvas.to_window(x, y)
         self.paste_chip.size = (dp(48), dp(44))
-        self._dock_window_overlay(self.paste_chip, float(win_x), float(win_y) + dp(52))
+        if self.paste_chip.parent is None:
+            self.add_widget(self.paste_chip)
+        self._place_chip(self.paste_chip, canvas, x, y, lift=dp(52))
 
     def _on_copy_chip(self, *_args: Any) -> None:
         App.get_running_app().copy_selection()
@@ -5018,7 +5054,7 @@ class RootLayout(FloatLayout):
             spacing=dp(6),
         )
         with bar.canvas.before:
-            Color(0.12, 0.12, 0.14, 0.0)
+            Color(0.12, 0.12, 0.14, 0.96)
             self._restore_bg = Rectangle()
         bar.bind(
             pos=lambda *_args: setattr(self._restore_bg, "pos", bar.pos),
@@ -5027,12 +5063,12 @@ class RootLayout(FloatLayout):
         button = Button(
             text=mixed_markup("כלים"),
             markup=True,
-            font_size=dp(12) * layout_scale(),
+            font_size=dp(13) * layout_scale(),
             size_hint=(None, None),
-            size=(dp(72), dp(28)),
+            size=(dp(84), dp(30)),
             background_normal="",
             background_down="",
-            background_color=(0.22, 0.24, 0.28, 0.92),
+            background_color=(0.18, 0.42, 0.86, 0.96),
             color=(1, 1, 1, 1),
         )
         button.bind(on_release=self.show_toolbar)
@@ -5074,7 +5110,7 @@ class RootLayout(FloatLayout):
     def _chrome_height(self) -> float:
         scale = layout_scale()
         if not getattr(self, "toolbar_visible", True):
-            return 0.0
+            return dp(40) * scale
         extra = dp(SHAPE_BAR_DP) * scale if getattr(self, "_shapes_open", False) else 0.0
         editor = dp(44) * scale if getattr(self, "_slider_open", None) else 0.0
         return (dp(44) + dp(52)) * scale + extra + editor
@@ -5095,12 +5131,12 @@ class RootLayout(FloatLayout):
             self._slider_editor.opacity = 1 if open_slider else 0
             self._slider_editor.disabled = not open_slider
         if hasattr(self, "restore_bar"):
-            self.restore_bar.height = dp(36) * scale if not self.toolbar_visible else 0
+            self.restore_bar.height = dp(40) * scale if not self.toolbar_visible else 0
             self.restore_bar.opacity = 1 if not self.toolbar_visible else 0
             self.restore_bar.disabled = bool(self.toolbar_visible)
         if hasattr(self, "restore_btn"):
-            self.restore_btn.font_size = dp(12) * scale
-            self.restore_btn.size = (dp(72) * scale, dp(28) * scale)
+            self.restore_btn.font_size = dp(13) * scale
+            self.restore_btn.size = (dp(84) * scale, dp(30) * scale)
         if hasattr(self, "_slider_title_label"):
             self._slider_title_label.font_size = dp(13) * scale
             self._slider_title_label.width = dp(64) * scale
@@ -5128,7 +5164,6 @@ class RootLayout(FloatLayout):
         if hasattr(self, "status_label"):
             self.status_label.font_size = dp(12) * scale
         self.chrome.height = self._chrome_height()
-        self._place_restore_fab()
 
     def set_shapes_open(self, open_menu: bool) -> None:
         self._shapes_open = bool(open_menu)
@@ -5159,7 +5194,6 @@ class RootLayout(FloatLayout):
             self._toolbar_host.height = 0
         self._apply_chrome_metrics()
         self._fit_workspace()
-        Clock.schedule_once(lambda _dt: self._place_restore_fab(), 0)
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
     def show_toolbar(self, *_args: Any) -> None:
@@ -5214,7 +5248,6 @@ class RootLayout(FloatLayout):
         self._apply_chrome_metrics()
         self._fit_workspace()
         self.sync_floating_tools()
-        self._place_restore_fab()
 
     def dock_notes(self) -> None:
         work_x, work_y = float(self.workspace.x), float(self.workspace.y)
@@ -5552,8 +5585,6 @@ class SamsungNotesCompanionApp(App):
     def show_editor(self, *_args: Any) -> None:
         self._sm.current = "editor"
         Clock.schedule_once(lambda _dt: self.clamp_view(), 0.05)
-        if getattr(self, "root_layout", None) is not None:
-            Clock.schedule_once(lambda _dt: self.root_layout._place_restore_fab(), 0.05)
 
     def select_library_folder(self, folder_id: str) -> None:
         self._library_folder = str(folder_id or LIBRARY_ALL)
