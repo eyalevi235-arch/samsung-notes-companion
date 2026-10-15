@@ -144,10 +144,7 @@ def layout_scale() -> float:
     """Scale chrome relative to the window, so phones keep usable tools."""
     unit = float(dp(1) or 1.0)
     width_dp = float(Window.width) / unit
-    scale = min(1.06, max(0.70, width_dp / 780.0))
-    if is_portrait_layout():
-        scale *= 0.84
-    return scale
+    return min(1.06, max(0.70, width_dp / 780.0))
 
 
 def is_portrait_layout() -> bool:
@@ -156,12 +153,12 @@ def is_portrait_layout() -> bool:
 
 def tool_icon_size() -> Tuple[float, float]:
     scale = layout_scale()
-    return (dp(36) * scale, dp(32) * scale)
+    return (dp(42) * scale, dp(38) * scale)
 
 
 def color_dot_size() -> Tuple[float, float]:
     scale = layout_scale()
-    return (dp(26) * scale, dp(26) * scale)
+    return (dp(30) * scale, dp(30) * scale)
 PASTE_HOLD_S = 1.0
 LIBRARY_ALL = "all"
 LIBRARY_UNFILED = "unfiled"
@@ -4365,25 +4362,20 @@ class RootLayout(FloatLayout):
         self.restore_fab = Button(
             text=mixed_markup("כלים"),
             markup=True,
-            font_size=dp(12),
+            font_size=dp(13),
             size_hint=(None, None),
-            size=(dp(64), dp(28)),
-            pos_hint={"center_x": 0.5, "top": 0.992},
+            size=(dp(72), dp(32)),
             background_normal="",
             background_down="",
-            background_color=(0.16, 0.17, 0.20, 0.94),
+            background_color=(0.18, 0.42, 0.86, 0.96),
             color=(1, 1, 1, 1),
         )
         self.restore_fab.bind(on_release=self.show_toolbar)
-        self.hud = FloatLayout(size_hint=(1, 1))
-        self.hud.add_widget(self.copy_chip)
-        self.hud.add_widget(self.paste_chip)
-        self.hud.add_widget(self.restore_fab)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
-        self.add_widget(self.hud)
+        Window.bind(size=lambda *_a: (self._place_restore_fab(), self.sync_floating_tools()))
         self.hide_copy_chip()
         self.hide_paste_chip()
         self.hide_text_overlay()
@@ -4418,16 +4410,45 @@ class RootLayout(FloatLayout):
         self.sync_floating_tools()
 
     def hide_copy_chip(self) -> None:
-        self.copy_chip.opacity = 0
-        self.copy_chip.disabled = True
-        self.copy_chip.pos_hint = {}
-        self.copy_chip.pos = (-2000.0, -2000.0)
+        self._hide_window_overlay(self.copy_chip)
 
     def hide_paste_chip(self) -> None:
-        self.paste_chip.opacity = 0
-        self.paste_chip.disabled = True
-        self.paste_chip.pos = (-2000.0, -2000.0)
+        self._hide_window_overlay(self.paste_chip)
         self._paste_target = None
+
+    def _editor_active(self) -> bool:
+        app = App.get_running_app()
+        manager = getattr(app, "_sm", None)
+        return manager is not None and str(manager.current) == "editor"
+
+    def _dock_window_overlay(self, widget: Widget, center_x: float, top: float) -> None:
+        widget.size_hint = (None, None)
+        widget.pos_hint = {}
+        if widget.parent is not None and widget.parent is not Window:
+            widget.parent.remove_widget(widget)
+        if widget.parent is None:
+            Window.add_widget(widget)
+        widget.center_x = float(center_x)
+        widget.top = float(top)
+        widget.opacity = 1
+        widget.disabled = False
+
+    def _hide_window_overlay(self, widget: Widget) -> None:
+        widget.opacity = 0
+        widget.disabled = True
+        widget.pos_hint = {}
+        widget.pos = (dp(8), float(Window.height) + dp(80))
+        if widget.parent is not None and widget.parent is not Window:
+            widget.parent.remove_widget(widget)
+        if widget.parent is None:
+            Window.add_widget(widget)
+
+    def hide_window_overlays(self) -> None:
+        self.hide_copy_chip()
+        self.hide_paste_chip()
+        fab = getattr(self, "restore_fab", None)
+        if fab is not None:
+            self._hide_window_overlay(fab)
 
     def _raise_overlay(self, widget: Widget) -> None:
         parent = widget.parent
@@ -4439,17 +4460,12 @@ class RootLayout(FloatLayout):
         fab = getattr(self, "restore_fab", None)
         if fab is None:
             return
-        if self.toolbar_visible:
-            fab.opacity = 0
-            fab.disabled = True
-            fab.pos_hint = {}
-            fab.pos = (-2000.0, -2000.0)
+        if self.toolbar_visible or not self._editor_active():
+            self._hide_window_overlay(fab)
             return
-        fab.size = (dp(64), dp(28))
-        fab.pos_hint = {"center_x": 0.5, "top": 0.992}
-        fab.opacity = 1
-        fab.disabled = False
-        self._raise_overlay(fab)
+        fab.size = (dp(72), dp(32))
+        fab.font_size = dp(13)
+        self._dock_window_overlay(fab, float(Window.width) / 2.0, float(Window.height) - dp(10))
 
     def _place_chip(
         self,
@@ -4483,7 +4499,7 @@ class RootLayout(FloatLayout):
 
     def sync_floating_tools(self, *_args: Any) -> None:
         app = App.get_running_app()
-        if str(getattr(app, "tool_mode", "")) != "lasso":
+        if not self._editor_active() or str(getattr(app, "tool_mode", "")) != "lasso":
             self.hide_copy_chip()
             return
         canvas = None
@@ -4498,27 +4514,23 @@ class RootLayout(FloatLayout):
             self.hide_copy_chip()
             return
         chip = self.copy_chip
-        chip.size_hint = (None, None)
-        chip.pos_hint = {}
-        chip.opacity = 1
-        chip.disabled = False
-        top = float(self.height) - dp(12)
-        if self.toolbar_visible and float(self.chrome.height) > 1:
-            top = min(top, float(self.chrome.y) - dp(8))
+        chip.size = (dp(148), dp(48))
+        top = float(Window.height) - dp(12)
+        if self.toolbar_visible:
+            win_x, win_y = self.chrome.to_window(self.chrome.x, self.chrome.y)
+            top = min(top, float(win_y) - dp(8))
         elif getattr(self, "restore_fab", None) is not None and self.restore_fab.opacity > 0:
             top = min(top, float(self.restore_fab.y) - dp(8))
-        chip.center_x = float(self.center_x)
-        chip.top = top
-        if chip.y < dp(8):
-            chip.y = dp(8)
-        self._raise_overlay(chip)
+        self._dock_window_overlay(chip, float(Window.width) / 2.0, top)
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
         if not getattr(app, "_clipboard", None):
             return
         self._paste_target = (canvas, x, y)
-        self._place_chip(self.paste_chip, canvas, x, y, lift=dp(16), side=0.0)
+        win_x, win_y = canvas.to_window(x, y)
+        self.paste_chip.size = (dp(48), dp(44))
+        self._dock_window_overlay(self.paste_chip, float(win_x), float(win_y) + dp(52))
 
     def _on_copy_chip(self, *_args: Any) -> None:
         App.get_running_app().copy_selection()
@@ -4864,17 +4876,6 @@ class RootLayout(FloatLayout):
         palette_btn = ToolIcon("palette", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: app.open_color_picker())
         row.add_widget(palette_btn)
         self.tool_buttons["palette"] = palette_btn
-        scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
-        scroller.add_widget(row)
-        host.add_widget(scroller)
-        glyphs = BoxLayout(
-            orientation="horizontal",
-            size_hint_x=None,
-            spacing=dp(2),
-            padding=(dp(4), 0),
-        )
-        glyphs.bind(minimum_width=glyphs.setter("width"))
-        self._slider_bar = glyphs
         self._slider_open = None
         self._slider_glyphs = {}
         for kind, amount in (
@@ -4888,8 +4889,10 @@ class RootLayout(FloatLayout):
                 trigger=lambda _g, name=kind: self.toggle_slider_editor(name),
             )
             self._slider_glyphs[kind] = glyph
-            glyphs.add_widget(glyph)
-        host.add_widget(glyphs)
+            row.add_widget(glyph)
+        scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
+        scroller.add_widget(row)
+        host.add_widget(scroller)
         hide_btn = ToolIcon("hide", on_dark=True, size=tool_icon_size(), trigger=self.hide_toolbar)
         host.add_widget(hide_btn)
         self.tool_buttons["hide"] = hide_btn
@@ -5541,12 +5544,16 @@ class SamsungNotesCompanionApp(App):
 
     def show_library(self, *_args: Any) -> None:
         self._autosave_library_doc()
+        if getattr(self, "root_layout", None) is not None:
+            self.root_layout.hide_window_overlays()
         self._sm.current = "library"
         self.library_screen.refresh()
 
     def show_editor(self, *_args: Any) -> None:
         self._sm.current = "editor"
         Clock.schedule_once(lambda _dt: self.clamp_view(), 0.05)
+        if getattr(self, "root_layout", None) is not None:
+            Clock.schedule_once(lambda _dt: self.root_layout._place_restore_fab(), 0.05)
 
     def select_library_folder(self, folder_id: str) -> None:
         self._library_folder = str(folder_id or LIBRARY_ALL)
