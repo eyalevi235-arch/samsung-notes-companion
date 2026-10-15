@@ -2284,8 +2284,9 @@ class SPenAnnotationCanvas(Widget):
                 return
             layout = getattr(app, "root_layout", None)
             touch.ud["paste_hold"] = True
+            origin = touch.ud.get("hold_origin") or (touch.x, touch.y)
             if layout is not None:
-                layout.show_paste_chip(self, touch.x, touch.y)
+                layout.show_paste_chip(self, float(origin[0]), float(origin[1]))
 
         self._paste_clock = Clock.schedule_once(_fire, PASTE_HOLD_S)
 
@@ -2874,7 +2875,7 @@ class SPenAnnotationCanvas(Widget):
         if touch.uid in getattr(app, "_pointers", {}):
             app._pointers[touch.uid] = (touch.x, touch.y)
         origin = touch.ud.get("hold_origin")
-        if origin is not None and math.hypot(touch.x - origin[0], touch.y - origin[1]) > dp(14):
+        if origin is not None and math.hypot(touch.x - origin[0], touch.y - origin[1]) > dp(24):
             self._cancel_paste_hold()
         if bool(getattr(app, "_multitouch", False)) or len(getattr(app, "_pointers", {})) >= 2:
             if len(app._pointers) >= 2:
@@ -4366,7 +4367,7 @@ class RootLayout(FloatLayout):
         self.lasso_bar = self._build_lasso_action_bar()
         self.chrome.add_widget(self.lasso_bar)
         self.copy_chip = SelectionBar()
-        self.paste_chip = ToolIcon("paste", on_dark=True, size=(dp(48), dp(44)), trigger=self._on_paste_chip)
+        self.paste_chip = self._build_paste_chip()
         self._paste_target: Optional[Tuple[Any, float, float]] = None
         self.text_overlay = self._build_text_overlay()
         self.page_scroll = PageScrollRail(width=dp(32))
@@ -4374,9 +4375,9 @@ class RootLayout(FloatLayout):
         self.page_scroll.bind(value=self._on_page_scroll)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
-        self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
+        self.add_widget(self.paste_chip)
         Window.bind(size=lambda *_a: self.sync_floating_tools())
         self.hide_copy_chip()
         self.hide_paste_chip()
@@ -4422,7 +4423,8 @@ class RootLayout(FloatLayout):
     def hide_paste_chip(self) -> None:
         self.paste_chip.opacity = 0
         self.paste_chip.disabled = True
-        self.paste_chip.pos = (dp(8), -dp(80))
+        self.paste_chip.pos_hint = {}
+        self.paste_chip.pos = (dp(8), -dp(160))
         self._paste_target = None
         if self.paste_chip.parent is None:
             self.add_widget(self.paste_chip)
@@ -4451,8 +4453,12 @@ class RootLayout(FloatLayout):
         lift: float = 12.0,
         side: float = 0.0,
     ) -> None:
-        win_x, win_y = widget.to_window(x, y)
-        local_x, local_y = self.to_widget(win_x, win_y)
+        # touch.pos matches widget.pos (parent space). Map into RootLayout
+        # without to_window, which is unreliable on Android SDL.
+        local_x = float(x) + float(self.workspace.x) - float(self.x)
+        local_y = float(y) + float(self.workspace.y) - float(self.y)
+        chip.size_hint = (None, None)
+        chip.pos_hint = {}
         chip.center_x = min(
             max(local_x + side, chip.width / 2.0 + dp(8)),
             self.width - chip.width / 2.0 - dp(8),
@@ -4466,7 +4472,12 @@ class RootLayout(FloatLayout):
             chip.y = max(work_bot + dp(8), work_top - chip.height - dp(8))
         chip.opacity = 1
         chip.disabled = False
-        self._raise_overlay(chip)
+        if chip.parent is not self:
+            if chip.parent is not None:
+                chip.parent.remove_widget(chip)
+            self.add_widget(chip)
+        else:
+            self._raise_overlay(chip)
 
     def _has_lasso_selection(self) -> bool:
         app = App.get_running_app()
@@ -4497,15 +4508,30 @@ class RootLayout(FloatLayout):
         finally:
             self._syncing_tools = False
 
+    def _build_paste_chip(self) -> Button:
+        button = Button(
+            text=mixed_markup("הדבק"),
+            markup=True,
+            font_size=dp(14),
+            size_hint=(None, None),
+            size=(dp(84), dp(40)),
+            pos_hint={},
+            background_normal="",
+            background_down="",
+            background_color=(0.18, 0.42, 0.86, 1),
+            color=(1, 1, 1, 1),
+        )
+        button.bind(on_release=self._on_paste_chip)
+        apply_hebrew_ui(button)
+        return button
+
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
         if not getattr(app, "_clipboard", None):
             return
         self._paste_target = (canvas, x, y)
-        self.paste_chip.size = (dp(48), dp(44))
-        if self.paste_chip.parent is None:
-            self.add_widget(self.paste_chip)
-        self._place_chip(self.paste_chip, canvas, x, y, lift=dp(52))
+        self.paste_chip.size = (dp(84), dp(40))
+        self._place_chip(self.paste_chip, canvas, x, y, lift=dp(28))
 
     def _on_copy_chip(self, *_args: Any) -> None:
         App.get_running_app().copy_selection()
