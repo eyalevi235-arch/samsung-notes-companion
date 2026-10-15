@@ -144,12 +144,24 @@ def layout_scale() -> float:
     """Scale chrome relative to the window, so phones keep usable tools."""
     unit = float(dp(1) or 1.0)
     width_dp = float(Window.width) / unit
-    return min(1.06, max(0.70, width_dp / 780.0))
+    scale = min(1.06, max(0.70, width_dp / 780.0))
+    if is_portrait_layout():
+        scale *= 0.84
+    return scale
+
+
+def is_portrait_layout() -> bool:
+    return float(Window.height) >= float(Window.width)
 
 
 def tool_icon_size() -> Tuple[float, float]:
     scale = layout_scale()
-    return (dp(42) * scale, dp(38) * scale)
+    return (dp(36) * scale, dp(32) * scale)
+
+
+def color_dot_size() -> Tuple[float, float]:
+    scale = layout_scale()
+    return (dp(26) * scale, dp(26) * scale)
 PASTE_HOLD_S = 1.0
 LIBRARY_ALL = "all"
 LIBRARY_UNFILED = "unfiled"
@@ -1712,8 +1724,11 @@ class SelectionBar(BoxLayout):
         kwargs.setdefault("padding", (dp(4), dp(4)))
         super().__init__(**kwargs)
         with self.canvas.before:
-            self._bg = Color(0.12, 0.12, 0.14, 0.94)
-            self._rect = Rectangle()
+            self._bg = Color(0.12, 0.12, 0.14, 0.96)
+            self._rect = RoundedRectangle(radius=[dp(10)])
+        with self.canvas.after:
+            self._edge_c = Color(1, 1, 1, 0.55)
+            self._edge = Line(width=1.2)
         self.bind(pos=self._sync, size=self._sync)
         app = App.get_running_app()
         for kind, handler in (
@@ -1727,6 +1742,16 @@ class SelectionBar(BoxLayout):
     def _sync(self, *_args: Any) -> None:
         self._rect.pos = self.pos
         self._rect.size = self.size
+        try:
+            self._edge.rounded_rectangle = (
+                self.x + dp(0.5),
+                self.y + dp(0.5),
+                self.width - dp(1),
+                self.height - dp(1),
+                dp(10),
+            )
+        except Exception:
+            pass
 
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if self.disabled or self.opacity <= 0:
@@ -1747,10 +1772,13 @@ class ColorDot(ButtonBehavior, Widget):
 
     def __init__(self, rgba: Rgba, **kwargs: Any) -> None:
         self.trigger = kwargs.pop("trigger", None)
+        self.slot = str(kwargs.pop("slot", "") or "")
         super().__init__(**kwargs)
         self.rgba = list(rgba)
         self.size_hint = (None, None)
-        self.size = (dp(36), dp(36))
+        self.size = color_dot_size()
+        self._hold: Any = None
+        self._long = False
         with self.canvas:
             self._fill = Color(*self.rgba)
             self._dot = Ellipse()
@@ -1759,6 +1787,22 @@ class ColorDot(ButtonBehavior, Widget):
         self.bind(pos=self._sync, size=self._sync, selected=self._sync, rgba=self._sync)
         Clock.schedule_once(lambda _dt: self._sync(), 0)
 
+    def _cancel_hold(self) -> None:
+        hold = self._hold
+        self._hold = None
+        if hold is not None:
+            try:
+                hold.cancel()
+            except Exception:
+                pass
+
+    def _on_hold(self, _dt: float) -> None:
+        self._hold = None
+        self._long = True
+        app = App.get_running_app()
+        if hasattr(app, "open_color_picker"):
+            app.open_color_picker(self.slot)
+
     def on_touch_down(self, touch: MotionEvent) -> bool:
         if self.disabled or self.opacity <= 0:
             return False
@@ -1766,11 +1810,30 @@ class ColorDot(ButtonBehavior, Widget):
             return False
         if not self.collide_point(*touch.pos):
             return False
-        trigger = getattr(self, "trigger", None)
-        if callable(trigger):
-            trigger(self)
-            return True
-        return super().on_touch_down(touch)
+        self._cancel_hold()
+        self._long = False
+        touch.grab(self)
+        self._hold = Clock.schedule_once(self._on_hold, 0.45)
+        return True
+
+    def on_touch_move(self, touch: MotionEvent) -> bool:
+        if touch.grab_current is not self:
+            return False
+        if not self.collide_point(*touch.pos):
+            self._cancel_hold()
+        return True
+
+    def on_touch_up(self, touch: MotionEvent) -> bool:
+        if touch.grab_current is not self:
+            return False
+        touch.ungrab(self)
+        held = self._long
+        self._cancel_hold()
+        if not held:
+            trigger = getattr(self, "trigger", None)
+            if callable(trigger):
+                trigger(self)
+        return True
 
     def _sync(self, *_args: Any) -> None:
         pad = dp(5)
@@ -2903,6 +2966,9 @@ class SPenAnnotationCanvas(Widget):
             else:
                 self._select_with_lasso(poly)
             self.redraw_all()
+            layout = getattr(App.get_running_app(), "root_layout", None)
+            if layout is not None and hasattr(layout, "sync_floating_tools"):
+                layout.sync_floating_tools()
             return True
         if touch.ud.get("erasing"):
             return True
@@ -4266,7 +4332,7 @@ class RootLayout(FloatLayout):
         self.side_panel = self.notes_canvas
         self.tool_buttons: Dict[str, Any] = {}
         self.color_dots: Dict[str, ColorDot] = {}
-        self.workspace = FloatLayout()
+        self.workspace = FloatLayout(size_hint=(None, None))
         self.pdf_canvas.size_hint = (None, None)
         self.notes_canvas.size_hint = (None, None)
         self.workspace.add_widget(self.pdf_canvas)
@@ -4296,19 +4362,28 @@ class RootLayout(FloatLayout):
         self.page_scroll = PageScrollRail(width=dp(32))
         self._scroll_syncing = False
         self.page_scroll.bind(value=self._on_page_scroll)
-        self.restore_fab = ToolIcon(
-            "restore",
-            on_dark=True,
-            size=tool_icon_size(),
-            trigger=self.show_toolbar,
+        self.restore_fab = Button(
+            text=mixed_markup("כלים"),
+            markup=True,
+            font_size=dp(12),
+            size_hint=(None, None),
+            size=(dp(64), dp(28)),
+            pos_hint={"center_x": 0.5, "top": 0.992},
+            background_normal="",
+            background_down="",
+            background_color=(0.16, 0.17, 0.20, 0.94),
+            color=(1, 1, 1, 1),
         )
+        self.restore_fab.bind(on_release=self.show_toolbar)
+        self.hud = FloatLayout(size_hint=(1, 1))
+        self.hud.add_widget(self.copy_chip)
+        self.hud.add_widget(self.paste_chip)
+        self.hud.add_widget(self.restore_fab)
         self.add_widget(self.workspace)
         self.add_widget(self.chrome)
-        self.add_widget(self.copy_chip)
-        self.add_widget(self.paste_chip)
         self.add_widget(self.text_overlay)
         self.add_widget(self.page_scroll)
-        self.add_widget(self.restore_fab)
+        self.add_widget(self.hud)
         self.hide_copy_chip()
         self.hide_paste_chip()
         self.hide_text_overlay()
@@ -4345,6 +4420,7 @@ class RootLayout(FloatLayout):
     def hide_copy_chip(self) -> None:
         self.copy_chip.opacity = 0
         self.copy_chip.disabled = True
+        self.copy_chip.pos_hint = {}
         self.copy_chip.pos = (-2000.0, -2000.0)
 
     def hide_paste_chip(self) -> None:
@@ -4354,9 +4430,10 @@ class RootLayout(FloatLayout):
         self._paste_target = None
 
     def _raise_overlay(self, widget: Widget) -> None:
-        if widget.parent is self:
-            self.remove_widget(widget)
-            self.add_widget(widget)
+        parent = widget.parent
+        if parent is not None:
+            parent.remove_widget(widget)
+            parent.add_widget(widget)
 
     def _place_restore_fab(self, *_args: Any) -> None:
         fab = getattr(self, "restore_fab", None)
@@ -4365,11 +4442,11 @@ class RootLayout(FloatLayout):
         if self.toolbar_visible:
             fab.opacity = 0
             fab.disabled = True
+            fab.pos_hint = {}
             fab.pos = (-2000.0, -2000.0)
             return
-        fab.size = tool_icon_size()
-        fab.center_x = float(self.center_x)
-        fab.top = float(self.top) - dp(8)
+        fab.size = (dp(64), dp(28))
+        fab.pos_hint = {"center_x": 0.5, "top": 0.992}
         fab.opacity = 1
         fab.disabled = False
         self._raise_overlay(fab)
@@ -4420,8 +4497,21 @@ class RootLayout(FloatLayout):
         if canvas is None or box is None:
             self.hide_copy_chip()
             return
-        sx, sy = canvas.from_doc(box[0] + box[2] / 2.0, box[1] + box[3])
-        self._place_chip(self.copy_chip, canvas, sx, sy, lift=dp(56), side=0.0)
+        chip = self.copy_chip
+        chip.size_hint = (None, None)
+        chip.pos_hint = {}
+        chip.opacity = 1
+        chip.disabled = False
+        top = float(self.height) - dp(12)
+        if self.toolbar_visible and float(self.chrome.height) > 1:
+            top = min(top, float(self.chrome.y) - dp(8))
+        elif getattr(self, "restore_fab", None) is not None and self.restore_fab.opacity > 0:
+            top = min(top, float(self.restore_fab.y) - dp(8))
+        chip.center_x = float(self.center_x)
+        chip.top = top
+        if chip.y < dp(8):
+            chip.y = dp(8)
+        self._raise_overlay(chip)
 
     def show_paste_chip(self, canvas: SPenAnnotationCanvas, x: float, y: float) -> None:
         app = App.get_running_app()
@@ -4761,11 +4851,17 @@ class RootLayout(FloatLayout):
             button = ToolIcon(kind, on_dark=True, size=tool_icon_size(), trigger=handler)
             row.add_widget(button)
             self.tool_buttons[key] = button
+        swatches = getattr(app, "ink_swatches", None) or {name: list(color) for name, color in INK_COLORS}
         for key, rgba in INK_COLORS:
-            dot = ColorDot(rgba, trigger=lambda _dot, name=key: app.set_ink_color(name))
+            color = tuple(swatches.get(key) or rgba)
+            dot = ColorDot(
+                color,
+                slot=key,
+                trigger=lambda _dot, name=key: app.set_ink_color(name),
+            )
             row.add_widget(dot)
             self.color_dots[key] = dot
-        palette_btn = ToolIcon("palette", on_dark=True, size=tool_icon_size(), trigger=app.open_color_picker)
+        palette_btn = ToolIcon("palette", on_dark=True, size=tool_icon_size(), trigger=lambda *_a: app.open_color_picker())
         row.add_widget(palette_btn)
         self.tool_buttons["palette"] = palette_btn
         scroller = ScrollView(do_scroll_y=False, do_scroll_x=True, bar_width=dp(2))
@@ -5017,8 +5113,13 @@ class RootLayout(FloatLayout):
         for button in self.tool_buttons.values():
             if isinstance(button, ToolIcon):
                 button.size = icon
-        for dot in self.color_dots.values():
-            dot.size = (dp(30) * scale, dp(30) * scale)
+        visible = self._visible_swatch_keys()
+        for key, dot in self.color_dots.items():
+            show = key in visible
+            dot.size = color_dot_size() if show else (0, 0)
+            dot.opacity = 1 if show else 0
+            dot.disabled = not show
+            dot.width = color_dot_size()[0] if show else 0
         if hasattr(self, "title_button"):
             self.title_button.font_size = dp(15) * scale
         if hasattr(self, "status_label"):
@@ -5055,6 +5156,7 @@ class RootLayout(FloatLayout):
             self._toolbar_host.height = 0
         self._apply_chrome_metrics()
         self._fit_workspace()
+        Clock.schedule_once(lambda _dt: self._place_restore_fab(), 0)
         Clock.schedule_once(lambda _dt: App.get_running_app().clamp_view(), 0)
 
     def show_toolbar(self, *_args: Any) -> None:
@@ -5091,16 +5193,25 @@ class RootLayout(FloatLayout):
                 continue
             if isinstance(button, ToolIcon):
                 button.selected = mapping.get(key, False)
-        for key, rgba in INK_COLORS:
-            dot = self.color_dots.get(key)
-            if dot is None:
+        swatches = getattr(app, "ink_swatches", {}) or {}
+        for key, dot in self.color_dots.items():
+            rgba = swatches.get(key) or dict(INK_COLORS).get(key)
+            if rgba is None:
                 continue
             rgb = tuple(app.current_color[:3])
-            dot.selected = drawing and rgb == tuple(rgba[:3])
+            dot.selected = drawing and rgb == tuple(list(rgba)[:3])
+
+    def _visible_swatch_keys(self) -> List[str]:
+        keys = [name for name, _color in INK_COLORS]
+        if is_portrait_layout() and len(keys) > 4:
+            return keys[:4]
+        return keys
 
     def apply_orientation(self, *_args: Any) -> None:
         self._apply_chrome_metrics()
         self._fit_workspace()
+        self.sync_floating_tools()
+        self._place_restore_fab()
 
     def dock_notes(self) -> None:
         work_x, work_y = float(self.workspace.x), float(self.workspace.y)
@@ -5219,6 +5330,8 @@ class SamsungNotesCompanionApp(App):
         self.ui_theme = "dark"
         self.doc_sort = "recent"
         self._load_ui_prefs()
+        if not getattr(self, "ink_swatches", None):
+            self.ink_swatches = {name: list(color) for name, color in INK_COLORS}
         self.library_screen = LibraryScreen(name="library")
         editor = Screen(name="editor")
         self.root_layout = RootLayout()
@@ -5307,13 +5420,35 @@ class SamsungNotesCompanionApp(App):
         self.ui_theme = "light" if theme == "light" else "dark"
         sort_key = str(payload.get("sort") or "recent")
         self.doc_sort = "name" if sort_key == "name" else "recent"
+        swatches = {name: list(color) for name, color in INK_COLORS}
+        saved = payload.get("ink_swatches") or {}
+        if isinstance(saved, dict):
+            for name, _color in INK_COLORS:
+                raw = saved.get(name)
+                if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                    swatches[name] = [
+                        max(0.0, min(1.0, float(raw[0]))),
+                        max(0.0, min(1.0, float(raw[1]))),
+                        max(0.0, min(1.0, float(raw[2]))),
+                        1.0,
+                    ]
+        self.ink_swatches = swatches
 
     def _save_ui_prefs(self) -> None:
         try:
             path = self._prefs_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps({"theme": self.ui_theme, "sort": self.doc_sort}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "theme": self.ui_theme,
+                        "sort": self.doc_sort,
+                        "ink_swatches": {
+                            name: list(color) for name, color in (self.ink_swatches or {}).items()
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
         except Exception:
@@ -8560,14 +8695,20 @@ class SamsungNotesCompanionApp(App):
         self.is_eraser = False
         self.root_layout.refresh_tool_styles()
 
-    def open_color_picker(self, *_args: Any) -> None:
-        picker = InkColorPicker(self.current_color)
+    def open_color_picker(self, slot: Any = None, *_args: Any) -> None:
+        key = slot if isinstance(slot, str) and slot in (self.ink_swatches or {}) else None
+        start = list((self.ink_swatches or {}).get(key) or self.current_color)
+        picker = InkColorPicker(start)
         body = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(12))
         buttons = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         popup = Popup(title="", content=body, size_hint=(0.84, 0.64))
 
         def _ok(_btn: Button) -> None:
-            self.set_custom_color(picker.rgb())
+            rgb = picker.rgb()
+            if key:
+                self.set_swatch_color(key, rgb)
+            else:
+                self.set_custom_color(rgb)
             popup.dismiss()
 
         ok_btn = Button(text="אישור")
@@ -9425,13 +9566,23 @@ class SamsungNotesCompanionApp(App):
         self.root_layout.refresh_tool_styles()
 
     def set_ink_color(self, name: str, *_args: Any) -> None:
-        color_map = dict(INK_COLORS)
-        color = color_map.get(name, COLOR_BLACK)
-        self.current_color = color
+        color = (self.ink_swatches or {}).get(name) or dict(INK_COLORS).get(name, COLOR_BLACK)
+        self.current_color = tuple(list(color)[:3] + [1.0])
         if self.tool_mode in {"none", "eraser"}:
             self.tool_mode = "pen"
         self.is_eraser = False
         self.root_layout.refresh_tool_styles()
+
+    def set_swatch_color(self, name: str, rgb: Sequence[float], *_args: Any) -> None:
+        red, green, blue = [max(0.0, min(1.0, float(channel))) for channel in list(rgb)[:3]]
+        color = [red, green, blue, 1.0]
+        self.ink_swatches = dict(self.ink_swatches or {})
+        self.ink_swatches[name] = color
+        dot = self.root_layout.color_dots.get(name)
+        if dot is not None:
+            dot.rgba = color
+        self.set_ink_color(name)
+        self._save_ui_prefs()
 
     def set_color_black(self, *_args: Any) -> None:
         self.set_ink_color("black")
